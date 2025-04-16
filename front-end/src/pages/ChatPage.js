@@ -174,40 +174,81 @@ const ChatPage = () => {
         }
       } else {
         // If no sessions, create a new one
+        console.log('No existing sessions found, creating a new session');
         await handleNewSession();
       }
     } catch (err) {
       console.error('Failed to fetch chat sessions:', err);
       let errorMessage = 'Failed to load chat sessions. Creating a new session.';
+      let errorType = 'session_load_error';
+      let shouldCreateFallback = true;
+      let shouldDisplayError = false;
       
       if (err.response) {
         const status = err.response.status;
         if (status === 401) {
           errorMessage = 'Authentication required to access chat sessions.';
+          errorType = 'auth_error';
+          shouldDisplayError = true;
           // Redirect to login page if unauthorized
           navigate('/login');
           return;
+        } else if (status === 403) {
+          errorMessage = 'You do not have permission to access these chat sessions.';
+          errorType = 'permission_error';
+          shouldDisplayError = true;
+        } else if (status === 404) {
+          errorMessage = 'User chat history not found. Starting a new session.';
+          errorType = 'not_found_error';
         } else if (status === 500) {
           errorMessage = 'Server error while loading sessions. Creating a new session.';
+          errorType = 'server_error';
+        } else if (status === 400) {
+          // Check if this is a specific error related to missing chat history
+          const errorDetail = err.response.data?.detail || '';
+          if (errorDetail.includes('history') || errorDetail.includes('sessions')) {
+            errorMessage = 'No chat history found. Starting a new conversation.';
+            errorType = 'no_history_error';
+          }
         }
       } else if (err.request) {
         errorMessage = 'Network error. Unable to connect to the chat server.';
+        errorType = 'network_error';
       }
       
-      setError(errorMessage);
+      // Only set the error in state if we should display it
+      if (shouldDisplayError) {
+        setError(errorMessage);
+        
+        // Show toast notification for better user feedback
+        toast({
+          title: 'Chat History',
+          description: errorMessage,
+          status: 'info',
+          duration: 5000,
+          isClosable: true,
+        });
+      } else {
+        // Clear any existing error
+        setError(null);
+      }
       
       // Only create fallback sessions if not redirecting due to auth error
-      const fallbackSessionId = Date.now().toString();
-      setSessions([{
-        id: fallbackSessionId,
-        title: "New Conversation",
-        date: "Just now",
-        preview: "",
-        messages: [initialMessage],
-      }]);
-      
-      setActiveSessionId(fallbackSessionId);
-      setMessages([initialMessage]);
+      // and if we should create a fallback
+      if (shouldCreateFallback) {
+        console.log('Creating fallback session due to error:', errorType);
+        const fallbackSessionId = Date.now().toString();
+        setSessions([{
+          id: fallbackSessionId,
+          title: "New Conversation",
+          date: "Just now",
+          preview: "",
+          messages: [initialMessage],
+        }]);
+        
+        setActiveSessionId(fallbackSessionId);
+        setMessages([initialMessage]);
+      }
     }
   };
 
@@ -415,9 +456,17 @@ const ChatPage = () => {
     }
     
     try {
+      console.log('Creating new chat session via API...');
       // Create a new session
       const response = await chatService.createSession();
       const newSessionId = response.session_id;
+      
+      if (!newSessionId) {
+        console.error('No session ID returned from createSession API call');
+        throw new Error('Invalid session ID returned from server');
+      }
+      
+      console.log('New session created successfully:', newSessionId);
       
       // Add the new session to our list
       const newSession = {
@@ -436,35 +485,93 @@ const ChatPage = () => {
     } catch (err) {
       console.error('Failed to create new session:', err);
       let errorMessage = 'Failed to create a new conversation.';
+      let retryAttempted = false;
+      let shouldDisplayError = false;
       
       if (err.response) {
         const status = err.response.status;
         if (status === 401) {
           errorMessage = 'Authentication required to create a new session.';
+          shouldDisplayError = true;
           // Redirect to login page if unauthorized
           navigate('/login');
-          return;
+          return null;
+        } else if (status === 429) {
+          errorMessage = 'Too many requests. Please try again in a moment.';
+          shouldDisplayError = true;
         } else if (status === 500) {
           errorMessage = 'Server error while creating a new session.';
+          
+          // Try once more if server error
+          if (!retryAttempted) {
+            retryAttempted = true;
+            console.log('Retrying session creation after server error...');
+            try {
+              // Short delay before retry
+              await new Promise(resolve => setTimeout(resolve, 500));
+              const retryResponse = await chatService.createSession();
+              const newSessionId = retryResponse.session_id;
+              
+              if (newSessionId) {
+                // Success on retry
+                const newSession = {
+                  id: newSessionId,
+                  title: "New Conversation",
+                  date: new Date().toLocaleString(),
+                  preview: "",
+                  message_count: 0
+                };
+                
+                setSessions([newSession, ...sessions]);
+                setActiveSessionId(newSessionId);
+                setMessages([initialMessage]);
+                
+                setIsLoading(false);
+                return newSessionId;
+              }
+            } catch (retryErr) {
+              console.error('Retry also failed:', retryErr);
+            }
+          }
         }
       } else if (err.request) {
         errorMessage = 'Network error. Unable to connect to the chat server.';
       }
       
-      setError(errorMessage);
+      // Only set the error if we should display it
+      if (shouldDisplayError) {
+        setError(errorMessage);
+        
+        // Show toast notification for better user feedback
+        toast({
+          title: 'New Chat Session',
+          description: errorMessage,
+          status: 'warning',
+          duration: 5000,
+          isClosable: true,
+        });
+      } else {
+        // Clear any existing error
+        setError(null);
+      }
       
-      // Create a fallback session ID
-      const fallbackSessionId = Date.now().toString();
-      setSessions([{
+      // Create a fallback session ID with a consistent format
+      const fallbackSessionId = `fallback-${Date.now()}`;
+      console.log('Creating fallback session with ID:', fallbackSessionId);
+      
+      const fallbackSession = {
         id: fallbackSessionId,
         title: "New Conversation",
-        date: "Just now",
+        date: new Date().toLocaleString(),
         preview: "",
-        messages: [initialMessage],
-      }]);
+        is_fallback: true, // Mark this as a fallback session
+      };
       
+      setSessions([fallbackSession, ...sessions]);
       setActiveSessionId(fallbackSessionId);
       setMessages([initialMessage]);
+      
+      return fallbackSessionId;
     } finally {
       setIsLoading(false);
     }
@@ -663,7 +770,7 @@ const ChatPage = () => {
 
           {/* Chat Messages */}
           <Box flex="1" overflowY="auto" bg={chatBg} p="4">
-            {error && (
+            {error && error.trim() !== '' && (
               <Box bg={errorBg} borderWidth="1px" borderColor={errorBorderColor} color={errorColor} px="4" py="2" borderRadius="md" mb="4">
                 <Text>{error}</Text>
               </Box>

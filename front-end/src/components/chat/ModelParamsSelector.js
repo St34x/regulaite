@@ -128,7 +128,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
     if (JSON.stringify(updatedParams) !== JSON.stringify(params)) {
       setParams(updatedParams);
     }
-  }, [initialParams, params]);
+  // Remove params from the dependency array to prevent infinite loops
+  }, [initialParams]);
 
   // Notify parent when params change
   useEffect(() => {

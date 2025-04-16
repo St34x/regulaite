@@ -1153,46 +1153,80 @@ async def get_chat_sessions(
         conn = await get_db_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # Base query to get distinct sessions with their latest message time
-        query = """
-            SELECT session_id, user_id,
-                   MAX(timestamp) as last_message_time,
-                   COUNT(*) as message_count
-            FROM chat_history
-            WHERE user_id = ?
-            GROUP BY session_id, user_id
-            ORDER BY last_message_time DESC
-            LIMIT ? OFFSET ?
-        """
-        params = [user_id, limit, offset]
-
-        cursor.execute(query, params)
-        sessions = cursor.fetchall()
-
-        # For each session, fetch the first message to use as a title
-        for session in sessions:
-            # Convert datetime to string
-            if isinstance(session["last_message_time"], datetime):
-                session["last_message_time"] = session["last_message_time"].isoformat()
-                
-            title_query = """
-                SELECT message_text
-                FROM chat_history
-                WHERE session_id = ?
-                ORDER BY timestamp ASC
-                LIMIT 1
+        # Check if the chat_sessions table exists
+        try:
+            cursor.execute("SHOW TABLES LIKE 'chat_sessions'")
+            table_exists = cursor.fetchone() is not None
+        except:
+            table_exists = False
+            
+        if table_exists:
+            # Query the dedicated sessions table if it exists
+            query = """
+                SELECT 
+                    session_id, 
+                    user_id,
+                    title,
+                    created_at,
+                    last_message_time,
+                    preview,
+                    message_count
+                FROM chat_sessions
+                WHERE user_id = ?
+                ORDER BY last_message_time DESC
+                LIMIT ? OFFSET ?
             """
-            cursor.execute(title_query, [session["session_id"]])
-            first_message = cursor.fetchone()
+            params = [user_id, limit, offset]
+            
+            cursor.execute(query, params)
+            sessions = cursor.fetchall()
+        else:
+            # Fallback to aggregating from chat_history (legacy approach)
+            query = """
+                SELECT session_id, user_id,
+                       MAX(timestamp) as last_message_time,
+                       COUNT(*) as message_count
+                FROM chat_history
+                WHERE user_id = ?
+                GROUP BY session_id, user_id
+                ORDER BY last_message_time DESC
+                LIMIT ? OFFSET ?
+            """
+            params = [user_id, limit, offset]
 
-            if first_message:
-                # Truncate long messages and use as session title
-                title = first_message["message_text"]
-                if len(title) > 100:
-                    title = title[:97] + "..."
-                session["title"] = title
-            else:
-                session["title"] = "Untitled Session"
+            cursor.execute(query, params)
+            sessions = cursor.fetchall()
+
+            # For each session, fetch the first message to use as a title
+            for session in sessions:
+                # Convert datetime to string
+                if isinstance(session["last_message_time"], datetime):
+                    session["last_message_time"] = session["last_message_time"].isoformat()
+                    
+                title_query = """
+                    SELECT message_text
+                    FROM chat_history
+                    WHERE session_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                """
+                cursor.execute(title_query, [session["session_id"]])
+                first_message = cursor.fetchone()
+
+                if first_message:
+                    # Truncate long messages and use as session title
+                    title = first_message["message_text"]
+                    if len(title) > 100:
+                        title = title[:97] + "..."
+                    session["title"] = title
+                else:
+                    session["title"] = "Untitled Session"
+
+        # Convert all datetime objects to ISO format strings
+        for session in sessions:
+            for key, value in session.items():
+                if isinstance(value, datetime):
+                    session[key] = value.isoformat()
 
         conn.close()
 
@@ -1458,6 +1492,31 @@ async def create_chat_session(
         
         # Generate a unique session ID
         session_id = f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
+        # Insert session into the chat_sessions table if it exists
+        conn = await get_db_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if the chat_sessions table exists
+            cursor.execute("SHOW TABLES LIKE 'chat_sessions'")
+            table_exists = cursor.fetchone() is not None
+            
+            if table_exists:
+                # Insert into the dedicated sessions table
+                cursor.execute(
+                    """
+                    INSERT INTO chat_sessions 
+                    (session_id, user_id, title, created_at, last_message_time)
+                    VALUES (?, ?, ?, NOW(), NOW())
+                    """,
+                    (session_id, user_id, "New Conversation")
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to insert into chat_sessions table: {str(e)}")
+        finally:
+            conn.close()
         
         # Return the session ID
         return {

@@ -78,6 +78,109 @@ CREATE TABLE IF NOT EXISTS users (
     INDEX idx_email (email)
 ) ENGINE=InnoDB;
 
+-- Table for storing chat sessions
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(255) NOT NULL UNIQUE,
+    user_id VARCHAR(255) NOT NULL,
+    title VARCHAR(255) DEFAULT 'New Conversation',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_message_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    preview TEXT,
+    message_count INT DEFAULT 0,
+    
+    INDEX idx_session_id (session_id),
+    INDEX idx_user_id (user_id),
+    INDEX idx_last_message_time (last_message_time)
+) ENGINE=InnoDB;
+
+-- Add any existing sessions to the table by querying chat_history
+INSERT IGNORE INTO chat_sessions (session_id, user_id, title, created_at, last_message_time, preview, message_count)
+SELECT 
+    session_id,
+    user_id,
+    CONCAT('Conversation ', LEFT(session_id, 8)) as title,
+    MIN(timestamp) as created_at,
+    MAX(timestamp) as last_message_time,
+    (
+        SELECT message_text 
+        FROM chat_history ch2 
+        WHERE ch2.session_id = ch1.session_id 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    ) as preview,
+    COUNT(*) as message_count
+FROM 
+    chat_history ch1
+GROUP BY 
+    session_id, user_id;
+
+-- Table for storing feedback on agent responses
+CREATE TABLE IF NOT EXISTS agent_feedback (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    agent_id VARCHAR(64) NOT NULL,
+    session_id VARCHAR(64) NOT NULL,
+    message_id VARCHAR(64) DEFAULT '',
+    rating INT NOT NULL,
+    feedback_text TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    context_used BOOLEAN,
+    model VARCHAR(64),
+    
+    INDEX (agent_id),
+    INDEX (session_id)
+);
+
+-- Table for tracking agent executions
+CREATE TABLE IF NOT EXISTS agent_executions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    agent_id VARCHAR(64) NOT NULL,
+    session_id VARCHAR(64) NOT NULL,
+    task TEXT NOT NULL,
+    model VARCHAR(64),
+    response_time_ms INT,
+    token_count INT,
+    prompt_token_count INT,
+    completion_token_count INT,
+    error BOOLEAN DEFAULT FALSE,
+    error_message TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    
+    INDEX (agent_id),
+    INDEX (session_id),
+    INDEX (timestamp)
+);
+
+-- Table for tracking agent execution progress (for long-running tasks)
+CREATE TABLE IF NOT EXISTS agent_progress (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    execution_id INT NOT NULL,
+    progress_percent FLOAT,
+    status VARCHAR(32) NOT NULL,
+    status_message TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (execution_id) REFERENCES agent_executions(id) ON DELETE CASCADE,
+    INDEX (execution_id)
+);
+
+-- Table for agent usage analytics
+CREATE TABLE IF NOT EXISTS agent_analytics (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    agent_id VARCHAR(64) NOT NULL,
+    day DATE NOT NULL,
+    execution_count INT DEFAULT 0,
+    avg_response_time_ms FLOAT,
+    avg_rating FLOAT,
+    error_rate FLOAT,
+    unique_users INT DEFAULT 0,
+    success_rate FLOAT,
+    
+    UNIQUE KEY (agent_id, day),
+    INDEX (agent_id),
+    INDEX (day)
+);
+
 -- Grant privileges to regulaite_user
 GRANT ALL PRIVILEGES ON regulaite.* TO 'regulaite_user'@'%';
 FLUSH PRIVILEGES;

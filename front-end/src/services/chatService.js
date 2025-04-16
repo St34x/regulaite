@@ -63,14 +63,53 @@ const chatService = {
       if (!userId) {
         const userData = authService.getCurrentUserData();
         userId = userData?.user_id;
+        
+        // Additional logging to help diagnose issues
+        if (!userId) {
+          console.warn('No user ID available from getCurrentUserData()', userData);
+        } else {
+          console.log('Fetching chat sessions for user ID:', userId);
+        }
       }
       
       const response = await api.get(`/chat/sessions`, {
         params: { user_id: userId, limit, offset },
+        // Add timeout to prevent long-hanging requests
+        timeout: 10000
       });
+      
+      // Log response status and data shape for debugging
+      console.log(`Sessions response status: ${response.status}, found ${response.data.sessions?.length || 0} sessions`);
+      
+      // Check if we have valid sessions in the response
+      if (!response.data.sessions) {
+        console.warn('API response missing sessions array:', response.data);
+        return [];
+      }
+      
       return response.data.sessions || [];
     } catch (error) {
+      // Enhanced error logging with more details
       console.error('Error fetching chat sessions:', error);
+      
+      // Check if this is a 404 error, which could mean no sessions yet
+      if (error.response && error.response.status === 404) {
+        console.log('No sessions found for user - likely a new user');
+        // Return empty array instead of throwing for new users
+        return [];
+      }
+      
+      // Check for network errors that might be transient
+      if (!error.response && error.request) {
+        console.error('Network error when fetching sessions - no response received');
+      }
+      
+      // Check for timeout
+      if (error.code === 'ECONNABORTED') {
+        console.error('Request timeout when fetching sessions');
+      }
+      
+      // Re-throw the error to be handled by the calling component
       throw error;
     }
   },
@@ -324,6 +363,9 @@ const chatService = {
         const userData = authService.getCurrentUserData();
         if (userData) {
           userId = userData.user_id || userData.sub || userData.id || userData.userId;
+          console.log('Creating session for user ID:', userId);
+        } else {
+          console.warn('No user data available when creating session');
         }
 
         // If still no userId, try to get it from the token directly
@@ -333,19 +375,68 @@ const chatService = {
             try {
               const decoded = jwtDecode(token);
               userId = decoded.sub || decoded.user_id || decoded.id || decoded.userId;
+              console.log('Extracted user ID from token:', userId);
             } catch (e) {
               console.warn('Could not extract user ID from token', e);
             }
+          } else {
+            console.warn('No auth token found when creating session');
           }
         }
       }
       
+      // If we still don't have a user ID, generate a temporary one
+      // This ensures the API call doesn't fail just because of missing user ID
+      if (!userId) {
+        userId = `temp-${Date.now()}`;
+        console.warn('Using temporary user ID for session creation:', userId);
+      }
+      
       const response = await api.post(`/chat/sessions`, {
         user_id: userId,
+      }, {
+        // Add timeout to prevent long-hanging requests
+        timeout: 10000
       });
+      
+      // Validate the response contains a session ID
+      if (!response.data || !response.data.session_id) {
+        console.error('Invalid response from create session API:', response.data);
+        throw new Error('Server returned invalid session data');
+      }
+      
       return response.data;
     } catch (error) {
       console.error('Error creating chat session:', error);
+      
+      // Check for specific error types for better handling
+      if (error.response) {
+        const status = error.response.status;
+        // For 401/403 errors, we should clear the token and redirect to login
+        if (status === 401 || status === 403) {
+          console.error('Authentication error when creating session:', status);
+        } else if (status === 429) {
+          console.error('Rate limit exceeded when creating session');
+        } else if (status === 500) {
+          console.error('Server error when creating session:', error.response.data);
+        }
+        
+        // Add more specific error message to the error object
+        error.sessionCreationFailed = true;
+        error.detailedMessage = error.response.data?.detail || `Server returned ${status}`;
+      } else if (error.request) {
+        console.error('Network error when creating session - no response received');
+        // Add network-specific error info
+        error.sessionCreationFailed = true;
+        error.isNetworkError = true;
+        error.detailedMessage = 'Network error: Could not reach the server';
+      } else if (error.code === 'ECONNABORTED') {
+        console.error('Request timeout when creating session');
+        error.sessionCreationFailed = true;
+        error.isTimeoutError = true;
+        error.detailedMessage = 'Request timed out: Server took too long to respond';
+      }
+      
       throw error;
     }
   },
