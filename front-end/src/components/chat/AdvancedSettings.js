@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Box, 
   VStack, 
@@ -17,7 +17,6 @@ import {
   TabPanels,
   Tab,
   TabPanel,
-  Badge,
   useColorModeValue
 } from '@chakra-ui/react';
 
@@ -30,7 +29,7 @@ import DecisionTreeVisualizer from './DecisionTreeVisualizer';
  * and decision tree visualization into a drawer
  */
 const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings = {} }) => {
-  // Default settings
+  // Default settings - never changes
   const defaultSettings = {
     agent: {
       use_agent: false,
@@ -48,93 +47,81 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
     }
   };
   
-  // Use ref to prevent unnecessary updates
-  const settingsRef = useRef(null);
-  const previousOpenState = useRef(isOpen);
-  
-  // Local draft settings that will be applied on drawer close
-  const [draftSettings, setDraftSettings] = useState({
-    agent: { ...defaultSettings.agent },
-    llm: { ...defaultSettings.llm }
-  });
-  
-  // Initialize settings when the drawer opens
-  useEffect(() => {
-    // Only initialize settings when drawer opens to avoid unnecessary updates
-    if (isOpen && !previousOpenState.current) {
-      const mergedSettings = {
-        agent: { ...defaultSettings.agent, ...(initialSettings.agent || {}) },
-        llm: { ...defaultSettings.llm, ...(initialSettings.llm || {}) }
-      };
-      setDraftSettings(mergedSettings);
-      settingsRef.current = JSON.stringify(mergedSettings);
-    }
-    
-    previousOpenState.current = isOpen;
-  }, [isOpen, initialSettings]);
+  // Local state
+  const [agentSettings, setAgentSettings] = useState({...defaultSettings.agent});
+  const [llmSettings, setLlmSettings] = useState({...defaultSettings.llm});
+  const [showTreeTab, setShowTreeTab] = useState(false);
   
   // Colors
   const accentColor = '#4415b6';
-  const badgeBg = useColorModeValue('purple.100', 'purple.800');
-  const badgeColor = useColorModeValue('purple.800', 'purple.100');
   const secondaryText = useColorModeValue('gray.600', 'gray.400');
+
+  // Initialize settings when drawer opens
+  useEffect(() => {
+    if (isOpen) {
+      // Initialize from props, with fallbacks
+      setAgentSettings({
+        ...defaultSettings.agent,
+        ...(initialSettings.agent || {})
+      });
+      
+      setLlmSettings({
+        ...defaultSettings.llm,
+        ...(initialSettings.llm || {})
+      });
+      
+      // Check if tree tab should be shown
+      setShowTreeTab(
+        initialSettings.agent?.use_tree_reasoning && 
+        initialSettings.agent?.tree_template
+      );
+    }
+  }, [isOpen, initialSettings]);
   
-  // Handle agent settings change (only updates draft)
-  const handleAgentChange = (agentSettings) => {
-    setDraftSettings(prev => ({
-      ...prev,
-      agent: agentSettings
-    }));
-  };
-  
-  // Handle LLM parameters change (only updates draft)
-  const handleParamsChange = (llmParams) => {
-    setDraftSettings(prev => ({
-      ...prev,
-      llm: llmParams
-    }));
-  };
-  
-  // Apply changes when clicking Apply button
+  // Handle Apply button click
   const handleApply = () => {
-    try {
-      const currentSettings = JSON.stringify(draftSettings);
-      // Only update if settings have changed
-      if (currentSettings !== settingsRef.current) {
-        onSettingsChange(draftSettings);
-        settingsRef.current = currentSettings;
-      }
-      onClose();
-    } catch (err) {
-      console.error("Error applying settings:", err);
-      onClose();
-    }
+    // Create a new combined settings object
+    const newSettings = {
+      agent: agentSettings,
+      llm: llmSettings
+    };
+    
+    // Send it to the parent component
+    onSettingsChange(newSettings);
+    
+    // Close the drawer
+    onClose();
   };
 
-  // Handle drawer close event - apply current draft settings
-  const handleClose = () => {
-    handleApply();
-  };
-
-  // Reset to defaults
+  // Handle Reset button click
   const handleReset = () => {
-    try {
-      const resetSettings = { ...defaultSettings };
-      setDraftSettings(resetSettings);
-      onSettingsChange(resetSettings);
-      settingsRef.current = JSON.stringify(resetSettings);
-      onClose();
-    } catch (err) {
-      console.error("Error resetting settings:", err);
-      onClose();
-    }
+    // Reset to defaults
+    setAgentSettings({...defaultSettings.agent});
+    setLlmSettings({...defaultSettings.llm});
+    
+    // Apply the defaults
+    onSettingsChange({...defaultSettings});
+    
+    // Close the drawer
+    onClose();
+  };
+  
+  // Agent selector only updates local state
+  const handleAgentChange = (newAgentSettings) => {
+    setAgentSettings(newAgentSettings);
+    setShowTreeTab(newAgentSettings.use_tree_reasoning && newAgentSettings.tree_template);
+  };
+  
+  // Model parameters only update local state
+  const handleParamsChange = (newLlmParams) => {
+    setLlmSettings(newLlmParams);
   };
 
   return (
     <Drawer 
       isOpen={isOpen} 
       placement="right" 
-      onClose={handleClose} 
+      onClose={onClose} 
       size="md"
     >
       <DrawerOverlay />
@@ -152,7 +139,7 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
             <TabList>
               <Tab>AI Agent</Tab>
               <Tab>Model Parameters</Tab>
-              {draftSettings.agent.use_tree_reasoning && draftSettings.agent.tree_template && (
+              {showTreeTab && (
                 <Tab>Decision Tree</Tab>
               )}
             </TabList>
@@ -162,7 +149,7 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
               <TabPanel p={3}>
                 <AgentSelector 
                   onAgentChange={handleAgentChange} 
-                  initialAgent={draftSettings.agent} 
+                  initialAgent={agentSettings} 
                 />
               </TabPanel>
               
@@ -170,15 +157,15 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
               <TabPanel p={3}>
                 <ModelParamsSelector 
                   onParamsChange={handleParamsChange} 
-                  initialParams={draftSettings.llm} 
+                  initialParams={llmSettings} 
                 />
               </TabPanel>
               
               {/* Decision Tree Tab */}
-              {draftSettings.agent.use_tree_reasoning && draftSettings.agent.tree_template && (
+              {showTreeTab && (
                 <TabPanel p={3}>
                   <DecisionTreeVisualizer 
-                    treeId={draftSettings.agent.tree_template} 
+                    treeId={agentSettings.tree_template} 
                   />
                 </TabPanel>
               )}

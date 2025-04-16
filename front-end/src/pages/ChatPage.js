@@ -158,7 +158,7 @@ const ChatPage = () => {
               id: sessionId,
               title: session.title || "New Conversation",
               date: session.last_message_time ? new Date(session.last_message_time).toLocaleString() : "Just now",
-              preview: session.preview || "Start a new conversation",
+              preview: session.preview || "",
               message_count: session.message_count || 0
             });
           }
@@ -202,7 +202,7 @@ const ChatPage = () => {
         id: fallbackSessionId,
         title: "New Conversation",
         date: "Just now",
-        preview: "Start a new conversation",
+        preview: "",
         messages: [initialMessage],
       }]);
       
@@ -417,7 +417,7 @@ const ChatPage = () => {
         id: newSessionId,
         title: "New Conversation",
         date: new Date().toLocaleString(),
-        preview: "Start a new conversation",
+        preview: "",
         message_count: 0
       };
       
@@ -447,7 +447,17 @@ const ChatPage = () => {
       setError(errorMessage);
       
       // Create a fallback session ID
-      return 'fallback-' + Date.now().toString();
+      const fallbackSessionId = Date.now().toString();
+      setSessions([{
+        id: fallbackSessionId,
+        title: "New Conversation",
+        date: "Just now",
+        preview: "",
+        messages: [initialMessage],
+      }]);
+      
+      setActiveSessionId(fallbackSessionId);
+      setMessages([initialMessage]);
     } finally {
       setIsLoading(false);
     }
@@ -509,11 +519,13 @@ const ChatPage = () => {
     // Update the sessions list with new message information
     const updatedSessions = sessions.map(session => {
       if (session.id === sessionId) {
-        // Calculate preview text from the last user message
-        const userMessages = updatedMessages.filter(msg => msg.role === 'user');
-        const preview = userMessages.length > 0 
-          ? userMessages[userMessages.length - 1].content.substring(0, 60) + (userMessages[userMessages.length - 1].content.length > 60 ? '...' : '') 
-          : 'New conversation';
+        // Get the last message for preview (from either user or assistant)
+        const lastMessage = updatedMessages.length > 0 ? updatedMessages[updatedMessages.length - 1] : null;
+        
+        // Create preview text from the last message
+        const preview = lastMessage 
+          ? lastMessage.content.substring(0, 60) + (lastMessage.content.length > 60 ? '...' : '') 
+          : '';
         
         return {
           ...session,

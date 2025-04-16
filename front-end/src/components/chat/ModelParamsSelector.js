@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Box, 
   FormControl, 
@@ -21,7 +21,8 @@ import {
   AccordionIcon,
   HStack,
   Text,
-  VStack
+  VStack,
+  useColorModeValue
 } from '@chakra-ui/react';
 import { InfoIcon } from '@chakra-ui/icons';
 import axios from 'axios';
@@ -32,6 +33,16 @@ const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
  * Component for selecting and configuring LLM parameters
  */
 const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
+  // Color mode values
+  const bgColor = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.600');
+  const inputBgColor = useColorModeValue('white', 'gray.700');
+  const labelColor = useColorModeValue('gray.700', 'gray.300');
+  const textColor = useColorModeValue('gray.800', 'gray.100');
+  const loadingTextColor = useColorModeValue('gray.600', 'gray.300');
+  const errorBgColor = useColorModeValue('red.50', 'red.900');
+  const errorTextColor = useColorModeValue('red.600', 'red.200');
+
   const [config, setConfig] = useState(null);
   const [params, setParams] = useState({
     model: initialParams.model || 'gpt-4',
@@ -44,13 +55,22 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
   
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const isInitialLoadRef = useRef(true);
 
-  // Fetch available models and default parameters
+  // Fetch available models and default parameters - only runs once
   useEffect(() => {
+    // Skip API call if we've already loaded the config
+    if (!isInitialLoadRef.current) {
+      return;
+    }
+    
+    const controller = new AbortController();
     const fetchConfig = async () => {
       setIsLoading(true);
       try {
-        const response = await axios.get(`${API_URL}/config`);
+        const response = await axios.get(`${API_URL}/config`, {
+          signal: controller.signal
+        });
         setConfig(response.data);
         
         // Update with defaults from config if available
@@ -66,16 +86,49 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
         }
         
         setError(null);
+        isInitialLoadRef.current = false;
       } catch (err) {
-        console.error('Error fetching config:', err);
-        setError('Failed to load model configuration.');
+        if (!axios.isCancel(err)) {
+          console.error('Error fetching config:', err);
+          setError('Failed to load model configuration.');
+        }
       } finally {
         setIsLoading(false);
       }
     };
 
     fetchConfig();
-  }, [initialParams]);
+    
+    // Cleanup function to abort fetch on unmount
+    return () => {
+      controller.abort();
+    };
+  // We're deliberately using an empty dependency array with a ref check to ensure this only runs once
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Handle updates to initialParams without triggering API calls
+  useEffect(() => {
+    // Skip if it's the initial render - that's handled by the first useEffect
+    if (isInitialLoadRef.current) {
+      return;
+    }
+    
+    // Update params when initialParams change
+    const updatedParams = {
+      model: initialParams.model || params.model,
+      temperature: initialParams.temperature !== undefined ? initialParams.temperature : params.temperature,
+      max_tokens: initialParams.max_tokens || params.max_tokens,
+      top_p: initialParams.top_p !== undefined ? initialParams.top_p : params.top_p,
+      frequency_penalty: initialParams.frequency_penalty !== undefined ? initialParams.frequency_penalty : params.frequency_penalty,
+      presence_penalty: initialParams.presence_penalty !== undefined ? initialParams.presence_penalty : params.presence_penalty
+    };
+    
+    // Only update if there are actual changes
+    if (JSON.stringify(updatedParams) !== JSON.stringify(params)) {
+      setParams(updatedParams);
+    }
+  }, [initialParams, params]);
 
   // Notify parent when params change
   useEffect(() => {
@@ -103,18 +156,35 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
   if (isLoading) {
     return (
       <Box p={2} opacity={0.7}>
-        <Text fontSize="sm">Loading model parameters...</Text>
+        <Text fontSize="sm" color={loadingTextColor}>Loading model parameters...</Text>
+      </Box>
+    );
+  }
+
+  if (error) {
+    return (
+      <Box p={3} borderWidth="1px" borderRadius="md" borderColor="red.300" bg={errorBgColor}>
+        <Text fontSize="sm" color={errorTextColor}>
+          {error} Using default parameters.
+        </Text>
       </Box>
     );
   }
 
   return (
-    <Box borderWidth="1px" borderRadius="md" p={3} bg="white" shadow="sm">
+    <Box 
+      borderWidth="1px" 
+      borderRadius="md" 
+      p={3} 
+      bg={bgColor} 
+      shadow="sm"
+      borderColor={borderColor}
+    >
       <Accordion allowToggle defaultIndex={[0]}>
         <AccordionItem border="none">
           <AccordionButton px={0} _hover={{ bg: 'transparent' }}>
             <Box flex="1" textAlign="left">
-              <Text fontWeight="medium" fontSize="sm">LLM Parameters</Text>
+              <Text fontWeight="medium" fontSize="sm" color={textColor}>LLM Parameters</Text>
             </Box>
             <AccordionIcon />
           </AccordionButton>
@@ -123,7 +193,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
             <VStack spacing={4} align="stretch">
               {/* Model Selection */}
               <FormControl>
-                <FormLabel htmlFor="model-select" fontSize="sm" mb={1}>
+                <FormLabel htmlFor="model-select" fontSize="sm" mb={1} color={labelColor}>
                   Model
                 </FormLabel>
                 <Select
@@ -131,6 +201,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                   value={params.model}
                   onChange={(e) => handleParamChange('model', e.target.value)}
                   size="sm"
+                  bg={inputBgColor}
+                  borderColor={borderColor}
                 >
                   {availableModels.map(model => (
                     <option key={model.id} value={model.id}>
@@ -143,7 +215,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
               {/* Temperature */}
               <FormControl>
                 <HStack justify="space-between" mb={1}>
-                  <FormLabel htmlFor="temperature-slider" fontSize="sm" mb={0}>
+                  <FormLabel htmlFor="temperature-slider" fontSize="sm" mb={0} color={labelColor}>
                     Temperature
                   </FormLabel>
                   <Tooltip label="Controls randomness: lower values are more focused, higher values are more creative" placement="top">
@@ -179,6 +251,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                     max={2}
                     size="xs"
                     maxW="60px"
+                    bg={inputBgColor}
+                    borderColor={borderColor}
                   >
                     <NumberInputField />
                     <NumberInputStepper>
@@ -192,7 +266,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
               {/* Max Tokens */}
               <FormControl>
                 <HStack justify="space-between" mb={1}>
-                  <FormLabel htmlFor="max-tokens-input" fontSize="sm" mb={0}>
+                  <FormLabel htmlFor="max-tokens-input" fontSize="sm" mb={0} color={labelColor}>
                     Max Tokens
                   </FormLabel>
                   <Tooltip label="Maximum number of tokens (words/characters) in the response" placement="top">
@@ -212,6 +286,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                   max={8192}
                   step={1}
                   size="sm"
+                  bg={inputBgColor}
+                  borderColor={borderColor}
                 >
                   <NumberInputField />
                   <NumberInputStepper>
@@ -224,7 +300,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
               {/* Top P */}
               <FormControl>
                 <HStack justify="space-between" mb={1}>
-                  <FormLabel htmlFor="top-p-slider" fontSize="sm" mb={0}>
+                  <FormLabel htmlFor="top-p-slider" fontSize="sm" mb={0} color={labelColor}>
                     Top P
                   </FormLabel>
                   <Tooltip label="Controls diversity: 0.1 means only consider tokens with the top 10% probability" placement="top">
@@ -260,6 +336,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                     max={1}
                     size="xs"
                     maxW="60px"
+                    bg={inputBgColor}
+                    borderColor={borderColor}
                   >
                     <NumberInputField />
                     <NumberInputStepper>
@@ -273,7 +351,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
               {/* Frequency Penalty */}
               <FormControl>
                 <HStack justify="space-between" mb={1}>
-                  <FormLabel htmlFor="freq-penalty-slider" fontSize="sm" mb={0}>
+                  <FormLabel htmlFor="freq-penalty-slider" fontSize="sm" mb={0} color={labelColor}>
                     Frequency Penalty
                   </FormLabel>
                   <Tooltip label="Reduces repetition by penalizing tokens that have already appeared" placement="top">
@@ -309,6 +387,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                     max={2}
                     size="xs"
                     maxW="60px"
+                    bg={inputBgColor}
+                    borderColor={borderColor}
                   >
                     <NumberInputField />
                     <NumberInputStepper>
@@ -322,7 +402,7 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
               {/* Presence Penalty */}
               <FormControl>
                 <HStack justify="space-between" mb={1}>
-                  <FormLabel htmlFor="presence-penalty-slider" fontSize="sm" mb={0}>
+                  <FormLabel htmlFor="presence-penalty-slider" fontSize="sm" mb={0} color={labelColor}>
                     Presence Penalty
                   </FormLabel>
                   <Tooltip label="Encourages the model to talk about new topics" placement="top">
@@ -358,6 +438,8 @@ const ModelParamsSelector = ({ onParamsChange, initialParams = {} }) => {
                     max={2}
                     size="xs"
                     maxW="60px"
+                    bg={inputBgColor}
+                    borderColor={borderColor}
                   >
                     <NumberInputField />
                     <NumberInputStepper>

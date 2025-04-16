@@ -1,41 +1,35 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Box, FormControl, FormLabel, Select, Switch, Tooltip, Badge, Flex, Text, Spinner, Button, useToast, useColorModeValue } from '@chakra-ui/react';
+import React, { useState, useEffect } from 'react';
+import { Box, FormControl, FormLabel, Select, Switch, Tooltip, Badge, Flex, Text, Spinner, useColorModeValue } from '@chakra-ui/react';
 import { InfoIcon } from '@chakra-ui/icons';
 import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
+// Default agent settings - pure constant
+const DEFAULT_AGENT_SETTINGS = { 
+  use_agent: false, 
+  agent_type: null, 
+  use_tree_reasoning: false,
+  tree_template: 'default'
+};
+
 /**
  * Component for selecting an AI agent and its parameters for chat
+ * Only triggers onAgentChange on explicit user interactions
  */
 const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
+  // API data state
   const [agentTypes, setAgentTypes] = useState({});
   const [agentMetadata, setAgentMetadata] = useState([]);
+  const [availableTrees, setAvailableTrees] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   
-  // To prevent redundant updates when parent re-renders with same props
-  const initialAgentRef = useRef(null);
-  const isInitialRender = useRef(true);
-  
-  // Default agent settings
-  const defaultAgentSettings = { 
-    use_agent: false, 
-    agent_type: null, 
-    use_tree_reasoning: false,
-    tree_template: 'default'
-  };
-  
-  // Initialize from initialAgent prop
-  const initialAgentObj = typeof initialAgent === 'object' ? initialAgent : defaultAgentSettings;
-  
-  const [selectedAgent, setSelectedAgent] = useState(initialAgentObj.agent_type);
-  const [useAgent, setUseAgent] = useState(initialAgentObj.use_agent);
-  const [useTreeReasoning, setUseTreeReasoning] = useState(initialAgentObj.use_tree_reasoning);
-  const [availableTrees, setAvailableTrees] = useState({});
-  const [selectedTree, setSelectedTree] = useState(initialAgentObj.tree_template || 'default');
-  
-  const toast = useToast();
+  // Form state - completely local
+  const [settings, setSettings] = useState({
+    ...DEFAULT_AGENT_SETTINGS,
+    ...(typeof initialAgent === 'object' ? initialAgent : {})
+  });
   
   // Theme colors
   const accentColor = '#4415b6';
@@ -45,30 +39,13 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
   const mutedColor = useColorModeValue('gray.600', 'gray.400');
   const hoverBgColor = useColorModeValue('#4415b610', 'gray.700');
 
-  // Track initialAgent changes without triggering onAgentChange
+  // Only update local state from props when initialAgent changes
   useEffect(() => {
-    // Skip the first render since we've already initialized in useState
-    if (isInitialRender.current) {
-      isInitialRender.current = false;
-      initialAgentRef.current = initialAgent;
-      return;
-    }
-    
-    // Only update state if we get a new different agent configuration
-    if (initialAgent) {
-      const currentValue = JSON.stringify(initialAgent);
-      const prevValue = initialAgentRef.current ? JSON.stringify(initialAgentRef.current) : null;
-      
-      if (currentValue !== prevValue) {
-        initialAgentRef.current = initialAgent;
-        
-        if (typeof initialAgent === 'object') {
-          setSelectedAgent(initialAgent.agent_type);
-          setUseAgent(initialAgent.use_agent);
-          setUseTreeReasoning(initialAgent.use_tree_reasoning);
-          setSelectedTree(initialAgent.tree_template || 'default');
-        }
-      }
+    if (initialAgent && typeof initialAgent === 'object') {
+      setSettings(prevSettings => ({
+        ...prevSettings,
+        ...initialAgent
+      }));
     }
   }, [initialAgent]);
 
@@ -93,88 +70,57 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
       } catch (err) {
         console.error('Error fetching agent data:', err);
         setError('Failed to load agent data. Please try again later.');
-        toast({
-          title: 'Error loading agents',
-          description: 'Could not load available AI agents. Using standard chat only.',
-          status: 'error',
-          duration: 5000,
-          isClosable: true,
-        });
       } finally {
         setIsLoading(false);
       }
     };
 
     fetchAgentData();
-  }, [toast]);
+  }, []);
   
-  // Creates an object with current agent settings
-  const getCurrentAgentSettings = () => ({
-    use_agent: useAgent,
-    agent_type: selectedAgent,
-    use_tree_reasoning: useTreeReasoning,
-    tree_template: selectedTree,
-  });
-
-  // Handle agent selection change
-  const handleAgentChange = (event) => {
-    const agentType = event.target.value;
-    setSelectedAgent(agentType);
-    
-    // Notify parent component with updated settings
-    const updatedSettings = {
-      ...getCurrentAgentSettings(),
-      agent_type: agentType,
-    };
-    
-    // Only call onAgentChange if it's from a user interaction
-    onAgentChange(updatedSettings);
-  };
-
-  // Handle agent toggle
+  // Event handlers - update local state and notify parent with callback
   const handleAgentToggle = () => {
-    const newUseAgent = !useAgent;
-    setUseAgent(newUseAgent);
-    
-    // Update the parent component
-    const updatedSettings = {
-      ...getCurrentAgentSettings(),
-      use_agent: newUseAgent,
+    const newSettings = {
+      ...settings,
+      use_agent: !settings.use_agent
     };
     
-    onAgentChange(updatedSettings);
+    setSettings(newSettings);
+    onAgentChange(newSettings);
   };
 
-  // Handle tree reasoning toggle
-  const handleTreeReasoningToggle = () => {
-    const newUseTree = !useTreeReasoning;
-    setUseTreeReasoning(newUseTree);
-    
-    // Update the parent component
-    const updatedSettings = {
-      ...getCurrentAgentSettings(),
-      use_tree_reasoning: newUseTree,
+  const handleAgentTypeChange = (event) => {
+    const newSettings = {
+      ...settings,
+      agent_type: event.target.value
     };
     
-    onAgentChange(updatedSettings);
+    setSettings(newSettings);
+    onAgentChange(newSettings);
   };
 
-  // Handle tree template selection
+  const handleTreeToggle = () => {
+    const newSettings = {
+      ...settings,
+      use_tree_reasoning: !settings.use_tree_reasoning
+    };
+    
+    setSettings(newSettings);
+    onAgentChange(newSettings);
+  };
+
   const handleTreeChange = (event) => {
-    const treeId = event.target.value;
-    setSelectedTree(treeId);
-    
-    // Update the parent component
-    const updatedSettings = {
-      ...getCurrentAgentSettings(),
-      tree_template: treeId,
+    const newSettings = {
+      ...settings,
+      tree_template: event.target.value
     };
     
-    onAgentChange(updatedSettings);
+    setSettings(newSettings);
+    onAgentChange(newSettings);
   };
 
   // Find the current agent metadata
-  const currentAgentMeta = agentMetadata.find(a => a.id === selectedAgent) || null;
+  const currentAgentMeta = agentMetadata.find(a => a.id === settings.agent_type) || null;
 
   if (isLoading) {
     return (
@@ -211,7 +157,7 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
           </FormLabel>
           <Switch 
             id="agent-toggle" 
-            isChecked={useAgent} 
+            isChecked={settings.use_agent} 
             onChange={handleAgentToggle} 
             colorScheme="purple"
           />
@@ -236,7 +182,7 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
         )}
       </Flex>
 
-      {useAgent && (
+      {settings.use_agent && (
         <>
           <FormControl mb={3}>
             <FormLabel htmlFor="agent-select" fontSize="sm" mb={1} color={textColor}>
@@ -244,8 +190,8 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
             </FormLabel>
             <Select 
               id="agent-select" 
-              value={selectedAgent || ''} 
-              onChange={handleAgentChange}
+              value={settings.agent_type || ''} 
+              onChange={handleAgentTypeChange}
               placeholder="Select an agent"
               size="sm"
               focusBorderColor={accentColor}
@@ -264,20 +210,20 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
             </FormLabel>
             <Switch 
               id="tree-toggle" 
-              isChecked={useTreeReasoning} 
-              onChange={handleTreeReasoningToggle} 
+              isChecked={settings.use_tree_reasoning} 
+              onChange={handleTreeToggle} 
               colorScheme="purple"
             />
           </FormControl>
 
-          {useTreeReasoning && (
+          {settings.use_tree_reasoning && (
             <FormControl mb={3}>
               <FormLabel htmlFor="tree-select" fontSize="sm" mb={1} color={textColor}>
                 Decision Tree Template
               </FormLabel>
               <Select 
                 id="tree-select" 
-                value={selectedTree || 'default'} 
+                value={settings.tree_template || 'default'} 
                 onChange={handleTreeChange}
                 size="sm"
                 focusBorderColor={accentColor}

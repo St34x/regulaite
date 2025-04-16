@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Box, HStack, Text, VStack, Flex, IconButton, useColorModeValue, Button, useDisclosure } from '@chakra-ui/react';
+import React, { useState } from 'react';
+import { Box, HStack, Text, VStack, Button, useColorModeValue, useDisclosure } from '@chakra-ui/react';
 import { SettingsIcon } from '@chakra-ui/icons';
 import ChatInput from './ChatInput';
 import AdvancedSettings from './AdvancedSettings';
@@ -14,10 +14,7 @@ const ChatControls = ({
   initialSettings = {},
   reasoningNodeId = null
 }) => {
-  // Use useRef to track previous settings to prevent unnecessary updates
-  const prevSettingsRef = useRef(null);
-  
-  // Drawer controls
+  // Drawer controls using Chakra's useDisclosure
   const { isOpen, onOpen, onClose } = useDisclosure();
   
   // Theme colors
@@ -25,37 +22,23 @@ const ChatControls = ({
   const accentLight = '#4415b615';
   const buttonBg = useColorModeValue('white', 'gray.700');
   const buttonHoverBg = useColorModeValue(accentLight, 'gray.600');
-  const buttonColor = useColorModeValue(accentColor, 'white');
   const borderColor = useColorModeValue('gray.200', 'gray.600');
-  
   const textColor = useColorModeValue('purple.700', 'purple.200');
   const bgColor = useColorModeValue('purple.50', 'purple.900');
   const bgBase = useColorModeValue('white', 'gray.800');
   
-  // Initialize the settings ref when component mounts
-  useEffect(() => {
-    prevSettingsRef.current = JSON.stringify(initialSettings);
-  }, []);
-  
-  // Function to handle settings change from AdvancedSettings
-  const handleSettingsChange = useCallback((newSettings) => {
-    try {
-      // Only trigger the parent callback if settings actually changed
-      const newSettingsStr = JSON.stringify(newSettings);
-      
-      if (newSettingsStr !== prevSettingsRef.current) {
-        prevSettingsRef.current = newSettingsStr;
-        onSettingsChange(newSettings);
-      }
-    } catch (err) {
-      console.error("Error handling settings change:", err);
+  // Simple handler for settings changes - only passes up to parent
+  const handleSettingsChange = (newSettings) => {
+    if (onSettingsChange) {
+      onSettingsChange(newSettings);
     }
-  }, [onSettingsChange]);
-
-  // Custom drawer close handler to ensure clean state
-  const handleDrawerClose = useCallback(() => {
-    onClose();
-  }, [onClose]);
+  };
+  
+  // Shows the tree reasoning node info if it's active
+  const showReasoningInfo = initialSettings.agent && 
+    initialSettings.agent.use_agent && 
+    initialSettings.agent.use_tree_reasoning && 
+    reasoningNodeId;
 
   return (
     <Box position="relative" bg={bgBase}>
@@ -80,10 +63,7 @@ const ChatControls = ({
           <ChatInput onSendMessage={onSendMessage} disabled={disabled} />
           
           {/* Tree reasoning info */}
-          {initialSettings.agent && 
-            initialSettings.agent.use_agent && 
-            initialSettings.agent.use_tree_reasoning && 
-            reasoningNodeId && (
+          {showReasoningInfo && (
             <HStack 
               w="100%" 
               px={3} 
@@ -102,11 +82,11 @@ const ChatControls = ({
         </VStack>
       </Box>
       
-      {/* Advanced Settings Drawer */}
+      {/* Only render the drawer when it's open to avoid any unnecessary updates */}
       {isOpen && (
         <AdvancedSettings 
           isOpen={isOpen} 
-          onClose={handleDrawerClose}
+          onClose={onClose}
           initialSettings={initialSettings}
           onSettingsChange={handleSettingsChange}
         />

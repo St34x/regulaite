@@ -36,18 +36,21 @@ const ChatHistory = ({
   const [searchQuery, setSearchQuery] = useState('');
   
   // Theme colors
-  const accentColor = '#4415b6';
-  const accentLight = '#4415b615';
-  const accentLighter = '#4415b608';
-  const accentMedium = '#4415b630';
+  const accentColor = useColorModeValue('#4415b6', '#6c45e7');
+  const accentLight = useColorModeValue('#4415b615', 'rgba(108, 69, 231, 0.15)');
+  const accentLighter = useColorModeValue('#4415b608', 'rgba(108, 69, 231, 0.08)');
+  const accentMedium = useColorModeValue('#4415b630', 'rgba(108, 69, 231, 0.3)');
   const borderColor = useColorModeValue('gray.200', 'gray.700');
-  const bgHover = useColorModeValue(accentLighter, 'gray.700');
-  const bgActive = useColorModeValue(accentLight, 'gray.700');
+  const bgHover = useColorModeValue(accentLighter, 'rgba(108, 69, 231, 0.1)');
+  const bgActive = useColorModeValue(accentLight, 'rgba(108, 69, 231, 0.15)');
   const textColor = useColorModeValue('gray.800', 'gray.200');
   const secondaryTextColor = useColorModeValue('gray.500', 'gray.400');
   const tertiaryTextColor = useColorModeValue('gray.400', 'gray.500');
   const inputBg = useColorModeValue('white', 'gray.700');
   const newButtonBg = useColorModeValue('white', 'gray.800');
+  const hoverButtonBgLight = '#3a1296';
+  const hoverButtonBgDark = '#7d5df5';
+  const buttonHoverBg = useColorModeValue(hoverButtonBgLight, hoverButtonBgDark);
 
   const filteredSessions = sessions.filter((session) => 
     session.title.toLowerCase().includes(searchQuery.toLowerCase())
@@ -144,6 +147,10 @@ const ChatHistory = ({
                       fontWeight={activeSessionId === session.id ? "semibold" : "medium"} 
                       fontSize="sm" 
                       color={activeSessionId === session.id ? accentColor : textColor}
+                      maxW="170px"
+                      overflow="hidden"
+                      textOverflow="ellipsis"
+                      whiteSpace="nowrap"
                     >
                       {session.title}
                     </Text>
@@ -171,7 +178,15 @@ const ChatHistory = ({
                   {session.preview}
                 </Text>
                 
-                <Text fontSize="xs" color={tertiaryTextColor} mt={2}>
+                <Text 
+                  fontSize="xs" 
+                  color={tertiaryTextColor} 
+                  mt={2}
+                  maxW="100%"
+                  overflow="hidden"
+                  textOverflow="ellipsis"
+                  whiteSpace="nowrap"
+                >
                   {session.date}
                 </Text>
               </Box>
@@ -203,7 +218,7 @@ const ChatHistory = ({
               onClick={onNewSession}
               color="white"
               bg={accentColor}
-              _hover={{ bg: '#3a1296' }}
+              _hover={{ bg: buttonHoverBg }}
               borderRadius="md"
             >
               New Chat
