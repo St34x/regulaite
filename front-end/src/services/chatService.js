@@ -85,6 +85,10 @@ const chatService = {
    */
   sendMessage: async (sessionId, message, options = {}, allMessages = null) => {
     try {
+      // Log message length for debugging
+      const messageLength = message.trim().length;
+      console.log(`Sending message with length: ${messageLength}`);
+      
       // Prepare LLM parameters
       const llmParams = {
         model: options.model || 'gpt-4',
@@ -107,6 +111,11 @@ const chatService = {
       
       // Prepare messages array - either use full history or just the current message
       const messages = allMessages || [{ role: 'user', content: message }];
+      
+      // For very short messages, ensure we're sending context
+      if (messageLength <= 20 && !allMessages) {
+        console.warn('Short message detected but no context provided. For better results, pass the conversation history.');
+      }
 
       // Combine all parameters
       const requestParams = {
@@ -139,6 +148,15 @@ const chatService = {
    */
   sendMessageStreaming: async (sessionId, message, onChunk, options = {}, allMessages = null) => {
     try {
+      // Log message length for debugging
+      const messageLength = message.trim().length;
+      console.log(`Streaming message with length: ${messageLength}`);
+      
+      // For very short messages, ensure we're sending context
+      if (messageLength <= 20 && !allMessages) {
+        console.warn('Short message detected but no context provided. For better results, pass the conversation history.');
+      }
+      
       // For streaming, we use fetch API with proper auth headers
       const token = localStorage.getItem('token');
       const headers = {

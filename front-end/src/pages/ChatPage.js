@@ -699,6 +699,7 @@ const ChatPage = () => {
                     key={index}
                     message={message}
                     isLoading={isLoading && index === messages.length - 1}
+                    previousMessage={index > 0 ? messages[index - 1] : null}
                     agentInfo={message.role === 'assistant' && advancedSettings.agent.use_agent ? {
                       agent_type: advancedSettings.agent.agent_type,
                       reasoning_path: message.reasoning_path || null,

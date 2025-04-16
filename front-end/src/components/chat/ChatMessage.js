@@ -1,7 +1,7 @@
 import React from 'react';
-import { User, Bot, Info, Cpu } from 'lucide-react';
+import { User, Bot, Info, Cpu, ArrowDownRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon } from '@chakra-ui/react';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip } from '@chakra-ui/react';
 
 /**
  * Renders a single chat message
@@ -9,9 +9,12 @@ import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon } from '@chakr
  * @param {Object} props.message - Message object with role and content
  * @param {boolean} props.isLoading - Whether this message is still loading
  * @param {Object} props.agentInfo - Optional agent information
+ * @param {Object} props.previousMessage - Previous message in the conversation (helps with context)
  */
-const ChatMessage = ({ message, isLoading = false, agentInfo = null }) => {
+const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMessage = null }) => {
   const isUser = message.role === 'user';
+  const isShortUserMessage = isUser && message.content.trim().length <= 20;
+  const showContextIndicator = isShortUserMessage && previousMessage && previousMessage.role === 'user';
   
   // Theme colors
   const accentColor = useColorModeValue("#4415b6", "#6c45e7");
@@ -28,6 +31,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null }) => {
   const userMessageShadow = "0 2px 4px rgba(0, 0, 0, 0.05)";
   const assistantMessageShadow = "0 2px 6px rgba(68, 21, 182, 0.08)";
   const agentInfoBg = useColorModeValue('gray.50', 'gray.700');
+  const contextIndicatorColor = useColorModeValue('gray.400', 'gray.500');
 
   return (
     <Box 
@@ -76,6 +80,24 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null }) => {
           <Text fontSize="sm" fontWeight="semibold" color={isUser ? 'blue.600' : accentColor}>
             {isUser ? 'You' : 'RegulAIte Assistant'}
           </Text>
+          
+          {showContextIndicator && (
+            <Tooltip 
+              label={`In context of: "${previousMessage.content}"`} 
+              placement="top" 
+              hasArrow
+            >
+              <Flex 
+                alignItems="center" 
+                fontSize="xs" 
+                color={contextIndicatorColor}
+                cursor="help"
+              >
+                <Icon as={ArrowDownRight} boxSize={3} mr={1} />
+                <Text>context</Text>
+              </Flex>
+            </Tooltip>
+          )}
           
           {!isUser && agentInfo && agentInfo.agent_type && (
             <Badge 

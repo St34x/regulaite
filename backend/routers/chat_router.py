@@ -13,6 +13,7 @@ import os
 from fastapi.responses import StreamingResponse
 import mariadb
 from datetime import timedelta
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -349,6 +350,27 @@ async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundT
                 status_code=400,
                 detail="No user message found in the chat history"
             )
+            
+        # Handle short follow-up messages (like "20", "yes", etc.) by adding context
+        if len(user_message.strip()) <= 20 and len(messages) >= 2:
+            # Find the previous user and assistant messages
+            previous_messages = list(messages)
+            previous_messages.reverse()
+            
+            # Skip the current user message
+            previous_messages = previous_messages[1:]
+            
+            # Look for the previous user message and assistant response
+            prev_user_message = next((m.content for m in previous_messages if m.role == "user"), None)
+            prev_assistant_message = next((m.content for m in previous_messages if m.role == "assistant"), None)
+            
+            # If we found both, add a system message with context
+            if prev_user_message and prev_assistant_message:
+                context_message = ChatMessage(
+                    role="system",
+                    content=f"The user previously asked: \"{prev_user_message}\". You responded with: \"{prev_assistant_message}\". The user's follow-up message is: \"{user_message}\". Remember to maintain context from the previous exchange, especially if the follow-up message is short or ambiguous."
+                )
+                messages.insert(0, context_message)
 
         # Initialize database connection for chat history
         try:
@@ -842,6 +864,40 @@ async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundT
                             role="system",
                             content="You are an AI assistant that helps users with questions. If you don't know the answer, just say so."
                         ))
+
+            # Add special handling for counting or numbering tasks
+            # Get the last two messages if they exist
+            if len(messages) >= 3:
+                # Check if we're in a counting or numbering scenario
+                user_messages = [m for m in messages if m.role == "user"]
+                counting_pattern = re.compile(r'^count\s+(to|until|from)\s+\d+(\s+to\s+\d+)?$', re.IGNORECASE)
+                
+                # Check if previous message was about counting
+                if len(user_messages) >= 2:
+                    previous_user_msg = user_messages[-2].content.lower()
+                    current_user_msg = user_messages[-1].content.lower()
+                    
+                    # Check if we have a counting request followed by a number
+                    if counting_pattern.match(previous_user_msg) and re.match(r'^\d+$', current_user_msg):
+                        # Add specific system instruction for sequential counting
+                        messages.insert(0, ChatMessage(
+                            role="system",
+                            content="IMPORTANT: The user is engaging in a counting exercise. If they provide just a number like '20', you should interpret this as a request to count to that number. For example, if they say '20', respond by counting from 1 to 20."
+                        ))
+                    
+                    # Check for simple number sequence
+                    if re.match(r'^\d+$', previous_user_msg) and re.match(r'^\d+$', current_user_msg):
+                        try:
+                            prev_num = int(previous_user_msg)
+                            curr_num = int(current_user_msg)
+                            # If the second number could be a continuation
+                            if curr_num > prev_num and curr_num <= prev_num + 100:
+                                messages.insert(0, ChatMessage(
+                                    role="system",
+                                    content=f"IMPORTANT: The user seems to be continuing a number sequence. The previous number was {prev_num}, and now they've provided {curr_num}. If they're counting, continue the sequence from {curr_num} by providing the next numbers in order."
+                                ))
+                        except ValueError:
+                            pass  # Not numeric values
 
             # Convert messages for OpenAI API
             openai_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
