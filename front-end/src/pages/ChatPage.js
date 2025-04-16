@@ -252,7 +252,7 @@ const ChatPage = () => {
       setMessages(messagesWithPlaceholder);
 
       try {
-        // Use streaming API
+        // Pass the full conversation history to maintain context
         const response = await chatService.sendMessageStreaming(
           activeSessionId,
           content,
@@ -266,7 +266,8 @@ const ChatPage = () => {
             // Create a new array to ensure React state update
             setMessages([...updatedMessages, updatedAssistantMessage]);
           },
-          options
+          options,
+          updatedMessages  // Pass all messages to maintain conversation context
         );
         
         // Handle agent progress information if returned
@@ -293,7 +294,13 @@ const ChatPage = () => {
         
         // Fall back to non-streaming API if streaming fails
         try {
-          const response = await chatService.sendMessage(activeSessionId, content, options);
+          // Pass the full conversation history to maintain context
+          const response = await chatService.sendMessage(
+            activeSessionId, 
+            content, 
+            options,
+            updatedMessages  // Pass all messages to maintain conversation context
+          );
           const fallbackMessage = { role: "assistant", content: response.message };
           setMessages([...updatedMessages, fallbackMessage]);
           updateSessionWithMessages(activeSessionId, [...updatedMessages, fallbackMessage]);

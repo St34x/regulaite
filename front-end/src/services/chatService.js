@@ -80,9 +80,10 @@ const chatService = {
    * @param {string} sessionId - ID of the chat session
    * @param {string} message - Message content
    * @param {Object} options - Additional options for the request
+   * @param {Array} allMessages - Optional array of all messages in the conversation history
    * @returns {Promise<Object>} Chat response
    */
-  sendMessage: async (sessionId, message, options = {}) => {
+  sendMessage: async (sessionId, message, options = {}, allMessages = null) => {
     try {
       // Prepare LLM parameters
       const llmParams = {
@@ -104,10 +105,13 @@ const chatService = {
         use_agent: false
       };
       
+      // Prepare messages array - either use full history or just the current message
+      const messages = allMessages || [{ role: 'user', content: message }];
+
       // Combine all parameters
       const requestParams = {
         session_id: sessionId,
-        messages: [{ role: 'user', content: message }],
+        messages: messages,
         stream: false,
         include_context: options.includeContext !== undefined ? options.includeContext : true,
         context_query: options.contextQuery || null,
@@ -130,9 +134,10 @@ const chatService = {
    * @param {string} message - Message content
    * @param {Function} onChunk - Callback for each chunk of the streamed response
    * @param {Object} options - Additional options for the request
+   * @param {Array} allMessages - Optional array of all messages in the conversation history
    * @returns {Promise<Object>} Result info including execution IDs if applicable
    */
-  sendMessageStreaming: async (sessionId, message, onChunk, options = {}) => {
+  sendMessageStreaming: async (sessionId, message, onChunk, options = {}, allMessages = null) => {
     try {
       // For streaming, we use fetch API with proper auth headers
       const token = localStorage.getItem('token');
@@ -185,10 +190,13 @@ const chatService = {
         use_agent: false
       };
       
+      // Prepare messages array - either use full history or just the current message
+      const messages = allMessages || [{ role: 'user', content: message }];
+      
       // Combine all parameters
       const requestParams = {
         session_id: sessionId,
-        messages: [{ role: 'user', content: message }],
+        messages: messages,
         stream: true,
         include_context: options.includeContext !== undefined ? options.includeContext : true,
         context_query: options.contextQuery || null,
