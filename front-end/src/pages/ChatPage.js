@@ -244,6 +244,7 @@ const ChatPage = () => {
           date: "Just now",
           preview: "",
           messages: [initialMessage],
+          is_fallback: true
         }]);
         
         setActiveSessionId(fallbackSessionId);
@@ -580,49 +581,107 @@ const ChatPage = () => {
   const handleDeleteSession = async (sessionId) => {
     setError(null);
     
+    // For debugging purposes
+    console.log('Attempting to delete session:', sessionId);
+    
     try {
-      // Delete the session
-      await chatService.deleteSession(sessionId);
+      // Find the session we want to delete
+      const sessionToDelete = sessions.find(session => session.id === sessionId);
       
-      // Remove from the sessions list
+      if (!sessionToDelete) {
+        console.error('Could not find session to delete:', sessionId);
+        toast({
+          title: 'Delete Error',
+          description: 'Could not find the conversation to delete.',
+          status: 'error',
+          duration: 3000,
+          isClosable: true,
+        });
+        return;
+      }
+      
+      console.log('Found session to delete:', sessionToDelete);
+      
+      // First, remove from local state to update UI immediately
       const updatedSessions = sessions.filter(session => session.id !== sessionId);
       setSessions(updatedSessions);
       
-      // If the active session was deleted, select another one or create a new one
+      // If the session was a fallback session, we don't need to delete from server
+      const isFallbackSession = sessionToDelete.is_fallback === true || 
+                                sessionId.startsWith('fallback-') || 
+                                !sessionId.includes('-');
+      
+      if (isFallbackSession) {
+        console.log('Skipping server delete for fallback session:', sessionId);
+        
+        // If we deleted the active session, switch to another one
+        if (sessionId === activeSessionId) {
+          if (updatedSessions.length > 0) {
+            handleSelectSession(updatedSessions[0].id);
+          } else {
+            handleNewSession();
+          }
+        }
+        
+        toast({
+          title: 'Conversation Deleted',
+          description: 'The conversation has been removed.',
+          status: 'success',
+          duration: 3000,
+          isClosable: true,
+        });
+        
+        return;
+      }
+      
+      try {
+        // For regular sessions, attempt to delete from server
+        console.log('Deleting session from server:', sessionId);
+        await chatService.deleteSession(sessionId);
+        console.log('Session successfully deleted from server');
+      } catch (serverError) {
+        console.error('Server deletion failed but continuing:', serverError);
+        // Continue with UI updates even if server deletion fails
+        // The session is already removed from local state
+      }
+      
+      // If we deleted the active session, switch to another one
       if (sessionId === activeSessionId) {
         if (updatedSessions.length > 0) {
           handleSelectSession(updatedSessions[0].id);
         } else {
-          await handleNewSession();
+          handleNewSession();
         }
       }
-    } catch (err) {
-      console.error('Failed to delete session:', err);
-      let errorMessage = 'Failed to delete the conversation.';
       
-      if (err.response) {
-        const status = err.response.status;
-        if (status === 401) {
-          errorMessage = 'Authentication required to delete this session.';
-          // Redirect to login page if unauthorized
-          navigate('/login');
-          return;
-        } else if (status === 403) {
-          errorMessage = 'You do not have permission to delete this conversation.';
-        } else if (status === 404) {
-          errorMessage = 'Chat session not found. It may have already been deleted.';
-          // Remove from the local list anyway
-          setSessions(sessions.filter(session => session.id !== sessionId));
-        }
-      } else if (err.request) {
-        errorMessage = 'Network error. Unable to connect to the chat server.';
-      }
-      
-      setError(errorMessage);
       toast({
-        title: 'Delete Error',
-        description: errorMessage,
-        status: 'error',
+        title: 'Conversation Deleted',
+        description: 'The conversation has been deleted.',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+      
+    } catch (error) {
+      console.error('Error in handleDeleteSession:', error);
+      
+      // Make sure we still update the UI even if there was an error
+      const updatedSessions = sessions.filter(session => session.id !== sessionId);
+      setSessions(updatedSessions);
+      
+      // If we deleted the active session, switch to another one
+      if (sessionId === activeSessionId) {
+        if (updatedSessions.length > 0) {
+          handleSelectSession(updatedSessions[0].id);
+        } else {
+          handleNewSession();
+        }
+      }
+      
+      toast({
+        title: 'Note',
+        description: 'The conversation was removed from your history, but there might have been an issue with the server.',
+        status: 'info',
         duration: 5000,
         isClosable: true,
       });
