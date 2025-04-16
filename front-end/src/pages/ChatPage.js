@@ -758,22 +758,6 @@ const ChatPage = () => {
           zIndex={isMobile ? "10" : "auto"}
           h={isMobile ? "full" : "auto"}
         >
-          <Flex p="3" borderBottomWidth="1px" borderBottomColor={borderColor} justify="space-between" align="center">
-            <Heading size="md" display="flex" alignItems="center" color={accentColor}>
-              <Shield size={20} style={{ marginRight: '8px' }} />
-              RegulAIte
-            </Heading>
-            {isMobile && (
-              <IconButton
-                icon={<X size={20} />}
-                variant="ghost"
-                size="sm"
-                aria-label="Close sidebar"
-                onClick={() => setIsSidebarOpen(false)}
-              />
-            )}
-          </Flex>
-
           <Box flex="1" overflowY="auto">
             <ChatHistory
               sessions={sessions}
@@ -787,46 +771,6 @@ const ChatPage = () => {
 
         {/* Main content */}
         <Box flex="1" display="flex" flexDir="column" overflow="hidden">
-          {/* Header */}
-          <Flex 
-            bg={headerBg}
-            borderBottomWidth="1px"
-            borderBottomColor={borderColor}
-            p="3"
-            align="center"
-            justify="space-between"
-          >
-            <Flex align="center">
-              {!isSidebarOpen && (
-                <IconButton
-                  icon={<PanelLeft size={20} />}
-                  variant="ghost"
-                  size="sm"
-                  mr="2"
-                  aria-label="Open sidebar"
-                  onClick={() => setIsSidebarOpen(true)}
-                />
-              )}
-              <Heading size="md" color={textColor}>Chat</Heading>
-            </Flex>
-            <Flex align="center" gap="2">
-              {isLoading && (
-                <Flex align="center" fontSize="sm" color={secondaryTextColor}>
-                  <Spinner size="sm" mr="2" color={accentColor} />
-                  <Text>Processing...</Text>
-                </Flex>
-              )}
-              
-              <IconButton
-                icon={<RefreshCw size={20} />}
-                variant="ghost"
-                size="sm"
-                aria-label="New Chat"
-                onClick={() => handleNewSession(true)}
-              />
-            </Flex>
-          </Flex>
-
           {/* Chat Messages */}
           <Box flex="1" overflowY="auto" bg={chatBg} p="4">
             {error && error.trim() !== '' && (

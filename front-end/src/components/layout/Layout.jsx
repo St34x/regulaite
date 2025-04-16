@@ -33,11 +33,6 @@ const Layout = ({ children }) => {
       <Box as="main" flex="1">
         {children}
       </Box>
-      <Box as="footer" py={4} px={4} borderTop="1px" borderColor={borderColor} textAlign="center">
-        <Text maxW="7xl" mx="auto" fontSize="sm" opacity={0.7}>
-          © {new Date().getFullYear()} RegulAIte. All rights reserved.
-        </Text>
-      </Box>
     </Flex>
   );
 };
