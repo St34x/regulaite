@@ -1,0 +1,128 @@
+{
+  "rag": {
+    "id": "rag",
+    "name": "RAG Agent",
+    "description": "Retrieves relevant context from your documents to answer questions accurately.",
+    "long_description": "The Retrieval Augmented Generation (RAG) Agent combines the power of a large language model with your own document knowledge base. It first searches your documents for relevant information, then uses that information to provide accurate and contextually relevant answers to your questions. This approach ensures that responses are grounded in your specific documents rather than the model's general knowledge, making it ideal for questions about your organization's specific policies, procedures, and compliance requirements.",
+    "usage_examples": [
+      {
+        "query": "What are the requirements for password policies according to our security documentation?",
+        "description": "Find specific password requirements from your security policies",
+        "result_summary": "A detailed list of password requirements including minimum length, complexity, expiration periods, and history constraints."
+      },
+      {
+        "query": "Summarize our GDPR compliance obligations regarding data subject access requests.",
+        "description": "Extract GDPR compliance requirements from your documentation",
+        "result_summary": "A summary of your organization's obligations when handling data subject access requests, including timeframes, verification processes, and response requirements."
+      },
+      {
+        "query": "What are the main differences between ISO 27001 and SOC 2 according to our comparison document?",
+        "description": "Compare compliance frameworks based on your documentation",
+        "result_summary": "Key differences in scope, focus, structure, and certification process between ISO 27001 and SOC 2 as described in your comparison documents."
+      }
+    ],
+    "limitations": [
+      "Accuracy depends on the quality and comprehensiveness of your document knowledge base",
+      "May struggle with very complex queries that require synthesizing information across many documents",
+      "Cannot access information that isn't present in your uploaded documents",
+      "Currently limited to text-based information retrieval (cannot interpret charts, diagrams, or images in documents)"
+    ],
+    "best_practices": [
+      "Upload comprehensive documentation covering all aspects of your regulatory and compliance landscape",
+      "Break down complex questions into simpler, more focused queries",
+      "Include relevant keywords from your documentation in your queries",
+      "Review and verify important information, especially when making critical compliance decisions",
+      "If answers seem incomplete, try rephrasing your question with different keywords"
+    ],
+    "parameter_details": {
+      "top_k": "Controls how many document chunks are retrieved to provide context. Higher values (e.g., 10-20) cast a wider net for complex questions but may include less relevant information. Lower values (e.g., 3-5) provide more focused answers but might miss relevant context. Default: 5.",
+      "hybrid_search": "When enabled, combines vector-based semantic search with traditional keyword search for better results. Useful for questions containing specific terms or phrases that should appear in the results. Default: true."
+    },
+    "faq": [
+      {
+        "question": "How does the RAG Agent differ from regular AI chat?",
+        "answer": "Regular AI chat draws from the model's general training data, which doesn't include your specific documents. The RAG Agent specifically retrieves information from your uploaded documents and uses that as context for generating responses, ensuring answers are based on your organization's specific content."
+      },
+      {
+        "question": "Can I use the RAG Agent with documents in languages other than English?",
+        "answer": "Yes, the system supports multiple languages. Document processing, embedding, and retrieval work across languages, though performance may vary depending on the language."
+      },
+      {
+        "question": "How can I improve the quality of responses?",
+        "answer": "Upload high-quality, well-structured documents. Break large documents into logical sections. Use specific queries with relevant keywords. Adjust the top_k parameter for broader or narrower context retrieval. Consider hybrid search for term-specific queries."
+      },
+      {
+        "question": "Is the information secure?",
+        "answer": "Yes, your documents are stored securely in your organization's private knowledge base and are not shared with external parties. The system uses secure API calls with encrypted communication."
+      }
+    ],
+    "related_agents": ["compliance_mapping", "dynamic_tree"]
+  },
+  "compliance_mapping": {
+    "id": "compliance_mapping",
+    "name": "Compliance Mapping Agent",
+    "description": "Maps requirements between different compliance frameworks and standards.",
+    "long_description": "The Compliance Mapping Agent helps organizations understand how controls and requirements from one compliance framework map to another. This is especially valuable when your organization needs to comply with multiple regulatory standards, as it helps identify overlaps, gaps, and synergies between different frameworks. The agent analyzes relationships between requirements, interprets control objectives across frameworks, and provides detailed mapping information to streamline your compliance efforts and reduce redundant work.",
+    "usage_examples": [
+      {
+        "query": "Map PCI DSS requirement 3.4 about data encryption to equivalent controls in ISO 27001",
+        "description": "Find equivalent controls between specific PCI DSS requirements and ISO 27001",
+        "result_summary": "A detailed mapping showing how PCI DSS requirement 3.4 for protecting stored cardholder data corresponds to ISO 27001 controls A.10.1.1 (Policy on use of cryptographic controls) and A.10.1.2 (Key management)."
+      },
+      {
+        "query": "What GDPR requirements correspond to CCPA's consumer right to deletion?",
+        "description": "Map consumer rights between GDPR and CCPA",
+        "result_summary": "A comprehensive mapping between CCPA's right to deletion and GDPR's right to erasure (Article 17), highlighting similarities, differences, and implementation considerations.",
+        "parameters": {
+          "source_framework": "CCPA",
+          "target_framework": "GDPR",
+          "detail_level": "high"
+        }
+      },
+      {
+        "query": "Create a gap analysis comparing our current SOC 2 controls with NIST 800-53 requirements",
+        "description": "Perform a gap analysis between two frameworks",
+        "result_summary": "A structured analysis identifying SOC 2 controls that fully satisfy, partially satisfy, or don't address NIST 800-53 requirements, with recommendations for addressing gaps."
+      }
+    ],
+    "limitations": [
+      "Effectiveness depends on the quality and comprehensiveness of your compliance documentation",
+      "Interpretations of control mappings may vary based on organizational context and implementation details",
+      "Cannot account for industry or jurisdiction-specific variations unless that information is in your knowledge base",
+      "Not a substitute for qualified compliance professional judgment in final mapping decisions",
+      "May not capture recent regulatory changes if your documentation isn't up-to-date"
+    ],
+    "best_practices": [
+      "Upload detailed documentation for all relevant compliance frameworks",
+      "Include any industry-specific interpretations or guidance documents in your knowledge base",
+      "Be specific when asking about particular controls or requirements",
+      "Consider providing contextual information about your organization's environment when requesting mappings",
+      "Review generated mappings with your compliance team before implementation",
+      "Use the detail_level parameter to control the depth of analysis based on your needs"
+    ],
+    "parameter_details": {
+      "source_framework": "The compliance framework you're mapping from. Being specific helps the agent focus on relevant documentation.",
+      "target_framework": "The compliance framework you're mapping to. This helps the agent identify the correct target controls.",
+      "detail_level": "Controls the depth of the mapping analysis. 'Low' provides high-level mappings between major requirements. 'Medium' (default) includes more specific control mappings and brief explanations. 'High' provides detailed mappings with rationales and implementation considerations."
+    },
+    "faq": [
+      {
+        "question": "Can the Compliance Mapping Agent create custom frameworks?",
+        "answer": "While the agent can't create entirely new frameworks, it can help you map your organization's custom controls to established frameworks by analyzing the intent and requirements of your controls."
+      },
+      {
+        "question": "How accurate are the framework mappings?",
+        "answer": "Mappings are based on the agent's analysis of control objectives, requirements, and your uploaded compliance documentation. While generally reliable, all mappings should be reviewed by qualified compliance professionals before implementation."
+      },
+      {
+        "question": "Can I export mapping results to other formats?",
+        "answer": "Currently, results are provided in text format within the chat. Future updates may include export capabilities to formats like CSV, Excel, or compliance management systems."
+      },
+      {
+        "question": "How does the agent handle conflicting requirements between frameworks?",
+        "answer": "When conflicts exist, the agent will identify the differences and typically recommend following the more stringent requirement to ensure compliance with both frameworks. It will highlight these conflicts in the mapping output."
+      }
+    ],
+    "related_agents": ["rag", "dynamic_tree"]
+  }
+}

@@ -1,0 +1,286 @@
+{
+  "rag": {
+    "id": "rag",
+    "name": "RAG Agent",
+    "description": "Retrieves relevant context from your documents to answer questions accurately.",
+    "version": "1.0.0",
+    "capabilities": [
+      {
+        "name": "question_answering",
+        "description": "Answers questions using information from your documents",
+        "requires_context": true,
+        "examples": [
+          "What is the definition of credit risk?",
+          "Explain the requirements for AML compliance",
+          "Summarize the main points about data protection"
+        ]
+      },
+      {
+        "name": "citation",
+        "description": "Provides source citations for information",
+        "requires_context": true,
+        "examples": [
+          "What are the key elements of GDPR with citations?",
+          "How is PCI DSS compliance defined? Cite sources."
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "top_k",
+        "description": "Number of results to retrieve from the knowledge base",
+        "type": "integer",
+        "required": false,
+        "default": 5,
+        "options": [3, 5, 10, 20]
+      },
+      {
+        "name": "hybrid_search",
+        "description": "Whether to use hybrid search (vector + keyword)",
+        "type": "boolean",
+        "required": false,
+        "default": true
+      }
+    ],
+    "model_requirements": {
+      "recommended": "gpt-4",
+      "minimum": "gpt-3.5-turbo"
+    },
+    "context_usage": "required",
+    "author": "RegulAite Team",
+    "documentation_url": "/docs/agents/rag",
+    "icon": "search",
+    "tags": ["information retrieval", "question answering", "documentation"]
+  },
+  "compliance_mapping": {
+    "id": "compliance_mapping",
+    "name": "Compliance Mapping Agent",
+    "description": "Maps requirements between different compliance frameworks and standards.",
+    "version": "1.0.0",
+    "capabilities": [
+      {
+        "name": "control_mapping",
+        "description": "Maps controls between different compliance frameworks",
+        "requires_context": true,
+        "examples": [
+          "Map PCI DSS requirement 3.4 to ISO 27001",
+          "Find GDPR equivalents for CCPA requirements",
+          "Compare NIST 800-53 controls with SOC 2"
+        ]
+      },
+      {
+        "name": "gap_analysis",
+        "description": "Identifies gaps between compliance frameworks",
+        "requires_context": true,
+        "examples": [
+          "What controls in ISO 27001 are not covered by SOC 2?",
+          "Identify gaps between HIPAA and GDPR for data protection"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "source_framework",
+        "description": "Source compliance framework",
+        "type": "string",
+        "required": false,
+        "options": ["PCI DSS", "GDPR", "HIPAA", "ISO 27001", "NIST 800-53", "SOC 2", "CCPA"]
+      },
+      {
+        "name": "target_framework",
+        "description": "Target compliance framework",
+        "type": "string",
+        "required": false,
+        "options": ["PCI DSS", "GDPR", "HIPAA", "ISO 27001", "NIST 800-53", "SOC 2", "CCPA"]
+      },
+      {
+        "name": "detail_level",
+        "description": "Level of detail for the mapping",
+        "type": "string",
+        "required": false,
+        "default": "medium",
+        "options": ["high", "medium", "low"]
+      }
+    ],
+    "model_requirements": {
+      "recommended": "gpt-4",
+      "minimum": "gpt-4"
+    },
+    "context_usage": "required",
+    "author": "RegulAite Team",
+    "documentation_url": "/docs/agents/compliance-mapping",
+    "icon": "compare",
+    "tags": ["compliance", "mapping", "gap analysis", "controls"]
+  },
+  "vulnerability_assessment": {
+    "id": "vulnerability_assessment",
+    "name": "Vulnerability Assessment Agent",
+    "description": "Assesses vulnerabilities and security risks based on provided information.",
+    "version": "1.0.0",
+    "capabilities": [
+      {
+        "name": "risk_identification",
+        "description": "Identifies potential security risks and vulnerabilities",
+        "requires_context": true,
+        "examples": [
+          "What are the security risks in our cloud infrastructure?",
+          "Identify vulnerabilities in our authentication system",
+          "Assess risks in our customer data handling processes"
+        ]
+      },
+      {
+        "name": "remediation_recommendations",
+        "description": "Provides recommendations for addressing vulnerabilities",
+        "requires_context": true,
+        "examples": [
+          "How can we address the identified authentication vulnerabilities?",
+          "Recommend actions to mitigate data storage risks"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "assessment_area",
+        "description": "Area to focus the vulnerability assessment on",
+        "type": "string",
+        "required": false,
+        "options": ["Authentication", "Authorization", "Data Storage", "Network", "API", "Physical Security", "Cloud Infrastructure"]
+      },
+      {
+        "name": "risk_level",
+        "description": "Minimum risk level to include in assessment",
+        "type": "string",
+        "required": false,
+        "default": "medium",
+        "options": ["critical", "high", "medium", "low"]
+      }
+    ],
+    "model_requirements": {
+      "recommended": "gpt-4",
+      "minimum": "gpt-4"
+    },
+    "context_usage": "optional",
+    "author": "RegulAite Team",
+    "documentation_url": "/docs/agents/vulnerability-assessment",
+    "icon": "security",
+    "tags": ["security", "vulnerability", "risk assessment", "cybersecurity"]
+  },
+  "threat_modeling": {
+    "id": "threat_modeling",
+    "name": "Threat Modeling Agent",
+    "description": "Creates threat models for systems and processes to identify security risks.",
+    "version": "1.0.0",
+    "capabilities": [
+      {
+        "name": "threat_identification",
+        "description": "Identifies potential threats to a system or process",
+        "requires_context": false,
+        "examples": [
+          "What are the threats to our payment processing system?",
+          "Identify potential threats to our user authentication flow",
+          "Create a threat model for our data storage architecture"
+        ]
+      },
+      {
+        "name": "mitigation_strategies",
+        "description": "Suggests strategies to mitigate identified threats",
+        "requires_context": false,
+        "examples": [
+          "How can we mitigate the threats to our API endpoints?",
+          "Suggest security controls for our cloud infrastructure threats"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "system_name",
+        "description": "Name of the system to model",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "system_components",
+        "description": "List of system components to include in the model",
+        "type": "array",
+        "required": false
+      },
+      {
+        "name": "methodology",
+        "description": "Threat modeling methodology to use",
+        "type": "string",
+        "required": false,
+        "default": "STRIDE",
+        "options": ["STRIDE", "PASTA", "VAST", "OCTAVE", "DREAD"]
+      }
+    ],
+    "model_requirements": {
+      "recommended": "gpt-4",
+      "minimum": "gpt-4"
+    },
+    "context_usage": "optional",
+    "author": "RegulAite Team",
+    "documentation_url": "/docs/agents/threat-modeling",
+    "icon": "shield",
+    "tags": ["security", "threat modeling", "risk assessment", "cybersecurity"]
+  },
+  "dynamic_tree": {
+    "id": "dynamic_tree",
+    "name": "Dynamic Tree Reasoning Agent",
+    "description": "Dynamically generates and uses decision trees for complex reasoning tasks.",
+    "version": "1.0.0",
+    "capabilities": [
+      {
+        "name": "tree_generation",
+        "description": "Generates decision trees based on the query and context",
+        "requires_context": true,
+        "examples": [
+          "Analyze the compliance implications of our new data processing method",
+          "Evaluate the security risks of our cloud migration strategy",
+          "Assess whether our current controls meet PCI DSS requirements"
+        ]
+      },
+      {
+        "name": "explainable_reasoning",
+        "description": "Provides step-by-step reasoning for decisions",
+        "requires_context": true,
+        "examples": [
+          "Explain the reasoning behind the compliance assessment",
+          "Show the decision path for the security evaluation"
+        ]
+      }
+    ],
+    "parameters": [
+      {
+        "name": "reasoning_depth",
+        "description": "Maximum depth of the decision tree",
+        "type": "integer",
+        "required": false,
+        "default": 5,
+        "options": [3, 4, 5, 6, 7]
+      },
+      {
+        "name": "show_reasoning",
+        "description": "Whether to show the reasoning process",
+        "type": "boolean",
+        "required": false,
+        "default": true
+      },
+      {
+        "name": "cache_tree",
+        "description": "Whether to cache the generated tree for future use",
+        "type": "boolean",
+        "required": false,
+        "default": true
+      }
+    ],
+    "model_requirements": {
+      "recommended": "gpt-4",
+      "minimum": "gpt-4"
+    },
+    "context_usage": "required",
+    "author": "RegulAite Team",
+    "documentation_url": "/docs/agents/dynamic-tree",
+    "icon": "account_tree",
+    "tags": ["tree reasoning", "explainable AI", "decision making", "complex reasoning"]
+  }
+}

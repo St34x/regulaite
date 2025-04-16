@@ -1,0 +1,14 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+- back-end code in backend folder
+- frontend is in front-end folder
+- frontend design scratch is in frontend_design_scratch - use it to build my application
+- You have to strictly follow APIs endpoint pameters to make APIs work seamless
+- Follow best security praticies during implementation
+- All services run in docker, including react front-end
+- All containers are connected to regulaite_network in docker 
+- App name is Regul**AI**te
+- The accent color #4415b6
