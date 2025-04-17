@@ -17,7 +17,7 @@ import {
   CardBody,
   CardHeader,
   CardFooter,
-  useColorModeValue
+  useColorMode
 } from '@chakra-ui/react';
 import { ViewIcon, ViewOffIcon } from '@chakra-ui/icons';
 import { useAuth } from '../../contexts/AuthContext';
@@ -31,9 +31,10 @@ const LoginForm = () => {
   
   const { login } = useAuth();
   const navigate = useNavigate();
+  const { colorMode } = useColorMode();
   
   // Chakra UI colors
-  const cardBg = useColorModeValue('white', 'gray.700');
+  const cardBg = colorMode === 'light' ? 'white' : 'gray.700';
   const accentColor = '#4415b6';
 
   const handleSubmit = async (e) => {

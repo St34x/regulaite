@@ -1,6 +1,6 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { ChakraProvider, CSSReset } from '@chakra-ui/react';
+import { ChakraProvider, extendTheme } from '@chakra-ui/react';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { AuthProvider } from './contexts/AuthContext';
 import Layout from './components/layout/Layout';
@@ -10,10 +10,18 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import './App.css';
 
+// Extend the theme with custom colors
+const theme = extendTheme({
+  colors: {
+    brand: {
+      500: "#4415b6", // App accent color
+    },
+  },
+});
+
 function App() {
   return (
-    <ChakraProvider>
-      <CSSReset />
+    <ChakraProvider theme={theme}>
       <ThemeProvider>
         <AuthProvider>
           <Router>
