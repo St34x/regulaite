@@ -237,7 +237,6 @@ services:
     build:
       context: ./front-end
       dockerfile: Dockerfile
-      target: development
     container_name: regulaite-front-end
     ports:
       - "3000:3000"

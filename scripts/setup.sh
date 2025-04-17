@@ -18,7 +18,7 @@ DOCKER_COMPOSE_FILE="$PLUGIN_DIR/docker-compose.yml"
 ENV_FILE="$PLUGIN_DIR/.env"
 BACKEND_IMAGE="ai_backend:latest"
 FRONTEND_IMAGE="regulaite_frontend:latest"
-FRONTEND_DIR="$PLUGIN_DIR/regulaite"
+FRONTEND_DIR="$PLUGIN_DIR/front-end"
 BUILD_TARGET="development" # Default to development mode
 
 # Print banner
