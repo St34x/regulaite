@@ -411,7 +411,7 @@ echo -e "${GREEN}✅ Updated docker-compose.yml with build target: $BUILD_TARGET
 
 # Build the Docker image with specified target
 echo -e "${YELLOW}Building Docker image: $BACKEND_IMAGE using target: $BUILD_TARGET${NC}"
-if docker build --target $BUILD_TARGET -t "$BACKEND_IMAGE" "$AI_BACKEND_DIR"; then
+if docker build --no-cache --target $BUILD_TARGET -t "$BACKEND_IMAGE" "$AI_BACKEND_DIR"; then
     echo -e "${GREEN}✅ Successfully built $BACKEND_IMAGE with target: $BUILD_TARGET${NC}"
 else
     echo -e "${RED}Failed to build $BACKEND_IMAGE${NC}"
@@ -421,7 +421,7 @@ fi
 
 # Build frontend image
 echo -e "${YELLOW}Building frontend Docker image...${NC}"
-if docker build -t "$FRONTEND_IMAGE" "$FRONTEND_DIR"; then
+if docker build --no-cache -t "$FRONTEND_IMAGE" "$FRONTEND_DIR"; then
     echo -e "${GREEN}✅ Successfully built $FRONTEND_IMAGE${NC}"
 else
     echo -e "${RED}Failed to build $FRONTEND_IMAGE${NC}"
