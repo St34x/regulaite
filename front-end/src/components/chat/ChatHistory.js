@@ -12,10 +12,10 @@ import {
   VStack, 
   HStack,
   IconButton,
-  Divider,
-  useColorModeValue 
+  Divider
 } from '@chakra-ui/react';
 import { SearchIcon, AddIcon, DeleteIcon, ChatIcon } from '@chakra-ui/icons';
+import { useThemeColors } from '../../theme';
 
 /**
  * Chat history sidebar component
@@ -34,23 +34,22 @@ const ChatHistory = ({
   onDeleteSession,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const colors = useThemeColors();
   
-  // Theme colors
-  const accentColor = useColorModeValue('#4415b6', '#6c45e7');
-  const accentLight = useColorModeValue('#4415b615', 'rgba(108, 69, 231, 0.15)');
-  const accentLighter = useColorModeValue('#4415b608', 'rgba(108, 69, 231, 0.08)');
-  const accentMedium = useColorModeValue('#4415b630', 'rgba(108, 69, 231, 0.3)');
-  const borderColor = useColorModeValue('gray.200', 'gray.700');
-  const bgHover = useColorModeValue(accentLighter, 'rgba(108, 69, 231, 0.1)');
-  const bgActive = useColorModeValue(accentLight, 'rgba(108, 69, 231, 0.15)');
-  const textColor = useColorModeValue('gray.800', 'gray.200');
-  const secondaryTextColor = useColorModeValue('gray.500', 'gray.400');
-  const tertiaryTextColor = useColorModeValue('gray.400', 'gray.500');
-  const inputBg = useColorModeValue('white', 'gray.700');
-  const newButtonBg = useColorModeValue('white', 'gray.800');
-  const hoverButtonBgLight = '#3a1296';
-  const hoverButtonBgDark = '#7d5df5';
-  const buttonHoverBg = useColorModeValue(hoverButtonBgLight, hoverButtonBgDark);
+  // Get colors from centralized theme
+  const accentColor = colors.primary;
+  const accentLight = colors.primaryLight;
+  const accentLighter = colors.primaryLighter;
+  const accentMedium = colors.primaryMedium;
+  const borderColor = colors.border;
+  const bgHover = accentLighter;
+  const bgActive = accentLight;
+  const textColor = colors.text;
+  const secondaryTextColor = colors.textSecondary;
+  const tertiaryTextColor = colors.textTertiary;
+  const inputBg = colors.inputBg;
+  const newButtonBg = colors.background;
+  const buttonHoverBg = colors.primaryHover;
 
   const filteredSessions = sessions.filter((session) => 
     session.title.toLowerCase().includes(searchQuery.toLowerCase())
@@ -63,7 +62,7 @@ const ChatHistory = ({
         justify="space-between" 
         p={4} 
         boxShadow="0 1px 2px rgba(0, 0, 0, 0.05)"
-        bg={useColorModeValue('white', 'gray.800')}
+        bg={colors.background}
         position="relative"
         zIndex="1"
       >

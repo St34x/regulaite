@@ -1,6 +1,7 @@
 "use client"
 
 import { createContext, useContext, useEffect, useState } from 'react';
+import { applyThemeVariables } from '../theme';
 
 const ThemeContext = createContext();
 
@@ -35,8 +36,14 @@ export function ThemeProvider({ children, defaultTheme = 'system', enableSystem 
       newTheme === 'dark' || 
       (newTheme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     
+    // Remove previous theme classes
     root.classList.remove('light', 'dark');
+    
+    // Add new theme class
     root.classList.add(isDark ? 'dark' : 'light');
+    
+    // Apply CSS variables for the theme
+    applyThemeVariables(isDark);
     
     // Store the theme preference
     if (newTheme !== 'system') {

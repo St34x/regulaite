@@ -6,23 +6,24 @@ import {
   HStack, 
   Text, 
   Button,
-  Link,
-  useColorModeValue 
+  Link
 } from '@chakra-ui/react';
 import { useAuth } from '../../contexts/AuthContext';
 import ThemeToggle from '../ui/ThemeToggle';
 import { useTheme } from '../../contexts/ThemeContext';
+import { useThemeColors } from '../../theme';
 
 const Navbar = () => {
   const { currentUser, isAuthenticated, logout } = useAuth();
   const navigate = useNavigate();
   const { theme } = useTheme();
+  const colors = useThemeColors();
   
-  // Use CSS variables through Chakra's color mode
-  const bg = useColorModeValue('var(--chakra-colors-white)', 'var(--chakra-colors-gray-800)');
-  const borderColor = useColorModeValue('var(--chakra-colors-gray-200)', 'var(--chakra-colors-gray-700)');
-  const textColor = useColorModeValue('var(--chakra-colors-gray-800)', 'var(--chakra-colors-whiteAlpha-900)');
-  const accentColor = '#4415b6'; // This remains constant
+  // Use theme colors from our centralized system
+  const bg = colors.background;
+  const borderColor = colors.border;
+  const textColor = colors.text;
+  const accentColor = colors.primary; // Using the primary brand color
 
   const handleLogout = async () => {
     await logout();
