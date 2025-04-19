@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Union, List, BinaryIO
 import time
 import uuid
 from dotenv import load_dotenv
+from neo4j import GraphDatabase
 
 # Add the parent directory to Python's module path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -253,13 +254,56 @@ def process_document(self, file_content_b64: str, file_name: str, doc_id: Option
 
             # Index document in RAG system
             try:
+                # Add a delay before indexing to ensure Neo4j transaction has completed
+                time.sleep(2)
+                
+                # Verify document exists in Neo4j before indexing
+                driver = GraphDatabase.driver(
+                    NEO4J_URI,
+                    auth=(NEO4J_USER, NEO4J_PASSWORD)
+                )
+                
+                document_exists = False
+                with driver.session() as session:
+                    verify_result = session.run(
+                        "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                        doc_id=processed_doc_id
+                    )
+                    record = verify_result.single()
+                    document_exists = record and record["count"] > 0
+                
+                driver.close()
+                
+                if not document_exists:
+                    logger.warning(f"Document {processed_doc_id} not found in Neo4j, delaying indexing")
+                    result["indexed"] = False
+                    result["index_error"] = "Document not yet available in Neo4j"
+                    # Schedule indexing for later via bulk_index_documents
+                    bulk_index_documents.apply_async(
+                        args=[[processed_doc_id]], 
+                        countdown=15  # Delay 15 seconds before trying again
+                    )
+                    return result
+                
+                # Now proceed with indexing since document exists
                 rag_system = get_rag_system()
-                rag_system.index_document(processed_doc_id)
-                result["indexed"] = True
-                logger.info(f"Document {processed_doc_id} indexed in RAG system")
+                index_result = rag_system.index_document(processed_doc_id)
+                
+                if isinstance(index_result, dict) and index_result.get("status") == "success":
+                    result["indexed"] = True
+                    result["vector_count"] = index_result.get("vector_count", 0)
+                    logger.info(f"Document {processed_doc_id} indexed in RAG system with {index_result.get('vector_count', 0)} vectors")
+                elif index_result is True:
+                    result["indexed"] = True
+                    logger.info(f"Document {processed_doc_id} indexed in RAG system")
+                else:
+                    result["indexed"] = False
+                    result["index_error"] = "Unknown indexing result"
+                    logger.warning(f"Document {processed_doc_id} indexing returned unexpected result: {index_result}")
             except Exception as e:
-                logger.error(f"Error indexing document in RAG system: {str(e)}")
+                logger.error(f"Error indexing document in RAG system: {str(e)}", exc_info=True)
                 result["indexed"] = False
+                result["index_error"] = str(e)
                 # Continue without failing
 
         # Clean up
@@ -361,14 +405,49 @@ def bulk_index_documents(self, doc_ids: List[str]) -> Dict[str, Any]:
         # Process each document
         for doc_id in doc_ids:
             try:
-                indexed = rag_system.index_document(doc_id)
-                if indexed:
-                    results["successful"].append(doc_id)
+                index_result = rag_system.index_document(doc_id)
+                
+                if isinstance(index_result, dict):
+                    if index_result.get("status") == "success":
+                        results["successful"].append({
+                            "doc_id": doc_id,
+                            "vector_count": index_result.get("vector_count", 0),
+                            "message": "Successfully indexed"
+                        })
+                    elif "vector_count" in index_result and index_result.get("vector_count", 0) > 0:
+                        results["successful"].append({
+                            "doc_id": doc_id,
+                            "vector_count": index_result.get("vector_count", 0),
+                            "message": index_result.get("message", "Indexed successfully")
+                        })
+                    elif index_result.get("message") == "Document already indexed":
+                        results["successful"].append({
+                            "doc_id": doc_id,
+                            "vector_count": 0,
+                            "message": "Document was already indexed"
+                        })
+                    else:
+                        logger.warning(f"Indexing completed but with issues for {doc_id}: {index_result}")
+                        results["failed"].append({
+                            "doc_id": doc_id,
+                            "error": f"Indexing issue: {index_result.get('message', 'Unknown issue')}"
+                        })
+                elif index_result:
+                    results["successful"].append({
+                        "doc_id": doc_id,
+                        "message": "Indexing reported success"
+                    })
                 else:
-                    results["failed"].append(doc_id)
+                    results["failed"].append({
+                        "doc_id": doc_id,
+                        "error": "Indexing returned False"
+                    })
             except Exception as e:
                 logger.error(f"Error indexing document {doc_id}: {str(e)}")
-                results["failed"].append(doc_id)
+                results["failed"].append({
+                    "doc_id": doc_id,
+                    "error": str(e)
+                })
 
         # Clean up
         rag_system.close()
@@ -416,19 +495,9 @@ def retrieve_context(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         logger.error(f"Error retrieving context: {str(e)}")
         self.retry(exc=e, countdown=15, max_retries=2)
 
-# Optional: Celery beat tasks for scheduled operations
-app.conf.beat_schedule = {
-    'check-unindexed-documents': {
-        'task': 'check_unindexed_documents',
-        'schedule': 3600.0,  # Every hour
-    },
-}
-
 @app.task(name="check_unindexed_documents")
 def check_unindexed_documents():
     """Check for unindexed documents and schedule them for indexing"""
-    from neo4j import GraphDatabase
-
     try:
         # Connect to Neo4j
         driver = GraphDatabase.driver(
@@ -436,31 +505,68 @@ def check_unindexed_documents():
             auth=(NEO4J_USER, NEO4J_PASSWORD)
         )
 
-        # Find unindexed documents
+        # Find unindexed documents - use is_indexed property instead of indexed
         with driver.session() as session:
             result = session.run(
                 """
                 MATCH (d:Document)
-                WHERE d.indexed = false OR NOT EXISTS(d.indexed)
-                RETURN d.doc_id as doc_id
+                WHERE COALESCE(d.is_indexed, false) = false
+                RETURN d.doc_id as doc_id, 
+                       COALESCE(d.title, d.name, 'Untitled') as title, 
+                       COALESCE(d.language, 'en') as language
                 LIMIT 100
                 """
             )
 
-            unindexed_docs = [record["doc_id"] for record in result]
-
+            unindexed_docs = [(record["doc_id"], record.get("language", "en")) for record in result]
+            
+            # Group documents by language
+            language_groups = {}
+            for doc_id, language in unindexed_docs:
+                lang = language if language else "en"
+                if lang not in language_groups:
+                    language_groups[lang] = []
+                language_groups[lang].append(doc_id)
+            
         # Close Neo4j connection
         driver.close()
 
-        if unindexed_docs:
-            logger.info(f"Found {len(unindexed_docs)} unindexed documents. Scheduling for indexing.")
-            # Schedule bulk indexing task
-            bulk_index_documents.delay(unindexed_docs)
+        # Initialize RAG system to initialize languages
+        rag_system = get_rag_system()
+        
+        # Make sure all needed languages are initialized
+        for lang in language_groups.keys():
+            try:
+                rag_system.ensure_language_initialized(lang)
+                logger.info(f"Initialized language {lang} for indexing")
+            except Exception as e:
+                logger.error(f"Failed to initialize language {lang}: {str(e)}")
+        
+        # Clean up RAG system
+        rag_system.close()
+        
+        indexed_count = 0
+        for lang, docs in language_groups.items():
+            if docs:
+                logger.info(f"Found {len(docs)} unindexed documents for language {lang}. Scheduling for indexing.")
+                # Schedule bulk indexing task
+                bulk_index_documents.delay(doc_ids=docs)
+                indexed_count += len(docs)
 
-        return {
-            "status": "success",
-            "unindexed_documents": len(unindexed_docs)
-        }
+        if indexed_count > 0:
+            return {
+                "status": "success",
+                "unindexed_documents": indexed_count,
+                "language_groups": {k: len(v) for k, v in language_groups.items()},
+                "doc_ids": [doc_id for doc_id, _ in unindexed_docs]
+            }
+        else:
+            logger.info("No unindexed documents found.")
+            return {
+                "status": "success",
+                "unindexed_documents": 0,
+                "doc_ids": []
+            }
     except Exception as e:
         logger.error(f"Error checking for unindexed documents: {str(e)}")
         return {
@@ -468,5 +574,10 @@ def check_unindexed_documents():
             "message": str(e)
         }
 
-if __name__ == '__main__':
-    app.start()
+# Optional: Celery beat tasks for scheduled operations
+app.conf.beat_schedule = {
+    'check-unindexed-documents': {
+        'task': 'check_unindexed_documents',
+        'schedule': 600.0,  # Every 10 minutes (changed from 3600.0)
+    },
+}

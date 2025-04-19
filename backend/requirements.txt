@@ -40,6 +40,10 @@ sentence-transformers==4.0.2
 llama-index-retrievers-bm25==0.5.2
 PyStemmer==2.2.0.3
 
+# Language-specific models
+# Required for better French language support
+transformers>=4.51.3
+
 # Task queuing
 celery>=5.5.1
 redis>=5.2.1

@@ -11,7 +11,8 @@ import json
 import uuid
 import tempfile
 from typing import Dict, List, Any, Optional, BinaryIO
-from datetime import datetime
+from datetime import datetime as py_datetime
+import datetime
 from neo4j import GraphDatabase
 
 from .base_parser import BaseParser
@@ -269,7 +270,7 @@ class DoctlyParser(BaseParser):
         doc_metadata.update({
             "file_name": file_name,
             "parser": "doctly",
-            "processing_time": datetime.now().isoformat(),
+            "processing_time": py_datetime.now().isoformat(),
         })
 
         try:
@@ -388,6 +389,18 @@ class DoctlyParser(BaseParser):
                             metadata=element.get("metadata", {})
                         )
 
+            # Add processing metadata
+            metadata["processing_info"] = {
+                "api": "doctly",
+                "version": "1.0",
+                "processing_time": py_datetime.now().isoformat(),
+                "parameters": {
+                    "extract_metadata": self.extract_metadata,
+                    "extract_tables": self.extract_tables,
+                    "extract_images": self.extract_images
+                }
+            }
+
             return {
                 "doc_id": doc_id,
                 "status": "success",
@@ -419,17 +432,163 @@ class DoctlyParser(BaseParser):
 
         try:
             with self.driver.session() as session:
+                # Check if document exists
+                check_result = session.run(
+                    "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                    doc_id=doc_id
+                )
+                
+                if check_result.single()["count"] == 0:
+                    logger.warning(f"Document {doc_id} not found in Neo4j")
+                    return {"status": "error", "message": "Document not found"}
+                
+                # Check available node labels in the database
+                labels_result = session.run(
+                    """
+                    CALL db.labels() YIELD label
+                    RETURN collect(label) as labels
+                    """
+                )
+                node_labels = labels_result.single()["labels"]
+                
+                # First get deletion statistics for Chunk nodes
+                chunk_stats = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                chunk_count = chunk_stats.single()["chunk_count"] or 0
+                
+                # Check for Text nodes
+                text_count = 0
+                if "Text" in node_labels:
+                    text_stats = session.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        OPTIONAL MATCH (d)-[:CONTAINS]->(t:Text)
+                        RETURN count(t) as text_count
+                        """,
+                        doc_id=doc_id
+                    )
+                    text_count = text_stats.single()["text_count"] or 0
+                
+                # Get relationship count
+                rel_stats = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[r]-()
+                    RETURN count(r) as rel_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                relationship_count = rel_stats.single()["rel_count"] or 0
+                logger.info(f"Found {chunk_count} chunks, {text_count} text nodes and {relationship_count} relationships to delete")
+                
                 # Delete the document and all its relationships and connected nodes
                 if purge_orphans:
+                    # First delete any relationships between chunks and other nodes
+                    if chunk_count > 0:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            OPTIONAL MATCH (c)-[cr]-()
+                            DELETE cr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        # Delete the chunks
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            DETACH DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete Text nodes if they exist
+                    if text_count > 0:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            OPTIONAL MATCH (t)-[tr]-()
+                            DELETE tr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            DETACH DELETE t
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete document relationships
+                    session.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        OPTIONAL MATCH (d)-[r]-()
+                        DELETE r
+                        """,
+                        doc_id=doc_id
+                    )
+                    
+                    # Delete document node
                     result = session.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
-                        OPTIONAL MATCH (d)-[:CONTAINS]->(t)
-                        DETACH DELETE d, t
+                        DELETE d
                         """,
                         doc_id=doc_id
                     )
                 else:
+                    # First delete any relationships between chunks and other nodes
+                    if chunk_count > 0:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            OPTIONAL MATCH (c)-[cr]-()
+                            DELETE cr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        # Delete the chunks
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            DETACH DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete Text nodes if they exist
+                    if text_count > 0:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            OPTIONAL MATCH (t)-[tr]-()
+                            DELETE tr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            DETACH DELETE t
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete document relationships and the document itself
                     result = session.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
@@ -439,12 +598,17 @@ class DoctlyParser(BaseParser):
                     )
 
                 summary = result.consume()
+                
+                total_deleted = chunk_count + text_count + 1  # +1 for the document node
+                logger.info(f"Document {doc_id} deleted with {chunk_count} chunks and {text_count} text nodes")
 
                 return {
                     "doc_id": doc_id,
                     "status": "success",
-                    "nodes_deleted": summary.counters.nodes_deleted,
-                    "relationships_deleted": summary.counters.relationships_deleted
+                    "nodes_deleted": total_deleted,
+                    "chunks_deleted": chunk_count,
+                    "text_nodes_deleted": text_count,
+                    "relationships_deleted": relationship_count
                 }
 
         except Exception as e:

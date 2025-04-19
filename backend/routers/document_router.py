@@ -10,9 +10,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import os
 from datetime import datetime
+import asyncio
 
 # Neo4j imports
 from neo4j.time import DateTime as Neo4jDateTime
+
+# Import parser types
+from unstructured_parser.base_parser import ParserType
 
 # Configure logging
 logging.basicConfig(
@@ -42,6 +46,31 @@ def neo4j_datetime_serializer(obj):
 
 # Models for API
 class DocumentMetadata(BaseModel):
+    """Document metadata for API responses."""
+    doc_id: str
+    title: str
+    name: str
+    is_indexed: bool
+    file_type: str = ""
+    description: str = ""
+    language: str = "en"
+    size: int = 0
+    page_count: int = 0
+    chunk_count: int = 0
+    created_at: Any
+    tags: List[str] = []
+    category: str = ""
+    author: str = ""
+    status: str = "active"
+
+
+class DocumentDetail(DocumentMetadata):
+    """Detailed document information."""
+    indexed_at: Optional[Any] = None
+    # Additional fields can be added here
+
+
+class DocumentUploadMetadata(BaseModel):
     """Additional metadata for document processing."""
     title: Optional[str] = Field(None, description="Document title")
     author: Optional[str] = Field(None, description="Document author")
@@ -146,9 +175,40 @@ async def process_document(
     use_enrichment: bool = Form(True),
     detect_language: bool = Form(True),
     language: Optional[str] = Form(None),
-    use_queue: bool = Form(False)
+    use_queue: bool = Form(False),
+    parser_type: str = Form(ParserType.UNSTRUCTURED.value),
+    extract_images: bool = Form(False)
 ):
-    """Process a document using Unstructured API and spaCy NLP, then store in Neo4j."""
+    """Process a document using the specified parser and store in Neo4j."""
+
+    # Validate parser type
+    try:
+        if parser_type not in [pt.value for pt in ParserType]:
+            logger.warning(f"Invalid parser type: {parser_type}, using default: {ParserType.UNSTRUCTURED.value}")
+            parser_type = ParserType.UNSTRUCTURED.value
+    except Exception as e:
+        logger.warning(f"Error validating parser type: {str(e)}, using default")
+        parser_type = ParserType.UNSTRUCTURED.value
+
+    # Add parser type to metadata
+    metadata_dict = {}
+    if metadata:
+        try:
+            metadata_dict = json.loads(metadata)
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse metadata JSON: {metadata}")
+    
+    metadata_dict["parser_type"] = parser_type
+    
+    # Add parser settings to metadata
+    if "parser_settings" not in metadata_dict:
+        metadata_dict["parser_settings"] = {}
+    
+    # Set extract_images in parser settings
+    metadata_dict["parser_settings"]["extract_images"] = extract_images
+
+    # Convert back to JSON string
+    metadata = json.dumps(metadata_dict)
 
     # Import and forward to existing implementation in main.py
     from main import process_document as main_process_document
@@ -161,318 +221,329 @@ async def process_document(
         use_enrichment=use_enrichment,
         detect_language=detect_language,
         language=language,
-        use_queue=use_queue
+        use_queue=use_queue,
+        parser_type=parser_type
     )
 
     return response
 
 
-@router.get("", response_model=Dict[str, Any])
-async def list_documents(
-    limit: int = 10,
-    offset: int = 0,
-    sort_by: str = "created",
+@router.get("/", response_model=List[DocumentMetadata])
+async def document_list(
+    skip: int = 0,
+    limit: int = 100,
+    sort_by: str = "created_at",
     sort_order: str = "desc",
-    file_type: Optional[str] = None,
-    category: Optional[str] = None,
-    language: Optional[str] = None,
-    tags: Optional[str] = None,
-    search: Optional[str] = None
+    filter_tags: Optional[List[str]] = Query(None),
+    filter_status: Optional[List[str]] = Query(None),
+    search_query: Optional[str] = None
 ):
-    """List all documents with optional filtering and sorting."""
+    """
+    Get a list of documents with optional filtering and search.
+    """
+    # Validate sort parameters
+    valid_sort_fields = ["created_at", "title", "file_type", "size", "language"]
+    valid_sort_orders = ["asc", "desc"]
+
+    if sort_by not in valid_sort_fields:
+        sort_by = "created_at"
+    if sort_order not in valid_sort_orders:
+        sort_order = "desc"
+
+    # Connect to Neo4j
+    from neo4j import GraphDatabase
+    from config.settings import get_settings
+
+    settings = get_settings()
+    neo4j_driver = GraphDatabase.driver(
+        settings.NEO4J_URI,
+        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+    )
+
+    documents = []
     try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
+        with neo4j_driver.session() as session:
+            # Build query based on filters
+            query = """
+            MATCH (d:Document)
+            """
 
-        with driver.session() as session:
-            # Start building the query
-            query_parts = ["MATCH (d:Document)"]
-            params = {}
-
-            # Add filters if provided
-            filters = []
-
-            if file_type:
-                filters.append("d.file_type = $file_type")
-                params["file_type"] = file_type
-
-            if category:
-                filters.append("d.category = $category")
-                params["category"] = category
-
-            if language:
-                filters.append("d.language = $language")
-                params["language"] = language
-
-            if tags:
-                tag_list = tags.split(",")
-                filters.append("ANY(tag IN $tags WHERE tag IN d.tags)")
-                params["tags"] = tag_list
-
-            if search:
-                filters.append("(d.title CONTAINS $search OR d.doc_id CONTAINS $search)")
-                params["search"] = search
-
-            # Combine filters if any
-            if filters:
-                query_parts.append("WHERE " + " AND ".join(filters))
-
-            # Count total documents
-            count_query = "\n".join(query_parts) + "\nRETURN COUNT(d) as total"
-            count_result = session.run(count_query, params).single()
-            total = count_result["total"] if count_result else 0
-
-            # Add sorting and pagination
-            query_parts.append(f"RETURN d ORDER BY d.{sort_by} {sort_order.upper()}")
-            query_parts.append(f"SKIP {offset} LIMIT {limit}")
-
-            # Execute the query
-            query = "\n".join(query_parts)
-            results = session.run(query, params)
-
-            # Process results
-            documents = []
-            for record in results:
-                doc = record["d"]
-
-                # Convert Neo4j values to Python
-                doc_dict = dict(doc.items())
-
-                # Convert any Neo4j DateTime objects to ISO format strings
-                for key, value in doc_dict.items():
-                    if isinstance(value, Neo4jDateTime):
-                        doc_dict[key] = neo4j_datetime_serializer(value)
-
-                documents.append(doc_dict)
-
-            return {"documents": documents, "total": total}
-
-    except Exception as e:
-        logger.error(f"Error listing documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
-
-
-@router.get("/{doc_id}", response_model=Dict[str, Any])
-async def get_document(doc_id: str, include_chunks: bool = False, include_entities: bool = False):
-    """Get document metadata and optionally chunks and entities."""
-    try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
-
-        with driver.session() as session:
-            # Get document metadata
-            doc_result = session.run(
-                "MATCH (d:Document {doc_id: $doc_id}) RETURN d",
-                doc_id=doc_id
-            )
-
-            doc_record = doc_result.single()
-            if not doc_record:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document not found: {doc_id}"
-                )
-
-            document = dict(doc_record["d"])
-            response = {"document": document}
-
-            # Get document chunks if requested
-            if include_chunks:
-                chunks_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                    RETURN c
-                    ORDER BY c.index
-                    """,
-                    doc_id=doc_id
-                )
-
-                chunks = [dict(record["c"]) for record in chunks_result]
-                response["chunks"] = chunks
-                response["chunk_count"] = len(chunks)
-
-            # Get document entities if requested
-            if include_entities:
-                entities_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(:Chunk)-[:HAS_ENTITY]->(e:Entity)
-                    RETURN DISTINCT e
-                    ORDER BY e.name
-                    """,
-                    doc_id=doc_id
-                )
-
-                entities = [dict(record["e"]) for record in entities_result]
-                response["entities"] = entities
-                response["entity_count"] = len(entities)
-
-            return response
-
-    except Exception as e:
-        logger.error(f"Error retrieving document: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving document: {str(e)}"
-        )
-
-
-@router.delete("/{doc_id}")
-async def delete_document(doc_id: str, delete_from_index: bool = True):
-    """Delete document and its chunks from Neo4j and optionally from vector store."""
-    try:
-        # Get dependencies
-        driver = await get_neo4j_driver()
-        rag_system = await get_rag_system()
-
-        # First delete from Neo4j
-        with driver.session() as session:
-            # Check if document exists
-            doc_check = session.run(
-                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
-                doc_id=doc_id
-            )
-
-            if doc_check.single()["count"] == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document not found: {doc_id}"
-                )
-
-            # Delete all relationships and nodes related to the document
-            result = session.run(
+            # Apply tag filter if provided
+            if filter_tags and len(filter_tags) > 0:
+                query += """
+                WHERE any(tag IN d.tags WHERE tag IN $filter_tags)
                 """
-                MATCH (d:Document {doc_id: $doc_id})
-                OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                OPTIONAL MATCH (c)-[r]->(n)
-                DELETE r, c, d
-                RETURN count(c) as chunks_deleted
-                """,
-                doc_id=doc_id
+
+            # Apply status filter if provided
+            if filter_status and len(filter_status) > 0:
+                if "WHERE" not in query:
+                    query += "WHERE "
+                else:
+                    query += "AND "
+                query += """
+                d.status IN $filter_status
+                """
+
+            # Apply text search if provided
+            if search_query and search_query.strip():
+                if "WHERE" not in query:
+                    query += "WHERE "
+                else:
+                    query += "AND "
+                # Full-text search across multiple fields
+                query += """
+                (
+                    toLower(d.title) CONTAINS toLower($search_query) OR
+                    toLower(d.name) CONTAINS toLower($search_query) OR
+                    toLower(COALESCE(d.description, '')) CONTAINS toLower($search_query)
+                )
+                """
+
+            # Add return statement with sorting
+            query += f"""
+            RETURN d.doc_id as doc_id, 
+                   COALESCE(d.title, d.name) as title, 
+                   COALESCE(d.is_indexed, false) as is_indexed,
+                   COALESCE(d.name, '') as name, 
+                   COALESCE(d.file_type, '') as file_type, 
+                   COALESCE(d.description, '') as description,
+                   COALESCE(d.language, 'en') as language,
+                   COALESCE(d.size, 0) as size,
+                   COALESCE(d.page_count, 0) as page_count,
+                   COALESCE(d.chunk_count, 0) as chunk_count,
+                   COALESCE(d.created, d.created_at, datetime()) as created_at,
+                   COALESCE(d.tags, []) as tags,
+                   COALESCE(d.category, '') as category,
+                   COALESCE(d.author, '') as author,
+                   COALESCE(d.status, 'active') as status
+            ORDER BY d.{sort_by} {sort_order}
+            SKIP $skip LIMIT $limit
+            """
+
+            # Execute the query with parameters
+            result = session.run(
+                query,
+                skip=skip,
+                limit=limit,
+                filter_tags=filter_tags if filter_tags else [],
+                filter_status=filter_status if filter_status else [],
+                search_query=search_query if search_query else ""
             )
 
-            chunks_deleted = result.single()["chunks_deleted"]
+            # Process the results
+            for record in result:
+                doc = {
+                    "doc_id": record["doc_id"],
+                    "title": record["title"],
+                    "name": record["name"],
+                    "is_indexed": record["is_indexed"],
+                    "file_type": record["file_type"],
+                    "description": record["description"],
+                    "language": record["language"],
+                    "size": record["size"],
+                    "page_count": record["page_count"],
+                    "chunk_count": record["chunk_count"],
+                    "created_at": record["created_at"],
+                    "tags": record["tags"],
+                    "category": record["category"],
+                    "author": record["author"],
+                    "status": record["status"]
+                }
+                documents.append(doc)
 
-        # Delete from vector index if requested
-        index_message = ""
-        if delete_from_index and chunks_deleted > 0:
-            try:
-                # Use RAG system to delete from index
-                rag_system.delete_document(doc_id)
-                index_message = ", and deleted from vector index"
-            except Exception as e:
-                logger.error(f"Error deleting document from vector index: {str(e)}")
-                index_message = f", but failed to delete from vector index: {str(e)}"
-
-        return {
-            "doc_id": doc_id,
-            "deleted": True,
-            "chunks_deleted": chunks_deleted,
-            "message": f"Document and {chunks_deleted} chunks deleted from database{index_message}"
-        }
-
-    except HTTPException as he:
-        # Re-raise HTTP exceptions
-        raise he
     except Exception as e:
-        logger.error(f"Error deleting document: {str(e)}")
+        logger.error(f"Error fetching document list: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        neo4j_driver.close()
+
+    return documents
+
+
+@router.get("/stats", response_model=DocumentStatsResponse)
+async def get_document_stats():
+    """Get statistics about documents in the system."""
+    try:
+        # Get neo4j driver
+        driver = await get_neo4j_driver()
+
+        with driver.session() as session:
+            # Get total document count
+            total_doc_result = session.run("MATCH (d:Document) RETURN count(d) as count")
+            total_documents = total_doc_result.single()["count"]
+
+            # Get total chunk count
+            total_chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) as count")
+            total_chunks = total_chunk_result.single()["count"]
+
+            # Get documents by type
+            type_result = session.run(
+                """
+                MATCH (d:Document)
+                RETURN COALESCE(d.file_type, d.filetype) as type, count(d) as count
+                ORDER BY count DESC
+                """
+            )
+            documents_by_type = {record["type"] or "unknown": record["count"] for record in type_result}
+
+            # Get documents by language
+            lang_result = session.run(
+                """
+                MATCH (d:Document)
+                RETURN d.language as language, count(d) as count
+                ORDER BY count DESC
+                """
+            )
+            documents_by_language = {record["language"] or "unknown": record["count"] for record in lang_result}
+
+            # Get recent uploads
+            recent_result = session.run(
+                """
+                MATCH (d:Document)
+                RETURN d.doc_id as doc_id, d.title as title, d.created as created,
+                       COALESCE(d.file_type, d.filetype) as file_type, d.language as language,
+                       d.original_filename as filename, d.size as size
+                ORDER BY d.created DESC
+                LIMIT 5
+                """
+            )
+            recent_uploads = [dict(record) for record in recent_result]
+
+            # Calculate total storage
+            total_storage = 0
+            if total_documents > 0:
+                storage_result = session.run("MATCH (d:Document) RETURN sum(d.size) as total_size")
+                total_storage = storage_result.single()["total_size"] or 0
+
+            # Convert to MB
+            total_storage_mb = round(total_storage / (1024 * 1024), 2)
+
+            return DocumentStatsResponse(
+                total_documents=total_documents,
+                total_chunks=total_chunks,
+                documents_by_type=documents_by_type,
+                documents_by_language=documents_by_language,
+                recent_uploads=recent_uploads,
+                total_storage_mb=total_storage_mb
+            )
+
+    except Exception as e:
+        logger.error(f"Error retrieving document statistics: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error deleting document: {str(e)}"
+            detail=f"Error retrieving document statistics: {str(e)}"
         )
 
 
-@router.post("/index/{doc_id}", response_model=DocumentIndexStatus)
-async def index_document(doc_id: str, force_reindex: bool = False):
-    """Index a document in the vector store."""
+@router.get("/parsers", response_model=Dict[str, List[Dict[str, str]]])
+async def get_parser_types():
+    """Get available parser types for document processing."""
+    parser_types = []
+    
+    for parser in ParserType:
+        parser_info = {
+            "id": parser.value,
+            "name": parser.name.replace("_", " ").title(),
+            "description": get_parser_description(parser)
+        }
+        parser_types.append(parser_info)
+    
+    return {"parsers": parser_types}
+
+def get_parser_description(parser_type: ParserType) -> str:
+    """Get the description for a parser type."""
+    descriptions = {
+        ParserType.UNSTRUCTURED: "Default document parser that extracts text and structure from various document formats",
+        ParserType.UNSTRUCTURED_CLOUD: "Cloud-based version of Unstructured with enhanced capabilities",
+        ParserType.DOCTLY: "Specialized parser for legal and regulatory documents with enhanced metadata extraction",
+        ParserType.LLAMAPARSE: "AI-powered document parser based on LlamaIndex with advanced semantic understanding"
+    }
+    return descriptions.get(parser_type, "Document parser")
+
+@router.post("/reindex-all", response_model=Dict[str, Any])
+async def reindex_all_documents(force: bool = False):
+    """Reindex all documents in the vector store."""
     try:
         # Get dependencies
         driver = await get_neo4j_driver()
         rag_system = await get_rag_system()
 
-        # Check if document exists in Neo4j
+        # Get all document IDs from Neo4j
         with driver.session() as session:
-            doc_check = session.run(
-                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
-                doc_id=doc_id
+            docs_result = session.run(
+                """
+                MATCH (d:Document)
+                RETURN d.doc_id as doc_id, d.title as title, d.is_indexed as is_indexed
+                """
             )
+            
+            documents = []
+            for record in docs_result:
+                doc_id = record["doc_id"]
+                title = record["title"]
+                is_indexed = record["is_indexed"]
+                
+                # Skip already indexed documents unless force is True
+                if not force and is_indexed:
+                    continue
+                    
+                documents.append({
+                    "doc_id": doc_id,
+                    "title": title
+                })
 
-            if doc_check.single()["count"] == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document not found: {doc_id}"
-                )
-
-        # Index the document
-        result = rag_system.index_document(doc_id, force_reindex=force_reindex)
-
-        return DocumentIndexStatus(
-            doc_id=doc_id,
-            status="success",
-            vector_count=result.get("vector_count", 0) if isinstance(result, dict) else None,
-            message=f"Document successfully indexed in vector store"
-        )
-
-    except HTTPException as he:
-        # Re-raise HTTP exceptions
-        raise he
-    except Exception as e:
-        logger.error(f"Error indexing document: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error indexing document: {str(e)}"
-        )
-
-
-@router.post("/search", response_model=Dict[str, Any])
-async def search_documents(request: DocumentSearchRequest):
-    """Search for documents using semantic search."""
-    try:
-        # Get RAG system
-        rag_system = await get_rag_system()
-
-        # Prepare search parameters
-        hybrid = request.hybrid_search if request.hybrid_search is not None else True
-
-        # Use RAG system to search
-        results = rag_system.retrieve(
-            query=request.query,
-            top_k=request.limit,
-            filters=request.filters,
-            hybrid_search=hybrid
-        )
-
-        # Process results
-        processed_results = []
-        seen_docs = set()
-
-        for item in results:
-            doc_id = item["metadata"].get("doc_id")
-
-            # Create a result entry
-            result_entry = {
-                "doc_id": doc_id,
-                "document_title": item["metadata"].get("doc_name", "Unknown document"),
-                "text": item["text"],
-                "section": item["metadata"].get("section", "Unknown"),
-                "score": item.get("score", 0),
-                "metadata": item["metadata"]
+        # No documents to reindex
+        if not documents:
+            return {
+                "status": "success",
+                "message": "No documents need reindexing",
+                "total": 0,
+                "documents": []
             }
-
-            processed_results.append(result_entry)
-            seen_docs.add(doc_id)
+            
+        # Reindex each document
+        results = []
+        for doc in documents:
+            doc_id = doc["doc_id"]
+            title = doc["title"]
+            
+            try:
+                logger.info(f"Reindexing document: {doc_id} - {title}")
+                result = rag_system.index_document(doc_id, force_reindex=True)
+                
+                # Add document info to results
+                doc_result = {
+                    "doc_id": doc_id,
+                    "title": title,
+                    "status": result.get("status", "unknown"),
+                    "vector_count": result.get("vector_count", 0)
+                }
+                results.append(doc_result)
+                
+                # Don't overload the system
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error reindexing document {doc_id}: {str(e)}")
+                results.append({
+                    "doc_id": doc_id,
+                    "title": title,
+                    "status": "error",
+                    "error": str(e)
+                })
 
         return {
-            "results": processed_results,
-            "query": request.query,
-            "count": len(processed_results),
-            "unique_documents": len(seen_docs)
+            "status": "success",
+            "message": f"Reindexed {len(results)} documents",
+            "total": len(results),
+            "documents": results
         }
 
     except Exception as e:
-        logger.error(f"Error searching documents: {str(e)}")
+        logger.error(f"Error reindexing all documents: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error searching documents: {str(e)}"
+            detail=f"Error reindexing all documents: {str(e)}"
         )
 
 
@@ -573,76 +644,375 @@ async def update_document_config(config: DocumentConfigUpdate):
         )
 
 
-@router.get("/stats", response_model=DocumentStatsResponse)
-async def get_document_stats():
-    """Get statistics about documents in the system."""
+@router.get("/{doc_id}", response_model=Dict[str, Any])
+async def get_document(doc_id: str, include_chunks: bool = False, include_entities: bool = False):
+    """Get document metadata and optionally chunks and entities."""
     try:
         # Get neo4j driver
         driver = await get_neo4j_driver()
 
         with driver.session() as session:
-            # Get total document count
-            total_doc_result = session.run("MATCH (d:Document) RETURN count(d) as count")
-            total_documents = total_doc_result.single()["count"]
-
-            # Get total chunk count
-            total_chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) as count")
-            total_chunks = total_chunk_result.single()["count"]
-
-            # Get documents by type
-            type_result = session.run(
+            # Get document metadata
+            doc_result = session.run(
                 """
-                MATCH (d:Document)
-                RETURN d.file_type as type, count(d) as count
-                ORDER BY count DESC
-                """
+                MATCH (d:Document {doc_id: $doc_id})
+                RETURN d.doc_id as doc_id, 
+                       COALESCE(d.title, d.name) as title, 
+                       COALESCE(d.name, '') as name,
+                       COALESCE(d.is_indexed, false) as is_indexed,
+                       COALESCE(d.file_type, '') as file_type, 
+                       COALESCE(d.description, '') as description,
+                       COALESCE(d.language, 'en') as language,
+                       COALESCE(d.size, 0) as size,
+                       COALESCE(d.page_count, 0) as page_count,
+                       COALESCE(d.chunk_count, 0) as chunk_count,
+                       COALESCE(d.created, d.created_at, datetime()) as created_at,
+                       COALESCE(d.indexed_at, null) as indexed_at,
+                       COALESCE(d.tags, []) as tags,
+                       COALESCE(d.category, '') as category,
+                       COALESCE(d.author, '') as author,
+                       COALESCE(d.status, 'active') as status
+                """,
+                doc_id=doc_id
             )
-            documents_by_type = {record["type"] or "unknown": record["count"] for record in type_result}
-
-            # Get documents by language
-            lang_result = session.run(
+            
+            record = doc_result.single()
+            if not record:
+                raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+                
+            document = {
+                "doc_id": record["doc_id"],
+                "title": record["title"],
+                "name": record["name"],
+                "is_indexed": record["is_indexed"],
+                "file_type": record["file_type"],
+                "description": record["description"],
+                "language": record["language"],
+                "size": record["size"],
+                "page_count": record["page_count"],
+                "chunk_count": record["chunk_count"],
+                "created_at": record["created_at"],
+                "indexed_at": record["indexed_at"],
+                "tags": record["tags"],
+                "category": record["category"],
+                "author": record["author"],
+                "status": record["status"]
+            }
+            
+            # Get chunk count
+            chunk_result = session.run(
                 """
-                MATCH (d:Document)
-                RETURN d.language as language, count(d) as count
-                ORDER BY count DESC
-                """
+                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                RETURN count(c) as chunk_count
+                """,
+                doc_id=doc_id
             )
-            documents_by_language = {record["language"] or "unknown": record["count"] for record in lang_result}
-
-            # Get recent uploads
-            recent_result = session.run(
-                """
-                MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title, d.created as created,
-                       d.file_type as file_type, d.language as language,
-                       d.original_filename as filename, d.size as size
-                ORDER BY d.created DESC
-                LIMIT 5
-                """
-            )
-            recent_uploads = [dict(record) for record in recent_result]
-
-            # Calculate total storage
-            total_storage = 0
-            if total_documents > 0:
-                storage_result = session.run("MATCH (d:Document) RETURN sum(d.size) as total_size")
-                total_storage = storage_result.single()["total_size"] or 0
-
-            # Convert to MB
-            total_storage_mb = round(total_storage / (1024 * 1024), 2)
-
-            return DocumentStatsResponse(
-                total_documents=total_documents,
-                total_chunks=total_chunks,
-                documents_by_type=documents_by_type,
-                documents_by_language=documents_by_language,
-                recent_uploads=recent_uploads,
-                total_storage_mb=total_storage_mb
-            )
-
+            
+            chunk_record = chunk_result.single()
+            document["chunk_count"] = chunk_record["chunk_count"] if chunk_record else 0
+            
+            return document
+            
     except Exception as e:
-        logger.error(f"Error retrieving document statistics: {str(e)}")
+        logger.error(f"Error getting document {doc_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        neo4j_driver.close()
+
+
+@router.delete("/{doc_id}")
+async def delete_document(doc_id: str, delete_from_index: bool = True):
+    """Delete document and its chunks from Neo4j and optionally from vector store."""
+    try:
+        # Get dependencies
+        driver = await get_neo4j_driver()
+        rag_system = await get_rag_system()
+
+        # First try to delete from vector index if requested
+        if delete_from_index:
+            try:
+                # Use RAG system to delete from index
+                logger.info(f"Deleting document {doc_id} from vector index")
+                rag_deleted = rag_system.delete_document(doc_id)
+                index_message = ", and deleted from vector index"
+                
+                if not rag_deleted:
+                    logger.warning(f"Document {doc_id} may not exist in vector index or encountered errors during deletion")
+            except Exception as e:
+                # Log error but continue - we still want to delete from Neo4j
+                logger.error(f"Error deleting document from vector index: {str(e)}")
+                index_message = f", but failed to delete from vector index: {str(e)}"
+                
+                # Don't raise exception here - continue with Neo4j deletion
+
+        # Then delete from Neo4j
+        try:
+            with driver.session() as session:
+                # Check if document exists
+                doc_check = session.run(
+                    "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                    doc_id=doc_id
+                )
+
+                if doc_check.single()["count"] == 0:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Document not found: {doc_id}"
+                    )
+                
+                # First count the chunks that will be deleted
+                count_result = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                chunks_count = count_result.single()["chunk_count"]
+                if chunks_count is None:
+                    chunks_count = 0
+                
+                logger.info(f"Found {chunks_count} chunks to delete for document {doc_id}")
+                
+                # First delete the relationships between chunks and other nodes
+                session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                    OPTIONAL MATCH (c)-[cr]-()
+                    DELETE cr
+                    """,
+                    doc_id=doc_id
+                )
+                
+                # Then delete the chunk nodes themselves
+                session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                    DETACH DELETE c
+                    """,
+                    doc_id=doc_id
+                )
+                
+                # Delete document relationships
+                session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[r]-()
+                    DELETE r
+                    """,
+                    doc_id=doc_id
+                )
+                
+                # Finally delete the document node
+                session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    DELETE d
+                    """,
+                    doc_id=doc_id
+                )
+                
+                logger.info(f"Deleted document {doc_id} with {chunks_count} chunks from Neo4j")
+                chunks_deleted = chunks_count
+                
+        except Exception as neo4j_error:
+            logger.error(f"Error deleting document from Neo4j: {str(neo4j_error)}")
+            # Check if another error handling has already set index_message
+            if not locals().get('index_message'):
+                index_message = ""
+                
+            # If we failed to delete from both vector store and Neo4j, that's a bigger problem
+            if "index_message" in locals() and "failed to delete from vector index" in index_message:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to delete document from both Neo4j and vector index. Neo4j error: {str(neo4j_error)}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error deleting document from Neo4j: {str(neo4j_error)}"
+                )
+
+        # If we get here, at least Neo4j deletion was successful
+        return {
+            "doc_id": doc_id,
+            "deleted": True,
+            "chunks_deleted": chunks_deleted,
+            "message": f"Document and {chunks_deleted} chunks deleted from database{locals().get('index_message', '')}"
+        }
+
+    except HTTPException as he:
+        # Re-raise HTTP exceptions
+        raise he
+    except Exception as e:
+        logger.error(f"Error deleting document: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error retrieving document statistics: {str(e)}"
+            detail=f"Error deleting document: {str(e)}"
+        )
+
+
+@router.post("/index/{doc_id}", response_model=DocumentIndexStatus)
+async def index_document(doc_id: str, force_reindex: bool = False):
+    """Index a document in the vector store."""
+    try:
+        # First check if document exists
+        neo4j_driver = await get_neo4j_driver()
+        
+        with neo4j_driver.session() as session:
+            result = session.run(
+                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                doc_id=doc_id
+            )
+            
+            if result.single()["count"] == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document {doc_id} not found"
+                )
+        
+        # Get RAG system and index document
+        rag_system = await get_rag_system()
+        index_result = rag_system.index_document(doc_id, force_reindex=force_reindex)
+        
+        # Check the result format
+        if isinstance(index_result, dict):
+            # Check if it already contains a "status" key
+            if "status" in index_result:
+                status = index_result["status"]
+                vector_count = index_result.get("vector_count", 0)
+                message = index_result.get("message", "")
+            # Check if it has positive vector count
+            elif "vector_count" in index_result and index_result["vector_count"] > 0:
+                status = "success"
+                vector_count = index_result["vector_count"]
+                message = index_result.get("message", "Document indexed successfully")
+            # Check if it's already indexed
+            elif index_result.get("message") == "Document already indexed":
+                status = "success"
+                vector_count = 0
+                message = "Document already indexed"
+            # Otherwise consider it failed
+            else:
+                status = "error"
+                vector_count = 0
+                message = index_result.get("message", "Failed to index document")
+        elif index_result:
+            # Boolean True result
+            status = "success"
+            vector_count = None
+            message = "Document successfully indexed"
+        else:
+            # Failed indexing
+            status = "error"
+            vector_count = 0
+            message = "Failed to index document"
+        
+        return {
+            "doc_id": doc_id,
+            "status": status,
+            "vector_count": vector_count,
+            "message": message
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error indexing document: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error indexing document: {str(e)}"
+        )
+
+
+@router.post("/search", response_model=Dict[str, Any])
+async def search_documents(request: DocumentSearchRequest):
+    """Search for documents using semantic search."""
+    try:
+        # Get RAG system
+        rag_system = await get_rag_system()
+
+        # Prepare search parameters
+        hybrid = request.hybrid_search if request.hybrid_search is not None else True
+
+        # Use RAG system to search
+        results = rag_system.retrieve(
+            query=request.query,
+            top_k=request.limit,
+            filters=request.filters,
+            hybrid_search=hybrid
+        )
+
+        # Process results
+        processed_results = []
+        seen_docs = set()
+
+        for item in results:
+            doc_id = item["metadata"].get("doc_id")
+
+            # Create a result entry
+            result_entry = {
+                "doc_id": doc_id,
+                "document_title": item["metadata"].get("doc_name", "Unknown document"),
+                "text": item["text"],
+                "section": item["metadata"].get("section", "Unknown"),
+                "score": item.get("score", 0),
+                "metadata": item["metadata"]
+            }
+
+            processed_results.append(result_entry)
+            seen_docs.add(doc_id)
+
+        return {
+            "results": processed_results,
+            "query": request.query,
+            "count": len(processed_results),
+            "unique_documents": len(seen_docs)
+        }
+
+    except Exception as e:
+        logger.error(f"Error searching documents: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error searching documents: {str(e)}"
+        )
+
+
+@router.post("/maintenance/standardize-properties", response_model=Dict[str, Any])
+async def standardize_document_properties():
+    """
+    Maintenance endpoint to standardize document properties.
+    This ensures all documents have consistent property names.
+    """
+    try:
+        # Get neo4j driver
+        driver = await get_neo4j_driver()
+
+        with driver.session() as session:
+            # Standardize file_type property
+            file_type_result = session.run(
+                """
+                MATCH (d:Document)
+                WHERE d.filetype IS NOT NULL AND d.file_type IS NULL
+                SET d.file_type = d.filetype
+                RETURN count(d) as updated_count
+                """
+            )
+            updated_file_type = file_type_result.single()["updated_count"]
+
+            # Add other property standardizations here if needed
+
+            return {
+                "status": "success",
+                "message": f"Standardized document properties successfully",
+                "updated_file_type_count": updated_file_type
+            }
+
+    except Exception as e:
+        logger.error(f"Error standardizing document properties: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error standardizing document properties: {str(e)}"
         )

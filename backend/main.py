@@ -11,11 +11,13 @@ import uuid
 import json
 import mariadb
 from typing import List, Optional, Dict, Any, Union, Literal
-from datetime import datetime
+from datetime import datetime, timedelta
 import neo4j
 from neo4j import GraphDatabase
 from neo4j.time import DateTime as Neo4jDateTime
 from openai import OpenAI
+from unstructured_parser.base_parser import BaseParser, ParserType
+import threading
 
 # Custom JSON encoder for Neo4j DateTime objects
 class Neo4jDateTimeEncoder(json.JSONEncoder):
@@ -53,19 +55,24 @@ from routers.agents_router import router as agents_metadata_router
 from routers.welcome_router import router as welcome_router
 from routers.auth_router import router as auth_router
 
+# Import model preloading function
+from llamaIndex_rag.preload_models import preload_models
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
+# Create FastAPI instance
 app = FastAPI(
-    title="RegulAite API",
-    description="API for RegulAite AI services",
+    title="RegulAIte API",
+    description="Backend API for RegulAIte application",
+    version="1.0.0",
     # Add custom JSON encoder for Neo4j DateTime objects to ensure proper serialization
     json_encoders={Neo4jDateTime: lambda dt: datetime(
         dt.year, dt.month, dt.day,
@@ -166,6 +173,191 @@ rag_system = RAGSystem(
     keyword_weight=0.3      # Set keyword search weight
 )
 
+# Model preloading thread
+model_thread = None
+model_loading_status = {
+    "started": False, 
+    "completed": False, 
+    "results": None, 
+    "start_time": None,
+    "end_time": None,
+    "languages": [],
+    "progress": 0,
+    "total_languages": 0,
+    "current_language": None,
+    "error": None,
+    "language_status": {},  # Will track per-language loading status
+    "language_errors": {}  # Will track per-language errors
+}
+
+@app.on_event("startup")
+def startup_event():
+    """
+    Startup event handler to initialize application
+    """
+    logger.info("Starting RegulAIte API...")
+    
+    # Start model preloading in a separate thread
+    # Default to multi-language model for better coverage
+    start_model_preloading(['multi'])
+
+def start_model_preloading(languages: List[str]):
+    """
+    Start preloading embedding models for the specified languages in a background thread
+    
+    Args:
+        languages: List of language codes to preload models for
+    """
+    global model_thread, model_loading_status
+    
+    # If preloading is already in progress, don't start again
+    if model_loading_status["started"] and not model_loading_status["completed"]:
+        logger.info("Model preloading already in progress")
+        return
+    
+    # If previous preloading failed with an error, clear the error state before starting again
+    if model_loading_status.get("error"):
+        logger.info("Clearing previous preloading error state before starting new preloading")
+    
+    if not languages:
+        languages = ['en', 'it', 'de', 'multi']  # Default set of languages
+    
+    # Initialize/reset the model loading status
+    model_loading_status = {
+        "started": True,
+        "completed": False,
+        "languages": languages,
+        "current_language": None,
+        "progress": 0,
+        "start_time": time.time(),
+        "end_time": None,
+        "results": None,
+        "error": None,
+        "language_status": {},  # Will track per-language loading status
+        "language_errors": {},  # Will track per-language errors
+        "total_languages": len(languages)
+    }
+    
+    def preload_worker():
+        try:
+            logger.info(f"Starting model preloading for languages: {languages}")
+            
+            # Define the progress callback function
+            def progress_callback(language, progress, completed, error):
+                # Update the model loading status with current language and progress
+                model_loading_status["current_language"] = language
+                
+                # Calculate overall progress based on individual language progress
+                # Find the index of current language in languages list
+                try:
+                    lang_idx = languages.index(language)
+                    # Calculate overall progress: 
+                    # (completed languages * 100 + current language progress) / total languages
+                    overall_progress = (lang_idx * 100 + progress) / len(languages)
+                    model_loading_status["progress"] = round(overall_progress, 1)
+                except ValueError:
+                    # Language not found in list, use progress as is
+                    model_loading_status["progress"] = progress
+                
+                # If there was an error, log it
+                if error:
+                    logger.error(f"Error loading model for language '{language}': {error}")
+                    model_loading_status["language_errors"][language] = error
+                
+                # If a language completed loading, update its status
+                if completed:
+                    if not error:
+                        logger.info(f"Completed loading model for language '{language}'")
+                    model_loading_status["language_status"][language] = {
+                        "completed": True,
+                        "success": not bool(error),
+                        "error": error
+                    }
+            
+            # Call the preload_models function with the requested languages and progress callback
+            results = preload_models(languages, progress_callback=progress_callback)
+            
+            # Calculate overall stats
+            elapsed = time.time() - model_loading_status["start_time"]
+            success_count = sum(1 for status in results.values() if status)
+            
+            logger.info(f"Model preloading completed in {elapsed:.2f} seconds. "
+                       f"Success: {success_count}/{len(languages)} languages")
+            
+            # Update final status
+            model_loading_status["completed"] = True
+            model_loading_status["results"] = results
+            model_loading_status["end_time"] = time.time()
+            model_loading_status["progress"] = 100
+            
+        except Exception as e:
+            error_msg = f"Critical error during model preloading: {str(e)}"
+            logger.error(error_msg)
+            
+            # Update error status
+            model_loading_status["completed"] = True
+            model_loading_status["results"] = {"error": str(e)}
+            model_loading_status["end_time"] = time.time()
+            model_loading_status["error"] = error_msg
+    
+    # Create and start the thread with a meaningful name
+    model_thread = threading.Thread(
+        target=preload_worker, 
+        daemon=True,
+        name=f"ModelPreloader-{'-'.join(languages)}"
+    )
+    model_thread.start()
+    logger.info(f"Model preloading thread started for languages: {', '.join(languages)}")
+
+@app.get("/api/status")
+def get_status():
+    """
+    Get API status including model preloading status
+    """
+    status_info = {
+        "status": "running",
+        "model_loading": {
+            "started": model_loading_status["started"],
+            "completed": model_loading_status["completed"],
+            "languages": model_loading_status["languages"],
+            "current_language": model_loading_status["current_language"],
+            "progress": model_loading_status["progress"]
+        }
+    }
+    
+    # Include timing information if available
+    if model_loading_status["start_time"]:
+        status_info["model_loading"]["start_time"] = model_loading_status["start_time"]
+        
+        if model_loading_status["end_time"]:
+            status_info["model_loading"]["end_time"] = model_loading_status["end_time"]
+            status_info["model_loading"]["elapsed_seconds"] = round(
+                model_loading_status["end_time"] - model_loading_status["start_time"], 2)
+    
+    # Include detailed language status if available
+    if model_loading_status.get("language_status"):
+        status_info["model_loading"]["language_status"] = model_loading_status["language_status"]
+    
+    # Include language-specific errors if any
+    if model_loading_status.get("language_errors"):
+        status_info["model_loading"]["language_errors"] = model_loading_status["language_errors"]
+    
+    # Include results if completed
+    if model_loading_status["completed"] and model_loading_status["results"]:
+        status_info["model_loading"]["results"] = model_loading_status["results"]
+    
+    # Include error information if any
+    if model_loading_status.get("error"):
+        status_info["model_loading"]["error"] = model_loading_status["error"]
+    
+    return status_info
+
+@app.get("/")
+def root():
+    """
+    Root endpoint
+    """
+    return {"message": "Welcome to RegulAIte API"}
 
 # Models
 class ChatMessage(BaseModel):
@@ -291,6 +483,26 @@ def initialize_database(conn):
     try:
         cursor = conn.cursor()
         
+        # Create regulaite_settings table if it doesn't exist
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS regulaite_settings (
+            setting_key VARCHAR(255) PRIMARY KEY,
+            setting_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            description TEXT
+        ) ENGINE=InnoDB;
+        """)
+        
+        # Insert default settings if they don't exist
+        cursor.execute("""
+        INSERT IGNORE INTO regulaite_settings (setting_key, setting_value, description) VALUES
+        ('llm_model', 'gpt-4', 'Default LLM model'),
+        ('llm_temperature', '0.7', 'Default temperature for LLM'),
+        ('llm_max_tokens', '2048', 'Default max tokens for LLM'),
+        ('llm_top_p', '1', 'Default top_p value for LLM'),
+        ('enable_chat_history', 'true', 'Whether to save chat history');
+        """)
+        
         # Create users table if it doesn't exist
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -397,33 +609,10 @@ async def process_document(
     use_enrichment: bool = Form(True),
     detect_language: bool = Form(True),
     language: Optional[str] = Form(None),
-    use_queue: bool = Form(False)  # Add this parameter
+    use_queue: bool = Form(False),
+    parser_type: str = Form(ParserType.UNSTRUCTURED.value)
 ):
-    """Process a document using Unstructured API and spaCy NLP, then store in Neo4j."""
-
-    # If queuing is requested, redirect to the task router
-    if use_queue:
-        from routers.task_router import queue_document_processing
-
-        # Get the task response
-        task_response = await queue_document_processing(
-            file=file,
-            doc_id=doc_id,
-            metadata=metadata,
-            use_nlp=use_nlp,
-            use_enrichment=use_enrichment,
-            detect_language=detect_language,
-            language=language
-        )
-
-        # Convert TaskResponse to DocumentProcessResponse
-        return DocumentProcessResponse(
-            doc_id=doc_id or task_response.message.split()[-3],  # Extract doc_id from message
-            filename=file.filename,
-            chunk_count=0,  # This will be updated when task completes
-            status=task_response.status,
-            message=task_response.message
-        )
+    """Process a document and store it in the database."""
     try:
         # Generate document ID if not provided
         if not doc_id:
@@ -443,6 +632,12 @@ async def process_document(
         doc_metadata["size"] = 0  # Will be updated with actual size
         doc_metadata["use_nlp"] = use_nlp
         doc_metadata["use_enrichment"] = use_enrichment
+        doc_metadata["parser_type"] = parser_type  # Store the parser type used
+
+        # Extract file extension and store both filetype and file_type for compatibility
+        file_ext = os.path.splitext(file.filename)[1].lower().lstrip('.')
+        doc_metadata["filetype"] = file_ext
+        doc_metadata["file_type"] = file_ext  # Add both property names for compatibility
 
         # Add language info if provided
         if language:
@@ -455,9 +650,64 @@ async def process_document(
         file_content = await file.read()
         doc_metadata["size"] = len(file_content)
 
-        # Process document - now returns all stats directly
+        # Use queue for processing if requested
+        if use_queue:
+            # Queue the document processing task
+            from routers.task_router import queue_document_processing
+            
+            # Create a new UploadFile with the read content reset
+            file.file.seek(0)
+            
+            response = await queue_document_processing(
+                file=file,
+                doc_id=doc_id,
+                metadata=json.dumps(doc_metadata),
+                use_nlp=use_nlp,
+                use_enrichment=use_enrichment,
+                detect_language=detect_language,
+                language=language,
+                parser_type=parser_type
+            )
+            
+            return {
+                "doc_id": doc_id,
+                "filename": file.filename,
+                "chunk_count": 0,
+                "status": "queued",
+                "message": f"Document queued for processing (Task ID: {response.task_id})"
+            }
+
+        # Process document - get the appropriate parser if not using the default
+        parser = document_parser
+        if parser_type != ParserType.UNSTRUCTURED.value:
+            # Get parser using the factory method
+            try:
+                # Get parser using the factory method
+                parser = BaseParser.get_parser(
+                    parser_type=ParserType(parser_type),
+                    neo4j_uri=os.getenv("NEO4J_URI"),
+                    neo4j_user=os.getenv("NEO4J_USER"),
+                    neo4j_password=os.getenv("NEO4J_PASSWORD")
+                )
+            except Exception as e:
+                logger.error(f"Error creating parser of type {parser_type}: {str(e)}")
+                # Fall back to default parser
+                parser = document_parser
+        
+        # Check if extract_images is in parser_settings
+        extract_images = False
+        if "parser_settings" in doc_metadata and isinstance(doc_metadata["parser_settings"], dict):
+            if "extract_images" in doc_metadata["parser_settings"]:
+                extract_images = bool(doc_metadata["parser_settings"]["extract_images"])
+                logger.info(f"Setting extract_images={extract_images} from parser settings")
+                
+                # If using the default parser, we need to modify its settings
+                if parser == document_parser:
+                    parser.extract_images = extract_images
+        
+        # Process the document with the selected parser
         try:
-            result = document_parser.process_document(
+            result = parser.process_document(
                 file_content=file_content,
                 file_name=file.filename,
                 doc_id=doc_id,
@@ -476,30 +726,87 @@ async def process_document(
             has_regulatory_content = result.get("has_regulatory_content", False)
             detected_language = result.get("language")
             language_name = result.get("language_name")
+            image_count = result.get("image_count", 0)
 
             # Create language info part of the message
             language_msg = ""
             if detected_language:
                 language_msg = f" (Language: {language_name or detected_language})"
+                
+            # Add image extraction info to message
+            image_msg = ""
+            if extract_images and image_count > 0:
+                image_msg = f" with {image_count} extracted images"
 
             # Index document in Qdrant through RAG system
             try:
-                rag_system.index_document(processed_doc_id)
-                logger.info(f"Document {processed_doc_id} indexed in Qdrant")
+                # Check if indexing is configured
+                index_immediately = True  # Default to True
+                try:
+                    # Get setting from MariaDB
+                    conn = get_mariadb_connection()
+                    cursor = conn.cursor(dictionary=True)
+                    cursor.execute(
+                        """
+                        SELECT setting_value
+                        FROM regulaite_settings
+                        WHERE setting_key = 'doc_index_immediately'
+                        """
+                    )
+                    result = cursor.fetchone()
+                    if result:
+                        index_immediately = result['setting_value'].lower() == 'true'
+                    conn.close()
+                except Exception as config_e:
+                    logger.warning(f"Could not get index_immediately setting, using default: {str(config_e)}")
+                
+                if index_immediately:
+                    logger.info(f"Indexing document {processed_doc_id} in Qdrant")
+                    index_result = rag_system.index_document(processed_doc_id)
+                    
+                    if isinstance(index_result, dict):
+                        if index_result.get("status") == "success":
+                            vector_count = index_result.get("vector_count", 0)
+                            logger.info(f"Document {processed_doc_id} indexed in Qdrant with {vector_count} vectors")
+                        elif "vector_count" in index_result and index_result.get("vector_count", 0) > 0:
+                            vector_count = index_result.get("vector_count", 0)
+                            logger.info(f"Document {processed_doc_id} indexed in Qdrant with {vector_count} vectors")
+                        elif index_result.get("message") == "Document already indexed":
+                            logger.info(f"Document {processed_doc_id} was already indexed")
+                        else:
+                            logger.warning(f"Indexing completed but may have issues: {index_result}")
+                    else:
+                        logger.warning(f"Unexpected indexing result format: {type(index_result)} - {index_result}")
+                else:
+                    logger.info(f"Immediate indexing disabled, document {processed_doc_id} will not be indexed now")
             except Exception as e:
-                logger.error(f"Error indexing document in Qdrant: {str(e)}")
+                logger.error(f"Error indexing document in Qdrant: {str(e)}", exc_info=True)
                 # Continue without failing as the document is already processed in Neo4j
+
+            # Make sure to close the custom parser if we created one
+            if parser != document_parser:
+                try:
+                    parser.close()
+                except:
+                    pass
 
             return {
                 "doc_id": processed_doc_id,
                 "filename": file.filename,
                 "chunk_count": chunk_count,
                 "status": "success",
-                "message": f"Document processed successfully{language_msg} with {chunk_count} chunks, {section_count} sections, {entity_count} entities, and {concept_count} concepts" +
+                "message": f"Document processed successfully with {parser_type} parser{language_msg} with {chunk_count} chunks, {section_count} sections, {entity_count} entities, and {concept_count} concepts{image_msg}" +
                           (f", including {requirement_count} regulatory requirements" if has_regulatory_content else "")
             }
 
         except Exception as e:
+            # Make sure to close the custom parser if we created one
+            if parser != document_parser:
+                try:
+                    parser.close()
+                except:
+                    pass
+                    
             logger.error(f"Error processing document: {str(e)}")
             raise HTTPException(
                 status_code=500,
@@ -1343,22 +1650,44 @@ async def delete_document(doc_id: str):
         # Step 1: Delete from RAG system (Qdrant vectors)
         rag_deleted = rag_system.delete_document(doc_id)
         if not rag_deleted:
-            logger.warning(f"Failed to delete document {doc_id} from RAG system")
+            logger.warning(f"Failed to delete document {doc_id} from RAG system or document not found in vector store")
+            # Continue with Neo4j deletion even if Qdrant deletion failed
 
         # Step 2: Delete from Neo4j
-        neo4j_deleted = document_parser.delete_document(doc_id)
-        if not neo4j_deleted:
+        try:
+            neo4j_deleted = document_parser.delete_document(doc_id)
+            if isinstance(neo4j_deleted, dict) and neo4j_deleted.get("status") == "error":
+                logger.error(f"Error deleting document from Neo4j: {neo4j_deleted.get('message', 'Unknown error')}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document not found or could not be deleted from Neo4j: {doc_id}"
+                )
+        except Exception as neo4j_error:
+            logger.error(f"Error deleting document {doc_id} from Neo4j: {str(neo4j_error)}")
             raise HTTPException(
-                status_code=404,
-                detail=f"Document not found or could not be deleted: {doc_id}"
+                status_code=500,
+                detail=f"Document deleted from vector store but error occurred when deleting from Neo4j: {str(neo4j_error)}"
             )
+
+        # Format deletion statistics for response if available
+        deletion_stats = {}
+        if isinstance(neo4j_deleted, dict):
+            deletion_stats = {
+                "document_deleted": neo4j_deleted.get("document_deleted", True),
+                "chunks_deleted": neo4j_deleted.get("chunks_deleted", 0),
+                "relationships_deleted": neo4j_deleted.get("relationships_deleted", 0)
+            }
 
         return {
             "status": "success",
             "message": f"Document {doc_id} deleted successfully",
-            "doc_id": doc_id
+            "doc_id": doc_id,
+            "stats": deletion_stats
         }
 
+    except HTTPException:
+        # Re-raise HTTP exceptions without modification
+        raise
     except Exception as e:
         logger.error(f"Error deleting document {doc_id}: {str(e)}")
         raise HTTPException(
@@ -1426,20 +1755,6 @@ async def debug_qdrant_collections():
     except Exception as e:
         logger.error(f"Error in debug endpoint: {str(e)}")
         return {"error": str(e)}
-
-@app.post("/debug/index_document")
-async def debug_index_document(doc_id: str = Body(...)):
-    """Force reindex a document for testing"""
-    try:
-        result = rag_system.index_document(doc_id)
-        return {
-            "doc_id": doc_id,
-            "indexed": result,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error indexing document: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.on_event("shutdown")

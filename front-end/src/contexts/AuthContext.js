@@ -32,13 +32,36 @@ export const AuthProvider = ({ children }) => {
     setLoading(true);
     setError(null);
     try {
-      const result = await authService.register(userData);
-      // In some systems, registration doesn't auto-login
-      // You might want to auto-login here with the credentials
+      console.log('AuthContext: Registering with data:', { ...userData, password: '[REDACTED]' });
+      
+      // Make sure the userData matches expected backend format
+      const sanitizedUserData = {
+        email: userData.email,
+        password: userData.password,
+        full_name: userData.full_name,
+        company: userData.company || undefined
+      };
+      
+      const result = await authService.register(sanitizedUserData);
+      console.log('AuthContext: Registration successful:', result);
       return result;
     } catch (err) {
-      setError(err.detail || 'Registration failed');
-      throw err;
+      console.error('AuthContext: Registration error:', err);
+      
+      // Extract error message from various possible formats
+      let errorDetail = 'Registration failed';
+      if (typeof err === 'string') {
+        errorDetail = err;
+      } else if (err && typeof err === 'object') {
+        if (err.detail) {
+          errorDetail = err.detail;
+        } else if (err.message) {
+          errorDetail = err.message;
+        }
+      }
+      
+      setError(errorDetail);
+      throw err; // Rethrow so the form component can also handle it
     } finally {
       setLoading(false);
     }

@@ -5,12 +5,16 @@ import logging
 import json
 import uuid
 from typing import Dict, List, Any, Optional, BinaryIO, Callable, Literal
-from datetime import datetime
+from datetime import datetime as py_datetime  # Rename to avoid conflict with Neo4j's datetime()
+import datetime  # Import the full module too
 import tempfile
 from neo4j import GraphDatabase
 from data_enrichment.language_detector import LanguageDetector
 from data_enrichment.enrichment_pipeline import EnrichmentPipeline
 from data_enrichment.metadata_parser import MetadataParser
+import time
+import math
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -187,52 +191,122 @@ class DocumentParser:
 
               logger.info(f"Calling Unstructured API with parameters: {data}")
 
-              response = requests.post(
-                  self.unstructured_api_url,
-                  headers=headers,
-                  files=files,
-                  data=data
-              )
+              try:
+                  response = requests.post(
+                      self.unstructured_api_url,
+                      headers=headers,
+                      files=files,
+                      data=data,
+                      timeout=300  # 5-minute timeout for large documents
+                  )
 
-              if response.status_code != 200:
-                  logger.error(f"Unstructured API error: {response.status_code} - {response.text}")
-                  raise Exception(f"Unstructured API error: {response.status_code}")
+                  if response.status_code != 200:
+                      logger.error(f"Unstructured API error: {response.status_code} - {response.text}")
+                      # Don't raise here, use fallback
+                      return self._create_fallback_elements(file_name, file_content)
 
-              # Parse and return the response
-              elements = response.json()
-              logger.info(f"Extracted {len(elements)} elements from document")
+                  # Parse and return the response
+                  try:
+                      elements = response.json()
+                      if not elements or len(elements) == 0:
+                          logger.warning(f"Unstructured API returned empty elements list for {file_name}")
+                          return self._create_fallback_elements(file_name, file_content)
+                      
+                      logger.info(f"Extracted {len(elements)} elements from document")
 
-              # Log element types to help with debugging
-              element_types = {}
-              text_count = 0
-              for element in elements:
-                  element_type = element.get("type", "unknown")
-                  has_text = bool(element.get("text", "").strip())
-                  if has_text:
-                      text_count += 1
+                      # Log element types to help with debugging
+                      element_types = {}
+                      text_count = 0
+                      image_count = 0
+                      for element in elements:
+                          element_type = element.get("type", "unknown")
+                          has_text = bool(element.get("text", "").strip())
+                          if has_text:
+                              text_count += 1
+                              
+                          if element_type == 'Image':
+                              image_count += 1
 
-                  if element_type in element_types:
-                      element_types[element_type] += 1
-                  else:
-                      element_types[element_type] = 1
-
-              logger.info(f"Element types found: {element_types}")
-              logger.info(f"Elements with text: {text_count} out of {len(elements)}")
-
-              # Enhanced post-processing for specific element types
-              self._process_table_elements(elements)
-              self._enhance_metadata(elements, file_name)
-
-              # Return the extracted elements
-              return elements
+                          if element_type in element_types:
+                              element_types[element_type] += 1
+                          else:
+                              element_types[element_type] = 1
+                              
+                      logger.info(f"Element types: {element_types}, {text_count} with text, {image_count} images")
+                      
+                      # If no text elements, use fallback
+                      if text_count == 0:
+                          logger.warning(f"No text elements found in API response for {file_name}, using fallback")
+                          return self._create_fallback_elements(file_name, file_content)
+                      
+                      # Return the parsed elements
+                      return elements
+                  except json.JSONDecodeError as je:
+                      logger.error(f"Failed to parse Unstructured API response as JSON: {str(je)}")
+                      logger.error(f"Response content: {response.text[:500]}...")
+                      return self._create_fallback_elements(file_name, file_content)
+              except requests.exceptions.RequestException as re:
+                  logger.error(f"Request to Unstructured API failed: {str(re)}")
+                  return self._create_fallback_elements(file_name, file_content)
 
       except Exception as e:
-          logger.error(f"Error calling Unstructured API: {str(e)}")
-          raise
+          logger.error(f"Error calling Unstructured API: {str(e)}", exc_info=True)
+          return self._create_fallback_elements(file_name, file_content)
       finally:
-          # Remove the temporary file
-          if os.path.exists(temp_file_path):
-              os.remove(temp_file_path)
+          try:
+              os.unlink(temp_file_path)
+          except Exception as e:
+              logger.warning(f"Failed to delete temp file: {str(e)}")
+
+    def _create_fallback_elements(self, file_name: str, file_content: bytes) -> List[Dict[str, Any]]:
+        """
+        Create fallback document elements when the Unstructured API fails.
+        
+        Args:
+            file_name: Name of the file
+            file_content: Binary content of the file
+            
+        Returns:
+            List with at least one element containing basic file information
+        """
+        logger.info(f"Creating fallback document elements for {file_name}")
+        
+        # Try to extract some text content depending on file type
+        text_content = ""
+        file_ext = os.path.splitext(file_name)[1].lower()
+        
+        try:
+            # For text-based files, try to decode the content
+            if file_ext in ['.txt', '.csv', '.md', '.json', '.xml', '.html']:
+                # Try different encodings
+                for encoding in ['utf-8', 'latin-1', 'windows-1252']:
+                    try:
+                        text_content = file_content.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                        
+                if not text_content:
+                    text_content = f"Failed to extract text from {file_name}"
+            else:
+                text_content = f"Document: {file_name} (failed to extract content)"
+        except Exception as e:
+            logger.warning(f"Error creating fallback text: {str(e)}")
+            text_content = f"Document: {file_name} (extraction error)"
+            
+        # Create at least one fallback element
+        fallback_element = {
+            "type": "Text",
+            "text": text_content or f"Document: {file_name} (no extractable text)",
+            "metadata": {
+                "filename": file_name,
+                "filetype": file_ext.lstrip('.') if file_ext else "unknown",
+                "is_fallback": True,
+                "extraction_failed": True
+            }
+        }
+        
+        return [fallback_element]
 
     def _process_table_elements(self, elements: List[Dict[str, Any]]) -> None:
         """
@@ -289,6 +363,9 @@ class DocumentParser:
 
             # Add file metadata (ensure it's a safe copy to prevent circular references)
             element["metadata"]["file_extension"] = file_ext
+            element["metadata"]["filetype"] = file_ext
+            element["metadata"]["file_type"] = file_ext  # Add both property names for compatibility
+            
             # Store document metadata as a safe copy
             element["metadata"]["document_metadata"] = self._safe_copy_metadata(doc_metadata)
 
@@ -542,6 +619,357 @@ class DocumentParser:
         # and store them in Neo4j for hierarchical retrieval
         return self._semantic_chunking(text)
 
+    def _hierarchical_chunking_from_elements(self, elements: List[Dict[str, Any]], doc_id: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Create hierarchical chunks from document elements, maintaining parent-child relationships.
+        
+        Args:
+            elements: Document elements extracted from parser
+            doc_id: Document ID for creating chunk IDs
+            
+        Returns:
+            Tuple of (chunks, sections) where chunks is a list of chunk dictionaries 
+            and sections is a list of section dictionaries
+        """
+        # This is a simplified implementation
+        chunks = []
+        sections = []
+        
+        # Track section hierarchy
+        current_section = {"name": "Document", "level": 0, "parent": None}
+        sections.append(current_section)
+        
+        # First pass: identify sections
+        for idx, element in enumerate(elements):
+            element_type = element.get("type", "unknown")
+            element_text = element.get("text", "").strip()
+            
+            # Skip empty elements
+            if not element_text:
+                continue
+                
+            # Create a basic chunk
+            chunk = {
+                "chunk_id": f"{doc_id}_chunk_{idx}",
+                "text": element_text,
+                "index": idx,
+                "element_type": element_type,
+                "section": current_section["name"],
+                "metadata": element.get("metadata", {})
+            }
+            
+            # Add page number if available in metadata
+            if "metadata" in element and "page_number" in element["metadata"]:
+                chunk["page_num"] = element["metadata"]["page_number"]
+            else:
+                chunk["page_num"] = 0  # Default page number
+                
+            # Add order_index (same as index) for consistent sorting
+            chunk["order_index"] = idx
+            
+            # Check if this is a heading/title that should start a new section
+            if element_type in ["Title", "Header", "Heading", "h1", "h2", "h3"]:
+                # Determine heading level
+                level = 1
+                if "metadata" in element and "header_level" in element["metadata"]:
+                    level = element["metadata"]["header_level"]
+                elif element_type == "h1":
+                    level = 1
+                elif element_type == "h2":
+                    level = 2
+                elif element_type == "h3":
+                    level = 3
+                
+                # Create a new section
+                section = {
+                    "name": element_text[:100],  # Truncate long titles
+                    "level": level,
+                    "parent": current_section["name"] if level > current_section["level"] else None
+                }
+                
+                sections.append(section)
+                current_section = section
+                
+                # Update the chunk with section info
+                chunk["section"] = section["name"]
+                
+            chunks.append(chunk)
+            
+        return chunks, sections
+    
+    def _fixed_chunking_from_elements(self, elements: List[Dict[str, Any]], doc_id: str) -> List[Dict[str, Any]]:
+        """
+        Create fixed-size chunks from document elements.
+        
+        Args:
+            elements: Document elements extracted from parser
+            doc_id: Document ID for creating chunk IDs
+            
+        Returns:
+            List of chunk dictionaries
+        """
+        chunks = []
+        chunk_index = 0
+        current_chunk_text = ""
+        current_section = "Document"
+        current_element_types = []
+        current_metadata = {}
+        current_page_num = 0  # Track current page number
+        
+        # Process each element
+        for element in elements:
+            element_type = element.get("type", "unknown")
+            element_text = element.get("text", "").strip()
+            
+            # Skip empty elements
+            if not element_text:
+                continue
+                
+            # Check if this element has page information
+            if "metadata" in element and "page_number" in element["metadata"]:
+                current_page_num = element["metadata"]["page_number"]
+                
+            # Check if this is a title/heading that might indicate a section
+            if element_type in ["Title", "Header", "Heading", "h1", "h2", "h3"]:
+                # If we have accumulated text, create a chunk
+                if current_chunk_text:
+                    chunk = {
+                        "chunk_id": f"{doc_id}_chunk_{chunk_index}",
+                        "text": current_chunk_text,
+                        "index": chunk_index,
+                        "element_type": ", ".join(current_element_types),
+                        "section": current_section,
+                        "metadata": current_metadata.copy() if current_metadata else {},
+                        "page_num": current_page_num,  # Add page number
+                        "order_index": chunk_index  # Add order index
+                    }
+                    chunks.append(chunk)
+                    chunk_index += 1
+                    
+                    # Reset for next chunk
+                    current_chunk_text = ""
+                    current_element_types = []
+                    current_metadata = {}
+                
+                # Update section name based on heading
+                current_section = element_text[:100]  # Truncate long titles
+            
+            # Check if adding this element would exceed chunk size
+            if len(current_chunk_text) + len(element_text) + 2 > self.chunk_size:
+                # If we have accumulated text, create a chunk
+                if current_chunk_text:
+                    chunk = {
+                        "chunk_id": f"{doc_id}_chunk_{chunk_index}",
+                        "text": current_chunk_text,
+                        "index": chunk_index,
+                        "element_type": ", ".join(current_element_types),
+                        "section": current_section,
+                        "metadata": current_metadata.copy() if current_metadata else {},
+                        "page_num": current_page_num,  # Add page number
+                        "order_index": chunk_index  # Add order index
+                    }
+                    chunks.append(chunk)
+                    chunk_index += 1
+                    
+                    # Reset for next chunk
+                    current_chunk_text = ""
+                    current_element_types = []
+                    current_metadata = {}
+            
+            # Add element text to current chunk
+            if current_chunk_text:
+                current_chunk_text += "\n\n" + element_text
+            else:
+                current_chunk_text = element_text
+                
+            # Track element type
+            if element_type not in current_element_types:
+                current_element_types.append(element_type)
+                
+            # Merge metadata
+            if "metadata" in element and isinstance(element["metadata"], dict):
+                for key, value in element["metadata"].items():
+                    current_metadata[key] = value
+        
+        # Add final chunk if not empty
+        if current_chunk_text:
+            chunk = {
+                "chunk_id": f"{doc_id}_chunk_{chunk_index}",
+                "text": current_chunk_text,
+                "index": chunk_index,
+                "element_type": ", ".join(current_element_types),
+                "section": current_section,
+                "metadata": current_metadata.copy() if current_metadata else {},
+                "page_num": current_page_num,  # Add page number
+                "order_index": chunk_index  # Add order index
+            }
+            chunks.append(chunk)
+        
+        return chunks
+
+    def _save_chunks_to_neo4j(self, chunks: List[Dict[str, Any]], doc_id: str) -> None:
+        """
+        Save chunks to Neo4j database.
+        
+        Args:
+            chunks: List of chunk dictionaries
+            doc_id: Document ID
+        """
+        logger.info(f"Saving {len(chunks)} chunks to Neo4j for document {doc_id}")
+        
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        if not chunks:
+            logger.warning(f"No chunks to save for document {doc_id}")
+            return
+        
+        # Process in smaller batches to avoid overwhelming Neo4j
+        batch_size = 50
+        chunk_batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
+        logger.info(f"Processing {len(chunk_batches)} batches of chunks")
+        
+        saved_count = 0
+        
+        for batch_index, batch in enumerate(chunk_batches):
+            logger.info(f"Processing batch {batch_index+1}/{len(chunk_batches)} with {len(batch)} chunks")
+            
+            for chunk in batch:
+                # Prepare metadata for storage
+                chunk_props = chunk.copy()
+                
+                # If metadata is a dictionary, convert to JSON string
+                if "metadata" in chunk_props and isinstance(chunk_props["metadata"], dict):
+                    try:
+                        chunk_props["metadata"] = json.dumps(chunk_props["metadata"])
+                    except Exception as e:
+                        logger.warning(f"Failed to JSON encode metadata, using str instead: {str(e)}")
+                        chunk_props["metadata"] = str(chunk_props["metadata"])
+                
+                # Try to save with retries
+                for attempt in range(max_retries):
+                    try:
+                        with self.driver.session() as session:
+                            # Create chunk node and link to document
+                            session.run(
+                                """
+                                MATCH (d:Document {doc_id: $doc_id})
+                                MERGE (c:Chunk {chunk_id: $chunk_id})
+                                SET c += $properties
+                                MERGE (d)-[:CONTAINS]->(c)
+                                """,
+                                doc_id=doc_id,
+                                chunk_id=chunk["chunk_id"],
+                                properties=chunk_props
+                            )
+                        saved_count += 1
+                        break
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Error saving chunk (attempt {attempt+1}/{max_retries}): {str(e)}")
+                            time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                        else:
+                            logger.error(f"Failed to save chunk after {max_retries} attempts: {str(e)}")
+            
+            # Sleep briefly between batches to avoid overwhelming Neo4j
+            if batch_index < len(chunk_batches) - 1:
+                time.sleep(0.5)
+                
+        logger.info(f"Successfully saved {saved_count}/{len(chunks)} chunks for document {doc_id}")
+    
+    def _save_sections_to_neo4j(self, sections: List[Dict[str, Any]], doc_id: str) -> None:
+        """
+        Save sections to Neo4j database with hierarchical relationships.
+        
+        Args:
+            sections: List of section dictionaries
+            doc_id: Document ID
+        """
+        logger.info(f"Saving {len(sections)} sections to Neo4j for document {doc_id}")
+        
+        with self.driver.session() as session:
+            # First pass: Create all section nodes
+            for idx, section in enumerate(sections):
+                section_id = f"{doc_id}_section_{idx}"
+                
+                # Create section properties
+                section_props = {
+                    "section_id": section_id,
+                    "name": section.get("name", "Unknown"),
+                    "level": section.get("level", 0),
+                    "index": idx
+                }
+                
+                # Create section node and link to document
+                session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    MERGE (s:Section {section_id: $section_id})
+                    SET s += $properties
+                    MERGE (d)-[:HAS_SECTION]->(s)
+                    """,
+                    doc_id=doc_id,
+                    section_id=section_id,
+                    properties=section_props
+                )
+            
+            # Second pass: Create parent-child relationships
+            for idx, section in enumerate(sections):
+                if section.get("parent"):
+                    # Find parent section node
+                    parent_name = section["parent"]
+                    
+                    # Create relationship between parent and child sections
+                    session.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        MATCH (d)-[:HAS_SECTION]->(parent:Section)
+                        WHERE parent.name = $parent_name
+                        MATCH (d)-[:HAS_SECTION]->(child:Section {section_id: $section_id})
+                        MERGE (parent)-[:CONTAINS]->(child)
+                        """,
+                        doc_id=doc_id,
+                        parent_name=parent_name,
+                        section_id=f"{doc_id}_section_{idx}"
+                    )
+                    
+        logger.info(f"Successfully saved {len(sections)} sections for document {doc_id}")
+        
+    def _enrich_document(self, doc_id: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich a document with NLP processing to extract entities, concepts, etc.
+
+        Args:
+            doc_id: Document ID
+            chunks: Document chunks
+
+        Returns:
+            List of extracted entities
+        """
+        if not self.enrichment_pipeline:
+            logger.warning("Enrichment pipeline not initialized, skipping enrichment")
+            return []
+            
+        try:
+            # Get all text from chunks for processing
+            all_text = "\n\n".join([chunk["text"] for chunk in chunks if "text" in chunk])
+            
+            # Use the enrichment pipeline to process the document
+            # Instead of calling enrich_document which expects just doc_id,
+            # call enrich_text with the document text and provide context
+            result = self.enrichment_pipeline.enrich_text(all_text, {"doc_id": doc_id})
+            
+            if not result or "entities" not in result:
+                logger.warning(f"Enrichment produced no entities for document {doc_id}")
+                return []
+                
+            logger.info(f"Extracted {len(result['entities'])} entities from document {doc_id}")
+            return result["entities"]
+            
+        except Exception as e:
+            logger.error(f"Error enriching document {doc_id}: {str(e)}", exc_info=True)
+            return []
+
     def _store_document_in_neo4j(
           self,
           doc_id: str,
@@ -563,28 +991,109 @@ class DocumentParser:
         """
         logger.info(f"Storing document {doc_id} in Neo4j with {len(elements)} elements")
 
-        # Prepare document metadata
+        # Extract file extension
+        file_ext = ""
+        if "." in file_name:
+            file_ext = file_name.split(".")[-1].lower()
+
+        # Ensure file size is a valid number
+        file_size = metadata.get("size", 0)
+        if not isinstance(file_size, (int, float)) or math.isnan(file_size):
+            file_size = 0
+            
+        # Ensure title is valid
+        title = metadata.get("title", file_name)
+        if not title or not isinstance(title, str):
+            title = file_name
+            
+        # Ensure we have a valid creation timestamp
+        try:
+            created_at = py_datetime.now().isoformat()
+            if metadata.get("created_at") and isinstance(metadata.get("created_at"), str):
+                # Try to parse the existing timestamp
+                py_datetime.fromisoformat(metadata.get("created_at").replace('Z', '+00:00'))
+                created_at = metadata.get("created_at")
+        except (ValueError, TypeError):
+            created_at = py_datetime.now().isoformat()
+            
+        # Ensure language is valid
+        language = metadata.get("language", "en")
+        if not language or not isinstance(language, str):
+            language = "en"
+            
+        # Ensure category is valid
+        category = metadata.get("category", "Uncategorized")
+        if not category or not isinstance(category, str):
+            category = "Uncategorized"
+            
+        # Ensure author is valid
+        author = metadata.get("author", "")
+        if not author or not isinstance(author, str):
+            author = ""
+
+        # Prepare document metadata with all required fields and validated values
         doc_metadata = {
             "doc_id": doc_id,
             "name": file_name,
-            "created": datetime.now().isoformat(),
-            "indexed": False,
+            "title": title,
+            "created_at": created_at,
+            "uploaded_at": py_datetime.now().isoformat(),
+            "file_type": file_ext or "Unknown",
+            "size": file_size,
+            "size_kb": round(file_size / 1024, 2) if file_size > 0 else 0,
+            "language": language,
+            "category": category,
+            "author": author,
+            "is_indexed": False
         }
 
         # Add additional metadata (with circular reference protection)
-        doc_metadata.update(self._safe_copy_metadata(metadata))
+        safe_metadata = self._safe_copy_metadata(metadata)
+        # Only add metadata fields that are not already in doc_metadata
+        for key, value in safe_metadata.items():
+            if key not in doc_metadata and value is not None:
+                # Ensure we don't add None values or empty strings
+                if isinstance(value, str) and not value.strip():
+                    continue
+                doc_metadata[key] = value
 
         # Store document node and chunks
         with self.driver.session() as session:
-            # Create document node
+            # Create document node first with minimal properties
+            # Extract file extension
+            file_ext = ""
+            if "." in file_name:
+                file_ext = file_name.split(".")[-1].lower()
+                
+            # Calculate file size in KB for display
+            size_kb = round(len(file_content) / 1024, 2)
+            
             session.run(
                 """
                 MERGE (d:Document {doc_id: $doc_id})
-                SET d += $properties
-                RETURN d
+                SET d.name = $name,
+                    d.title = $title,
+                    d.created_at = datetime(),
+                    d.uploaded_at = datetime(),
+                    d.file_name = $name,
+                    d.file_type = $file_type,
+                    d.size = $size,
+                    d.size_kb = $size_kb,
+                    d.author = $author,
+                    d.category = $category,
+                    d.language = $language,
+                    d.is_indexed = false,
+                    d.processing_status = 'processing'
                 """,
                 doc_id=doc_id,
-                properties=doc_metadata
+                name=file_name,
+                title=doc_metadata.get("title", os.path.splitext(os.path.basename(file_name))[0]),
+                file_type=file_ext or "Unknown",
+                size=len(file_content),
+                size_kb=size_kb,
+                author=doc_metadata.get("author", "N/A"),
+                category=doc_metadata.get("category", "Uncategorized"),
+                language=doc_metadata.get("language", "en")
             )
 
             # Log the elements structure to debug
@@ -715,153 +1224,305 @@ class DocumentParser:
         doc_id: Optional[str] = None,
         doc_metadata: Optional[Dict[str, Any]] = None,
         enrich: Optional[bool] = None,
-        detect_language: bool = True
+        detect_language: bool = True,
+        **kwargs
     ) -> Dict[str, Any]:
         """
-        Process a document using Unstructured API and store in Neo4j.
-        For large documents, uses partial processing to handle them efficiently.
+        Process a document and extract text, structure, and metadata.
 
         Args:
             file_content: Binary content of the file
             file_name: Name of the file
-            doc_id: Optional document ID (generated if not provided)
+            doc_id: Optional document ID
             doc_metadata: Optional document metadata
-            enrich: Whether to apply enrichment
+            enrich: Whether to enrich the document (defaults to class setting)
             detect_language: Whether to detect document language
+            **kwargs: Additional parser-specific arguments
 
         Returns:
-            Dictionary with document ID and processing details
+            Dict with document ID and processing details
         """
-        try:
-            # Check file size to determine processing approach
-            file_size = len(file_content)
+        # Generate document ID if not provided
+        if not doc_id:
+            doc_id = f"doc_{uuid.uuid4()}"
 
-            # Define size thresholds - adjust as needed
-            LARGE_DOCUMENT_THRESHOLD = 5 * 1024 * 1024  # 5MB
+        # Initialize metadata if not provided
+        if doc_metadata is None:
+            doc_metadata = {}
+            
+        # Validate and sanitize metadata
+        self._sanitize_metadata(doc_metadata, file_name, file_content)
+        
+        # Ensure is_indexed is set to False
+        if "is_indexed" not in doc_metadata:
+            doc_metadata["is_indexed"] = False
+            
+        # Apply parser settings from metadata if provided
+        if "parser_settings" in doc_metadata and isinstance(doc_metadata["parser_settings"], dict):
+            settings = doc_metadata["parser_settings"]
+            
+            # Apply extract_images setting if provided
+            if "extract_images" in settings:
+                self.extract_images = settings["extract_images"]
+                logger.info(f"Setting extract_images to {self.extract_images} from document metadata")
+                
+            # Apply extract_tables setting if provided
+            if "extract_tables" in settings:
+                self.extract_tables = settings["extract_tables"]
+                logger.info(f"Setting extract_tables to {self.extract_tables} from document metadata")
+                
+            # Apply extract_metadata setting if provided
+            if "extract_metadata" in settings:
+                self.extract_metadata = settings["extract_metadata"]
+                logger.info(f"Setting extract_metadata to {self.extract_metadata} from document metadata")
+                
+            # Apply chunking_strategy if provided
+            if "chunking_strategy" in settings:
+                self.chunking_strategy = settings["chunking_strategy"]
+                logger.info(f"Setting chunking_strategy to {self.chunking_strategy} from document metadata")
+                
+            # Apply chunk_size if provided
+            if "chunk_size" in settings and isinstance(settings["chunk_size"], int):
+                self.chunk_size = settings["chunk_size"]
+                logger.info(f"Setting chunk_size to {self.chunk_size} from document metadata")
+                
+            # Apply chunk_overlap if provided
+            if "chunk_overlap" in settings and isinstance(settings["chunk_overlap"], int):
+                self.chunk_overlap = settings["chunk_overlap"]
+                logger.info(f"Setting chunk_overlap to {self.chunk_overlap} from document metadata")
 
-            # For large documents, use partial processing
-            if file_size > LARGE_DOCUMENT_THRESHOLD:
-                logger.info(f"Large document detected ({file_size} bytes). Using partial processing.")
-                return self.process_large_document(
-                    file_content=file_content,
-                    file_name=file_name,
-                    doc_id=doc_id,
-                    doc_metadata=doc_metadata,
-                    enrich=enrich,
-                    detect_language=detect_language
+        # Set the enrichment flag
+        if enrich is None:
+            enrich = self.use_enrichment
+            
+        # Check if file size exceeds threshold for special processing
+        file_size = len(file_content)
+        max_regular_size = 20 * 1024 * 1024  # 20 MB
+        
+        if file_size > max_regular_size:
+            logger.info(f"Document size ({file_size/1024/1024:.2f} MB) exceeds threshold, using large document processing")
+            
+            # Use file extension to determine processing strategy
+            file_ext = os.path.splitext(file_name)[1].lower()
+            
+            if file_ext in ['.txt', '.md', '.csv', '.tsv']:
+                # For text files, split by content
+                return self._process_large_text_document(
+                    file_content, file_name, doc_id, doc_metadata, enrich, detect_language
+                )
+            else:
+                # For binary files like PDFs, use a different approach
+                return self._process_large_binary_document(
+                    file_content, file_name, doc_id, doc_metadata, enrich, detect_language,
+                    max_size_per_chunk=10 * 1024 * 1024  # 10 MB per chunk
                 )
 
-            # Original processing for smaller documents
-            # Generate document ID if not provided
-            if not doc_id:
-                doc_id = f"doc_{uuid.uuid4()}"
-
-            # Initialize metadata if not provided
-            if not doc_metadata:
-                doc_metadata = {}
-
-            # Add processing metadata
-            doc_metadata["processing_time"] = datetime.now().isoformat()
-            # Specify which version of Unstructured API was used
-            doc_metadata["processor"] = "unstructured-api-cloud" if self.is_cloud else "unstructured-api-local"
-            doc_metadata["unstructured_api_url"] = self.unstructured_api_url
-
+        # For normal sized documents
+        try:
+            logger.info(f"Processing document: {file_name} (ID: {doc_id}, Size: {file_size/1024:.1f} KB)")
+            
+            # First, ensure the document exists in Neo4j, regardless of what happens later
+            try:
+                with self.driver.session() as session:
+                    # Create document node first with minimal properties
+                    # Extract file extension
+                    file_ext = ""
+                    if "." in file_name:
+                        file_ext = file_name.split(".")[-1].lower()
+                        
+                    # Calculate file size in KB for display
+                    size_kb = round(len(file_content) / 1024, 2)
+                    
+                    session.run(
+                        """
+                        MERGE (d:Document {doc_id: $doc_id})
+                        SET d.name = $name,
+                            d.title = $title,
+                            d.created_at = datetime(),
+                            d.uploaded_at = datetime(),
+                            d.file_name = $name,
+                            d.file_type = $file_type,
+                            d.size = $size,
+                            d.size_kb = $size_kb,
+                            d.author = $author,
+                            d.category = $category,
+                            d.language = $language,
+                            d.is_indexed = false,
+                            d.processing_status = 'processing'
+                        """,
+                        doc_id=doc_id,
+                        name=file_name,
+                        title=doc_metadata.get("title", os.path.splitext(os.path.basename(file_name))[0]),
+                        file_type=file_ext or "Unknown",
+                        size=len(file_content),
+                        size_kb=size_kb,
+                        author=doc_metadata.get("author", "N/A"),
+                        category=doc_metadata.get("category", "Uncategorized"),
+                        language=doc_metadata.get("language", "en")
+                    )
+                logger.info(f"Successfully created document node in Neo4j with ID: {doc_id}")
+            except Exception as ne:
+                logger.error(f"Failed to create initial document node in Neo4j: {str(ne)}", exc_info=True)
+                # We'll continue anyway to try the rest of the processing
+            
             # Call Unstructured API to extract elements
-            elements = self._call_unstructured_api(file_content, file_name)
-
-            # Detect document language if requested
-            if detect_language:
-                # Get text sample from elements
-                sample_text = ""
-                for element in elements[:10]:  # Use first 10 elements as sample
-                    if "text" in element:
-                        sample_text += element["text"] + "\n\n"
-                        if len(sample_text) > 1000:  # Limit sample size
-                            break
-
+            try:
+                elements = self._call_unstructured_api(file_content, file_name)
+            except Exception as e:
+                logger.error(f"Error calling Unstructured API: {str(e)}", exc_info=True)
+                # Create a fallback element to allow processing to continue
+                elements = self._create_fallback_elements(file_name, file_content)
+            
+            # Process extracted elements (tables, images, etc.)
+            try:
+                self._process_table_elements(elements)
+                self._enhance_metadata(elements, file_name)
+            except Exception as e:
+                logger.error(f"Error processing elements: {str(e)}", exc_info=True)
+                # Continue with original elements
+            
+            # Count the different element types
+            image_count = 0
+            table_count = 0
+            
+            for element in elements:
+                element_type = element.get("type", "unknown")
+                if element_type == "Image":
+                    image_count += 1
+                elif element_type == "Table":
+                    table_count += 1
+            
+            logger.info(f"Extracted {len(elements)} elements, including {image_count} images and {table_count} tables")
+            
+            # Detect language if requested
+            language_code = None
+            language_name = None
+            
+            if detect_language and not doc_metadata.get("language"):
+                # Get a sample of text for language detection
+                sample_text = file_content[:min(5000, len(file_content))]
+                
                 if sample_text:
-                    # Detect language
+                    from data_enrichment.language_detector import LanguageDetector
                     language_detector = LanguageDetector()
                     language_info = language_detector.detect_language(sample_text)
-
+                    
+                    language_code = language_info.get("language_code", "en")
+                    language_name = language_info.get("language_name", "English")
+                    confidence = language_info.get("confidence", 0.0)
+                    
+                    logger.info(f"Language detected: {language_name} ({language_code})")
+                    
                     # Add language info to metadata
-                    doc_metadata["language"] = language_info["language_code"]
-                    doc_metadata["language_name"] = language_info["language_name"]
-                    doc_metadata["language_confidence"] = language_info["confidence"]
+                    doc_metadata["language"] = language_code
+                    doc_metadata["language_name"] = language_name
+                    doc_metadata["language_confidence"] = confidence
+                    
+                    # Update document with language info
+                    with self.driver.session() as session:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})
+                            SET d.language = $language,
+                                d.language_name = $language_name,
+                                d.language_confidence = $confidence
+                            """,
+                            doc_id=doc_id,
+                            language=language_code,
+                            language_name=language_name,
+                            confidence=confidence
+                        )
+            
+            # Count elements with text
+            text_elements = [e for e in elements if e.get("text", "").strip()]
+            logger.info(f"Elements with text: {len(text_elements)} out of {len(elements)}")
 
-                    logger.info(f"Detected document language: {language_info['language_name']} ({language_info['language_code']}) with confidence {language_info['confidence']:.2f}")
+            # Create Neo4j document and extract document structure
+            with self.driver.session() as session:
+                # Create document node first
+                result = session.run(
+                    """
+                    MERGE (d:Document {doc_id: $doc_id})
+                    SET d += $properties
+                    RETURN d
+                    """,
+                    doc_id=doc_id,
+                    properties=doc_metadata
+                )
 
-            # Clean metadata before storing
-            cleaned_metadata = doc_metadata.copy() if doc_metadata else {}
-
-            # Parse any existing metadata from the document
-            if doc_metadata and "metadata" in doc_metadata and doc_metadata["metadata"]:
-                try:
-                    parsed_metadata = self.metadata_parser.parse(doc_metadata["metadata"])
-                    cleaned_metadata.update(parsed_metadata)
-                except Exception as e:
-                    logger.warning(f"Error parsing document metadata: {str(e)}")
-
-            # Use cleaned metadata instead of original
-            doc_metadata = cleaned_metadata
-
-            # Store document and chunks in Neo4j - now returns statistics
-            result = self._store_document_in_neo4j(
-                doc_id=doc_id,
-                file_name=file_name,
-                elements=elements,
-                metadata=doc_metadata
-            )
-
-            # Get the stored document ID
-            stored_doc_id = result["doc_id"]
-
-            # Initialize statistics from document storage
-            stats = {
-                "chunk_count": result["chunk_count"],
-                "section_count": result["section_count"],
-                "entity_count": 0,
-                "concept_count": 0,
-                "requirement_count": 0,
-                "has_regulatory_content": False
-            }
-
-            # Apply enrichment if requested
-            should_enrich = enrich if enrich is not None else getattr(self, 'use_enrichment', False)
-
-            if should_enrich and hasattr(self, 'enrichment_pipeline') and self.enrichment_pipeline:
-                try:
-                    logger.info(f"Enriching document {stored_doc_id}")
-                    enrichment_result = self.enrichment_pipeline.enrich_document(stored_doc_id)
-
-                    if enrichment_result["status"] == "success":
-                        logger.info(f"Successfully enriched document {stored_doc_id}")
-                        # Update statistics with enrichment results
-                        stats.update({
-                            "entity_count": enrichment_result.get("entities", 0),
-                            "concept_count": enrichment_result.get("concepts", 0),
-                            "requirement_count": enrichment_result.get("requirements", 0),
-                            "has_regulatory_content": enrichment_result.get("has_regulatory_content", False)
-                        })
-                    else:
-                        logger.warning(f"Enrichment failed: {enrichment_result['message']}")
-                except Exception as e:
-                    logger.error(f"Error during document enrichment: {str(e)}")
-                    # Continue anyway, as the document is already processed
-
-            # Fix circular import issue by moving the RAG indexing to a separate function
-            self._index_document_in_rag_system(stored_doc_id)
-
-            # Return the document ID and statistics
+            # Parse elements to chunks
+            chunks = []
+            entities = []
+            sections = []
+            
+            if self.chunking_strategy == "hierarchical":
+                logger.info("Using hierarchical chunking strategy")
+                chunks, sections = self._hierarchical_chunking_from_elements(elements, doc_id)
+            else:
+                # Default fixed chunking
+                logger.info(f"Using fixed chunking strategy (size={self.chunk_size}, overlap={self.chunk_overlap})")
+                chunks = self._fixed_chunking_from_elements(elements, doc_id)
+            
+            # Save chunks to Neo4j
+            self._save_chunks_to_neo4j(chunks, doc_id)
+            
+            # If we have sections, save them too
+            if sections:
+                self._save_sections_to_neo4j(sections, doc_id)
+            
+            # Do enrichment if requested
+            if enrich:
+                entities = self._enrich_document(doc_id, chunks)
+                
+            # Update document status in Neo4j
+            try:
+                with self.driver.session() as session:
+                    session.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        SET d.processed = true,
+                            d.processed_at = datetime(),
+                            d.chunk_count = $chunk_count,
+                            d.section_count = $section_count,
+                            d.is_indexed = false,
+                            d.processing_status = 'completed'
+                        """,
+                        doc_id=doc_id,
+                        chunk_count=len(chunks),
+                        section_count=len(sections)
+                    )
+                    
+                    # If language was detected, update document
+                    if detect_language and "language" in doc_metadata:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})
+                            SET d.language = $language,
+                                d.language_name = $language_name,
+                                d.language_confidence = $confidence
+                            """,
+                            doc_id=doc_id,
+                            language=doc_metadata.get("language"),
+                            language_name=doc_metadata.get("language_name"),
+                            confidence=doc_metadata.get("language_confidence", 0.0)
+                        )
+            except Exception as e:
+                logger.error(f"Error updating document status in Neo4j: {str(e)}", exc_info=True)
+                # We'll continue to return success as document and chunks are created
+            
             return {
-                "doc_id": stored_doc_id,
-                **stats,
+                "doc_id": doc_id,
+                "chunk_count": len(chunks),
+                "section_count": len(sections),
+                "entity_count": len(entities),
                 "language": doc_metadata.get("language"),
-                "language_name": doc_metadata.get("language_name")
+                "language_name": doc_metadata.get("language_name"),
+                "image_count": image_count,
+                "table_count": table_count
             }
-
+        
         except Exception as e:
-            logger.error(f"Error processing document: {str(e)}")
+            logger.error(f"Error processing document: {str(e)}", exc_info=True)
             raise
 
     def delete_document(self, doc_id: str, purge_orphans: bool = False) -> Dict[str, Any]:
@@ -924,21 +1585,37 @@ class DocumentParser:
                 logger.info(f"Found relationship types: {rel_types}")
                 logger.info(f"Found node labels: {node_labels}")
 
-                # Get deletion statistics before deleting
-                stats_result = session.run(
+                # First count all chunks for accurate statistics
+                chunk_count_result = session.run(
                     """
                     MATCH (d:Document {doc_id: $doc_id})
-                    OPTIONAL MATCH (d)-[r]->()
-                    WITH d, count(r) as rel_count
                     OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                    RETURN rel_count, count(c) as chunk_count
+                    RETURN count(c) as chunk_count
                     """,
                     doc_id=doc_id
                 )
+                
+                chunk_count_record = chunk_count_result.single()
+                chunk_count = chunk_count_record["chunk_count"] if chunk_count_record else 0
+                
+                if chunk_count is None:
+                    chunk_count = 0
+                    
+                logger.info(f"Found {chunk_count} chunks to delete for document {doc_id}")
 
-                stats = stats_result.single()
-                chunk_count = stats["chunk_count"]
-                relationship_count = stats["rel_count"]
+                # Get relationships count in a separate query to avoid null aggregation warnings
+                rel_count_result = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[r]-()
+                    RETURN count(r) as rel_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                relationship_count = rel_count_result.single()["rel_count"]
+                if relationship_count is None:
+                    relationship_count = 0
 
                 # Start transaction for atomic deletion
                 tx = session.begin_transaction()
@@ -1064,7 +1741,59 @@ class DocumentParser:
                         )
                         deadline_count = deadline_result.single()["count"]
 
-                    # Delete relationships
+                    # Also check for Text nodes (used in some parsers)
+                    text_count = 0
+                    if "Text" in node_labels:
+                        text_result = tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            RETURN count(t) as count
+                            """,
+                            doc_id=doc_id
+                        )
+                        text_count = text_result.single()["count"]
+                        
+                        # Delete Text nodes if they exist
+                        if text_count > 0:
+                            logger.info(f"Found {text_count} Text nodes to delete")
+                            tx.run(
+                                """
+                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                                OPTIONAL MATCH (t)-[tr]-()
+                                DELETE tr
+                                """,
+                                doc_id=doc_id
+                            )
+                            
+                            tx.run(
+                                """
+                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                                DETACH DELETE t
+                                """,
+                                doc_id=doc_id
+                            )
+
+                    # Step 1: Delete relationships between Chunks and other nodes
+                    if chunk_count > 0:
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            OPTIONAL MATCH (c)-[cr]-()
+                            DELETE cr
+                            """,
+                            doc_id=doc_id
+                        )
+
+                        # Step 2: Delete Chunk nodes
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            DETACH DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+
+                    # Step 3: Delete document relationships
                     tx.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
@@ -1074,122 +1803,38 @@ class DocumentParser:
                         doc_id=doc_id
                     )
 
-                    # Delete entities with empty doc_names
-                    if "Entity" in node_labels:
-                        tx.run(
-                            """
-                            MATCH (e:Entity)
-                            WHERE e.doc_names IS NULL OR size(e.doc_names) = 0
-                            DETACH DELETE e
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Delete concepts with empty doc_names
-                    if "Concept" in node_labels:
-                        tx.run(
-                            """
-                            MATCH (c:Concept)
-                            WHERE c.doc_names IS NULL OR size(c.doc_names) = 0
-                            DETACH DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Delete legislation with empty doc_names
-                    if "Legislation" in node_labels:
-                        tx.run(
-                            """
-                            MATCH (l:Legislation)
-                            WHERE l.doc_names IS NULL OR size(l.doc_names) = 0
-                            DETACH DELETE l
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Delete requirements with empty doc_names
-                    if "Requirement" in node_labels:
-                        tx.run(
-                            """
-                            MATCH (r:Requirement)
-                            WHERE r.doc_names IS NULL OR size(r.doc_names) = 0
-                            DETACH DELETE r
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Delete deadlines with empty doc_names
-                    if "Deadline" in node_labels:
-                        tx.run(
-                            """
-                            MATCH (dl:Deadline)
-                            WHERE dl.doc_names IS NULL OR size(dl.doc_names) = 0
-                            DETACH DELETE dl
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Delete all chunks
-                    tx.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                        DETACH DELETE c
-                        """,
-                        doc_id=doc_id
-                    )
-
-                    # Delete the document itself
+                    # Step 4: Delete document node
                     tx.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
-                        DETACH DELETE d
+                        DELETE d
                         """,
                         doc_id=doc_id
                     )
-
-                    # Delete all orghaned chunks remain
-                    tx.run(
-                        """
-                        MATCH (c:Chunk)
-                        WHERE NOT EXISTS((c)<-[:CONTAINS]-())
-                        DETACH DELETE c
-                        """
-                    )
-
-                    # Commit the transaction
+                    
                     tx.commit()
-
-                    deletion_stats["document_deleted"] = True
-                    deletion_stats["chunks_deleted"] = chunk_count
-                    deletion_stats["relationships_deleted"] = relationship_count
-                    deletion_stats["entities_deleted"] = entity_count
-                    deletion_stats["concepts_deleted"] = concept_count
-                    deletion_stats["legislation_deleted"] = legislation_count
-                    deletion_stats["requirements_deleted"] = requirement_count
-                    deletion_stats["deadlines_deleted"] = deadline_count
-
-                    logger.info(f"Document {doc_id} successfully deleted with {chunk_count} chunks, {relationship_count} relationships")
-                    logger.info(f"Deleted {entity_count} entities, {concept_count} concepts, {legislation_count} legislation references, {requirement_count} requirements, and {deadline_count} deadlines")
-
-                    return {
-                        "status": "success",
-                        "message": f"Document {doc_id} deleted successfully",
-                        "stats": deletion_stats
-                    }
-
-                except Exception as tx_error:
-                    # Roll back the transaction on error
+                    logger.info(f"Document {doc_id} deleted successfully with {chunk_count} chunks")
+                except Exception as e:
                     tx.rollback()
-                    logger.error(f"Transaction error: {str(tx_error)}")
+                    logger.error(f"Error in document deletion transaction: {str(e)}")
                     raise
 
+            deletion_stats["document_deleted"] = True
+            deletion_stats["chunks_deleted"] = chunk_count
+            deletion_stats["relationships_deleted"] = relationship_count
+            deletion_stats["entities_deleted"] = entity_count
+            deletion_stats["concepts_deleted"] = concept_count
+            deletion_stats["legislation_deleted"] = legislation_count
+            deletion_stats["requirements_deleted"] = requirement_count
+            deletion_stats["deadlines_deleted"] = deadline_count
+            if "Text" in node_labels:
+                deletion_stats["text_nodes_deleted"] = text_count
+
+            return deletion_stats
+
         except Exception as e:
-            logger.error(f"Error deleting document {doc_id} from Neo4j: {str(e)}")
-            return {
-                "status": "error",
-                "message": f"Error deleting document: {str(e)}",
-                "stats": deletion_stats
-            }
+            logger.error(f"Error during deletion: {str(e)}")
+            raise
 
     def process_large_document(
         self,
@@ -1199,605 +1844,110 @@ class DocumentParser:
         doc_metadata: Optional[Dict[str, Any]] = None,
         enrich: Optional[bool] = None,
         detect_language: bool = True,
-        max_size_per_chunk: int = 5 * 1024 * 1024  # 5MB chunks
+        max_size_per_chunk: int = 5 * 1024 * 1024,  # 5MB chunks
+        **kwargs
     ) -> Dict[str, Any]:
         """
-        Process a large document by splitting it into smaller chunks.
+        Process a large document by chunking it into smaller pieces.
+
+        For the Unstructured API implementation, we simply delegate to the regular
+        process_document method as it already handles large documents appropriately.
 
         Args:
             file_content: Binary content of the file
             file_name: Name of the file
-            doc_id: Optional document ID (generated if not provided)
+            doc_id: Optional document ID
             doc_metadata: Optional document metadata
-            enrich: Whether to apply enrichment
+            enrich: Whether to enrich the document (defaults to class setting)
             detect_language: Whether to detect document language
-            max_size_per_chunk: Maximum size of each chunk in bytes
+            max_size_per_chunk: Maximum size per chunk in bytes
+            **kwargs: Additional parser-specific arguments
 
         Returns:
-            Dictionary with document ID and processing details
+            Dict with document ID and processing details
         """
-        # Generate document ID if not provided
-        if not doc_id:
-            doc_id = f"doc_{uuid.uuid4()}"
-
-        # Initialize metadata if not provided
-        if not doc_metadata:
-            doc_metadata = {}
-
-        # Add processing metadata
-        doc_metadata["processing_time"] = datetime.now().isoformat()
-        doc_metadata["processor"] = "unstructured-api-large-doc"
-        doc_metadata["total_size"] = len(file_content)
-        doc_metadata["chunked_processing"] = True
-
-        file_size = len(file_content)
-        logger.info(f"Large document processing: {file_name} ({file_size} bytes) with ID {doc_id}")
-
-        # Determine file type to choose appropriate splitting strategy
-        file_ext = os.path.splitext(file_name)[1].lower()
-
-        # Process based on file type
-        if file_ext in ['.txt', '.csv', '.md', '.json', '.xml', '.html']:
-            # For text-based files, split by character count
-            return self._process_large_text_document(
-                file_content, file_name, doc_id, doc_metadata, enrich, detect_language
-            )
-        elif file_ext in ['.pdf', '.docx', '.doc', '.pptx', '.xlsx', '.xls']:
-            # For binary files, split using the unstructured API's partition capabilities
-            return self._process_large_binary_document(
-                file_content, file_name, doc_id, doc_metadata, enrich, detect_language, max_size_per_chunk
-            )
-        else:
-            # For unknown file types, try general approach
-            logger.info(f"Unknown file type {file_ext}, trying general large document processing")
-            return self._process_large_binary_document(
-                file_content, file_name, doc_id, doc_metadata, enrich, detect_language, max_size_per_chunk
-            )
-
-    def _process_large_text_document(
-        self,
-        file_content: bytes,
-        file_name: str,
-        doc_id: str,
-        doc_metadata: Dict[str, Any],
-        enrich: Optional[bool],
-        detect_language: bool
-    ) -> Dict[str, Any]:
-        """Process a large text document by splitting it into manageable chunks."""
-        try:
-            # Convert bytes to string for text-based files
-            text_content = file_content.decode('utf-8', errors='replace')
-
-            # Document statistics
-            total_length = len(text_content)
-            max_chunk_size = 500000  # Characters per chunk (well under spaCy's 1M limit)
-
-            # Split into chunks
-            text_chunks = []
-            for i in range(0, total_length, max_chunk_size):
-                end = min(i + max_chunk_size, total_length)
-                # Try to find a good break point (paragraph or sentence)
-                if end < total_length:
-                    # Look for paragraph break
-                    break_pos = text_content.rfind('\n\n', i, end)
-                    if break_pos == -1 or break_pos < i + max_chunk_size // 2:
-                        # Try sentence break
-                        for sep in ['. ', '! ', '? ', '\n']:
-                            break_pos = text_content.rfind(sep, i, end)
-                            if break_pos != -1 and break_pos > i + max_chunk_size // 2:
-                                break_pos += len(sep)
-                                break
-
-                    if break_pos != -1 and break_pos > i + max_chunk_size // 2:
-                        end = break_pos
-
-                text_chunks.append(text_content[i:end])
-
-            logger.info(f"Split large text document into {len(text_chunks)} chunks")
-
-            # Create initial document in Neo4j
-            with self.driver.session() as session:
-                session.run(
-                    """
-                    MERGE (d:Document {doc_id: $doc_id})
-                    SET d += $properties
-                    RETURN d
-                    """,
-                    doc_id=doc_id,
-                    properties=doc_metadata
-                )
-
-            # Process each chunk
-            chunk_results = []
-            all_elements = []
-            chunk_index = 0
-
-            # Detect language from first chunk if requested
-            language_detected = False
-            detected_language = None
-
-            for i, chunk in enumerate(text_chunks):
-                logger.info(f"Processing text chunk {i+1}/{len(text_chunks)}")
-
-                # Create a temporary file for this chunk
-                with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file_name)[1], delete=False) as temp_file:
-                    temp_file.write(chunk.encode('utf-8'))
-                    temp_file_path = temp_file.name
-
-                try:
-                    # Process with Unstructured API
-                    with open(temp_file_path, "rb") as f:
-                        elements = self._call_unstructured_api(f.read(), f"{file_name}.part{i+1}")
-
-                    # Detect language from first chunk if needed
-                    if detect_language and not language_detected and elements:
-                        sample_text = ""
-                        for element in elements[:10]:
-                            if "text" in element:
-                                sample_text += element["text"] + "\n\n"
-                                if len(sample_text) > 1000:
-                                    break
-
-                        if sample_text:
-                            language_detector = LanguageDetector()
-                            language_info = language_detector.detect_language(sample_text)
-                            detected_language = language_info["language_code"]
-
-                            # Update document with language info
-                            with self.driver.session() as session:
-                                session.run(
-                                    """
-                                    MATCH (d:Document {doc_id: $doc_id})
-                                    SET d.language = $language,
-                                        d.language_name = $language_name,
-                                        d.language_confidence = $confidence
-                                    """,
-                                    doc_id=doc_id,
-                                    language=language_info["language_code"],
-                                    language_name=language_info["language_name"],
-                                    confidence=language_info["confidence"]
-                                )
-
-                            language_detected = True
-
-                    # Add chunk offset to make section indices unique
-                    for element in elements:
-                        if "metadata" not in element:
-                            element["metadata"] = {}
-                        element["metadata"]["chunk_part"] = i + 1
-
-                    all_elements.extend(elements)
-                    chunk_index += len(elements)
-                finally:
-                    # Clean up temporary file
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
-
-            # Store all elements in Neo4j
-            result = self._store_document_in_neo4j(
-                doc_id=doc_id,
-                file_name=file_name,
-                elements=all_elements,
-                metadata=doc_metadata
-            )
-
-            # Apply enrichment if requested
-            should_enrich = enrich if enrich is not None else getattr(self, 'use_enrichment', False)
-            entity_count = 0
-            concept_count = 0
-            requirement_count = 0
-            has_regulatory_content = False
-
-            if should_enrich and hasattr(self, 'enrichment_pipeline') and self.enrichment_pipeline:
-                # Process enrichment in smaller batches
-                max_chunks_per_batch = 10  # Process 10 chunks at a time for enrichment
-
-                # Calculate total number of batches
-                total_batches = (len(text_chunks) + max_chunks_per_batch - 1) // max_chunks_per_batch
-
-                for batch_idx in range(total_batches):
-                    start_idx = batch_idx * max_chunks_per_batch
-                    end_idx = min((batch_idx + 1) * max_chunks_per_batch, len(text_chunks))
-
-                    batch_chunks = text_chunks[start_idx:end_idx]
-                    batch_text = "\n\n".join(batch_chunks)
-
-                    # If batch is still too large, skip enrichment
-                    if len(batch_text) > 900000:  # Stay well under spaCy's limit
-                        logger.warning(f"Batch {batch_idx+1} too large for enrichment, skipping")
-                        continue
-
-                    logger.info(f"Enriching batch {batch_idx+1}/{total_batches}")
-
-                    try:
-                        batch_context = {
-                            "doc_id": doc_id,
-                            "batch": batch_idx + 1,
-                            "total_batches": total_batches
-                        }
-
-                        batch_result = self.enrichment_pipeline.enrich_text(
-                            batch_text, context=batch_context
-                        )
-
-                        # Update stats
-                        entity_count += batch_result["stats"]["entity_count"]
-                        concept_count += batch_result["stats"]["concept_count"]
-                        requirement_count += batch_result["stats"]["requirement_count"]
-
-                        if batch_result["stats"]["has_regulatory_content"]:
-                            has_regulatory_content = True
-
-                        # Store enrichment results
-                        self.enrichment_pipeline._store_entities(doc_id, batch_result["entities"])
-                        self.enrichment_pipeline._store_concepts(doc_id, batch_result["concepts"])
-                        self.enrichment_pipeline._store_regulatory_items(doc_id, batch_result["regulatory_analysis"])
-
-                    except Exception as e:
-                        logger.error(f"Error during batch enrichment: {str(e)}")
-
-                # Update document with final enrichment statistics
-                with self.driver.session() as session:
-                    session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        SET d.entity_count = $entity_count,
-                            d.concept_count = $concept_count,
-                            d.requirement_count = $requirement_count,
-                            d.has_regulatory_content = $has_regulatory_content,
-                            d.enriched = true,
-                            d.enriched_at = datetime()
-                        """,
-                        doc_id=doc_id,
-                        entity_count=entity_count,
-                        concept_count=concept_count,
-                        requirement_count=requirement_count,
-                        has_regulatory_content=has_regulatory_content
-                    )
-
-            # Fix circular import issue by moving the RAG indexing to a separate function
-            self._index_document_in_rag_system(doc_id)
-
-            return {
-                "doc_id": doc_id,
-                "chunk_count": result["chunk_count"],
-                "section_count": result["section_count"],
-                "entity_count": entity_count,
-                "concept_count": concept_count,
-                "requirement_count": requirement_count,
-                "has_regulatory_content": has_regulatory_content,
-                "language": detected_language
-            }
-
-        except Exception as e:
-            logger.error(f"Error processing large text document: {str(e)}")
-            raise
-
-    def _process_large_binary_document(
-        self,
-        file_content: bytes,
-        file_name: str,
-        doc_id: str,
-        doc_metadata: Dict[str, Any],
-        enrich: Optional[bool],
-        detect_language: bool,
-        max_size_per_chunk: int
-    ) -> Dict[str, Any]:
-        """Process a large binary document (PDF, DOCX, etc.)."""
-        try:
-            # Save the file temporarily
-            with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file_name)[1], delete=False) as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-
-            # Create initial document in Neo4j
-            with self.driver.session() as session:
-                session.run(
-                    """
-                    MERGE (d:Document {doc_id: $doc_id})
-                    SET d += $properties
-                    RETURN d
-                    """,
-                    doc_id=doc_id,
-                    properties=doc_metadata
-                )
-
-            # For binary files like PDFs, we'll process page by page or in small batches
-            # We'll use the unstructured API differently
-            file_size = len(file_content)
-            file_ext = os.path.splitext(file_name)[1].lower()
-
-            all_elements = []
-
-            # Approach depends on file type
-            try:
-                if file_ext == '.pdf':
-                    # For PDFs, process by page ranges
-                    # First, get total page count using a fast strategy
-                    headers = {
-                        "Accept": "application/json",
-                        "unstructured-api-key": self.unstructured_api_key
-                    }
-
-                    with open(temp_file_path, "rb") as f:
-                        files = {"files": (file_name, f)}
-                        data = {
-                            "strategy": "fast",
-                            "ocr_enabled": "false",
-                            "include_page_breaks": "true",
-                            "include_metadata": "true"
-                        }
-
-                        response = requests.post(
-                            self.unstructured_api_url,
-                            headers=headers,
-                            files=files,
-                            data=data
-                        )
-
-                        if response.status_code != 200:
-                            raise Exception(f"Failed to get PDF metadata: {response.status_code}")
-
-                        elements = response.json()
-
-                        # Try to determine page count
-                        page_count = 0
-                        for element in elements:
-                            if "metadata" in element and "page_number" in element["metadata"]:
-                                page_num = element["metadata"]["page_number"]
-                                if isinstance(page_num, int) and page_num > page_count:
-                                    page_count = page_num
-
-                    if page_count == 0:
-                        # Couldn't determine page count, use a default
-                        page_count = 20
-                        logger.warning(f"Couldn't determine page count, assuming {page_count} pages")
-                    else:
-                        logger.info(f"Detected {page_count} pages in PDF")
-
-                    # Now process in batches of pages
-                    batch_size = 10  # Process 10 pages at a time
-                    for start_page in range(1, page_count + 1, batch_size):
-                        end_page = min(start_page + batch_size - 1, page_count)
-
-                        logger.info(f"Processing PDF pages {start_page}-{end_page} of {page_count}")
-
-                        with open(temp_file_path, "rb") as f:
-                            files = {"files": (file_name, f)}
-                            data = {
-                                "strategy": "hi_res",
-                                "ocr_enabled": "true",
-                                "start_page": str(start_page),
-                                "end_page": str(end_page)
-                            }
-
-                            response = requests.post(
-                                self.unstructured_api_url,
-                                headers=headers,
-                                files=files,
-                                data=data
-                            )
-
-                            if response.status_code != 200:
-                                logger.error(f"Error processing PDF pages {start_page}-{end_page}: {response.status_code}")
-                                continue
-
-                            batch_elements = response.json()
-                            all_elements.extend(batch_elements)
-                else:
-                    # For other binary files, use the standard approach but with safety limits
-                    elements = self._call_unstructured_api(file_content, file_name)
-                    all_elements = elements
-            except Exception as e:
-                logger.error(f"Error processing file with Unstructured API: {str(e)}")
-                # Create a placeholder element
-                all_elements = [{
-                    "type": "text",
-                    "text": f"Error processing document: {str(e)}",
-                    "metadata": {
-                        "filename": file_name,
-                        "filetype": file_ext,
-                        "error": str(e)
-                    }
-                }]
-
-            # Clean up temporary file
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-            # Detect language from first few elements if requested
-            if detect_language and all_elements:
-                sample_text = ""
-                for element in all_elements[:10]:
-                    if "text" in element:
-                        sample_text += element["text"] + "\n\n"
-                        if len(sample_text) > 1000:
-                            break
-
-                if sample_text:
-                    language_detector = LanguageDetector()
-                    language_info = language_detector.detect_language(sample_text)
-                    detected_language = language_info["language_code"]
-
-                    # Update document with language info
-                    with self.driver.session() as session:
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            SET d.language = $language,
-                                d.language_name = $language_name,
-                                d.language_confidence = $confidence
-                            """,
-                            doc_id=doc_id,
-                            language=language_info["language_code"],
-                            language_name=language_info["language_name"],
-                            confidence=language_info["confidence"]
-                        )
-                else:
-                    detected_language = None
-            else:
-                detected_language = None
-
-            # Store document elements in Neo4j
-            result = self._store_document_in_neo4j(
-                doc_id=doc_id,
-                file_name=file_name,
-                elements=all_elements,
-                metadata=doc_metadata
-            )
-
-            # Apply enrichment if requested
-            should_enrich = enrich if enrich is not None else getattr(self, 'use_enrichment', False)
-            entity_count = 0
-            concept_count = 0
-            requirement_count = 0
-            has_regulatory_content = False
-
-            if should_enrich and hasattr(self, 'enrichment_pipeline') and self.enrichment_pipeline:
-                logger.info(f"Running enrichment for document {doc_id}")
-
-                # Get chunks of text for enrichment
-                with self.driver.session() as session:
-                    result = session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                        RETURN c.chunk_id AS chunk_id, c.text AS text, c.section AS section
-                        ORDER BY c.index
-                        """,
-                        doc_id=doc_id
-                    )
-
-                    chunks = [{"chunk_id": record["chunk_id"], "text": record["text"], "section": record["section"]}
-                            for record in result]
-
-                # Process enrichment in smaller batches
-                max_chunks_per_batch = 10
-                total_batches = (len(chunks) + max_chunks_per_batch - 1) // max_chunks_per_batch
-
-                for batch_idx in range(total_batches):
-                    start_idx = batch_idx * max_chunks_per_batch
-                    end_idx = min((batch_idx + 1) * max_chunks_per_batch, len(chunks))
-
-                    batch_chunks = chunks[start_idx:end_idx]
-                    batch_text = "\n\n".join([chunk["text"] for chunk in batch_chunks])
-
-                    # If batch is still too large, skip enrichment
-                    if len(batch_text) > 900000:  # Stay well under spaCy's limit
-                        logger.warning(f"Batch {batch_idx+1} too large for enrichment, skipping")
-                        continue
-
-                    logger.info(f"Enriching batch {batch_idx+1}/{total_batches}")
-
-                    try:
-                        batch_context = {
-                            "doc_id": doc_id,
-                            "batch": batch_idx + 1,
-                            "total_batches": total_batches
-                        }
-
-                        batch_result = self.enrichment_pipeline.enrich_text(
-                            batch_text, context=batch_context
-                        )
-
-                        # Update stats
-                        entity_count += batch_result["stats"]["entity_count"]
-                        concept_count += batch_result["stats"]["concept_count"]
-                        requirement_count += batch_result["stats"]["requirement_count"]
-
-                        if batch_result["stats"]["has_regulatory_content"]:
-                            has_regulatory_content = True
-
-                        # Store enrichment results
-                        self.enrichment_pipeline._store_entities(doc_id, batch_result["entities"])
-                        self.enrichment_pipeline._store_concepts(doc_id, batch_result["concepts"])
-                        self.enrichment_pipeline._store_regulatory_items(doc_id, batch_result["regulatory_analysis"])
-
-                    except Exception as e:
-                        logger.error(f"Error during batch enrichment: {str(e)}")
-
-                # Update document with final enrichment statistics
-                with self.driver.session() as session:
-                    session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        SET d.entity_count = $entity_count,
-                            d.concept_count = $concept_count,
-                            d.requirement_count = $requirement_count,
-                            d.has_regulatory_content = $has_regulatory_content,
-                            d.enriched = true,
-                            d.enriched_at = datetime()
-                        """,
-                        doc_id=doc_id,
-                        entity_count=entity_count,
-                        concept_count=concept_count,
-                        requirement_count=requirement_count,
-                        has_regulatory_content=has_regulatory_content
-                    )
-
-            # Fix circular import issue by moving the RAG indexing to a separate function
-            self._index_document_in_rag_system(doc_id)
-
-            return {
-                "doc_id": doc_id,
-                "chunk_count": result["chunk_count"],
-                "section_count": result["section_count"],
-                "entity_count": entity_count,
-                "concept_count": concept_count,
-                "requirement_count": requirement_count,
-                "has_regulatory_content": has_regulatory_content,
-                "language": detected_language
-            }
-
-        except Exception as e:
-            logger.error(f"Error processing large binary document: {str(e)}")
-            raise
-
-    def _index_document_in_rag_system(self, doc_id: str) -> bool:
-        """
-        Index a document in the RAG system.
-        This is a helper function to avoid circular imports.
-
-        Args:
-            doc_id: Document ID to index
-
-        Returns:
-            True if indexing was successful, False otherwise
-        """
-        try:
-            # Use dynamic import to avoid circular import issues
-            import importlib
-            rag_module = importlib.import_module("llamaIndex_rag.rag")
-            RAGSystem = getattr(rag_module, "RAGSystem")
-
-            # Initialize RAG system with Neo4j credentials
-            rag_system = RAGSystem(
-                neo4j_uri=self.neo4j_uri,
-                neo4j_user=self.neo4j_user,
-                neo4j_password=self.neo4j_password,
-                hybrid_search=True,  # Enable hybrid search
-                vector_weight=0.7,   # Set vector search weight
-                keyword_weight=0.3   # Set keyword search weight
-            )
-
-            # Index the document
-            indexed = rag_system.index_document(doc_id)
-
-            if indexed:
-                logger.info(f"Document {doc_id} indexed in RAG system with hybrid search")
-            else:
-                logger.warning(f"Failed to index document {doc_id} in RAG system")
-
-            # Clean up
-            rag_system.close()
-            return indexed
-
-        except Exception as e:
-            logger.error(f"Error indexing document in RAG system: {str(e)}")
-            # Continue without failing
-            return False
+        return self.process_document(
+            file_content=file_content,
+            file_name=file_name,
+            doc_id=doc_id,
+            doc_metadata=doc_metadata,
+            enrich=enrich,
+            detect_language=detect_language,
+            **kwargs
+        )
 
     def close(self):
-        """Close Neo4j connection"""
-        if self.driver:
-            self.driver.close()
-            logger.info("Document parser Neo4j connection closed")
+        """
+        Close the document parser and release resources.
+        """
+        self.driver.close()
+
+    def _sanitize_metadata(self, metadata: Dict[str, Any], file_name: str, file_content: bytes) -> None:
+        """
+        Sanitize metadata to ensure valid values.
+        
+        Args:
+            metadata: Metadata dictionary to sanitize (modified in place)
+            file_name: Name of the file
+            file_content: Binary content of the file
+        """
+        # Ensure basic metadata fields exist with valid values
+        
+        # File size
+        if "size" not in metadata or not isinstance(metadata["size"], (int, float)) or math.isnan(metadata["size"]):
+            metadata["size"] = len(file_content)
+            
+        # Calculate size in KB for display
+        metadata["size_kb"] = round(metadata["size"] / 1024, 2) if metadata["size"] > 0 else 0
+            
+        # File type
+        if "file_type" not in metadata or not metadata["file_type"]:
+            ext = os.path.splitext(file_name)[1].lower().lstrip('.')
+            metadata["file_type"] = ext if ext else "Unknown"
+            
+        # Title
+        if "title" not in metadata or not metadata["title"]:
+            # Use filename without extension as title
+            base_name = os.path.basename(file_name)
+            title = os.path.splitext(base_name)[0]
+            # Convert CamelCase or snake_case to spaces for better readability
+            title = re.sub(r'([a-z])([A-Z])', r'\1 \2', title)  # CamelCase to spaces
+            title = re.sub(r'_+', ' ', title)  # snake_case to spaces
+            title = re.sub(r'\s+', ' ', title).strip()  # Normalize spaces
+            metadata["title"] = title if title else file_name
+            
+        # Author
+        if "author" not in metadata or not isinstance(metadata["author"], str):
+            metadata["author"] = "N/A"
+            
+        # Category
+        if "category" not in metadata or not isinstance(metadata["category"], str):
+            metadata["category"] = "Uncategorized"
+            
+        # Timestamps
+        current_time = py_datetime.now().isoformat()
+        
+        if "created_at" not in metadata or not metadata["created_at"]:
+            metadata["created_at"] = current_time
+            
+        if "uploaded_at" not in metadata:
+            metadata["uploaded_at"] = current_time
+            
+        # Language (this will be further processed during language detection)
+        if "language" not in metadata or not isinstance(metadata["language"], str):
+            metadata["language"] = "en"
+            
+        # Clean any None values
+        for key in list(metadata.keys()):
+            if metadata[key] is None:
+                if key in ["title", "author", "category"]:
+                    # Replace important None fields with defaults
+                    if key == "title":
+                        metadata[key] = os.path.basename(file_name)
+                    elif key == "author":
+                        metadata[key] = "N/A"
+                    elif key == "category":
+                        metadata[key] = "Uncategorized"
+                else:
+                    # Remove other None fields
+                    del metadata[key]

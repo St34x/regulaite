@@ -92,7 +92,9 @@ const RegisterForm = () => {
         company: formData.company || undefined // Only include if not empty
       };
       
+      console.log('Attempting to register with userData:', { ...userData, password: '[REDACTED]' });
       await register(userData);
+      console.log('Registration successful, navigating to login page');
       navigate('/login?registered=true'); // Redirect to login with success param
     } catch (err) {
       console.error('Registration error:', err);
