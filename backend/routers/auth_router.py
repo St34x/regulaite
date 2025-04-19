@@ -268,8 +268,8 @@ async def register_user(user: UserCreate):
         
         try:
             cursor.execute(
-                "INSERT INTO users (user_id, email, password_hash, full_name, company) VALUES (?, ?, ?, ?, ?)",
-                (user_id, user.email, password_hash, user.full_name, user.company)
+                "INSERT INTO users (user_id, email, password_hash, full_name, company, username) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, user.email, password_hash, user.full_name, user.company, user.username)
             )
             conn.commit()
         except mariadb.Error as e:
@@ -293,7 +293,7 @@ async def register_user(user: UserCreate):
         email=user.email,
         full_name=user.full_name,
         company=user.company,
-        username=None,
+        username=user.username,
         created_at=datetime.now()
     )
 

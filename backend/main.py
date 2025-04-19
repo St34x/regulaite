@@ -299,8 +299,11 @@ def initialize_database(conn):
             password_hash VARCHAR(255) NOT NULL,
             full_name VARCHAR(255) NOT NULL,
             company VARCHAR(255),
+            username VARCHAR(255) UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            last_login TIMESTAMP NULL,
+            settings JSON
         ) ENGINE=InnoDB;
         """)
         
