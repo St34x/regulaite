@@ -1536,7 +1536,7 @@ class DocumentParser:
         Returns:
             Dictionary with deletion results
         """
-        logger.info(f"Deleting document {doc_id} from Neo4j")
+        logger.info(f"Deleting document {doc_id} from Neo4j with purge_orphans={purge_orphans}")
 
         deletion_stats = {
             "document_deleted": False,
@@ -1811,6 +1811,55 @@ class DocumentParser:
                         """,
                         doc_id=doc_id
                     )
+
+                    # Step 5: If purge_orphans is true, clean up any orphaned nodes
+                    if purge_orphans:
+                        logger.info("Purging orphaned nodes...")
+                        # Delete nodes that have no relationships
+                        if "Entity" in node_labels:
+                            tx.run(
+                                """
+                                MATCH (e:Entity) 
+                                WHERE NOT exists((e)--()) 
+                                DELETE e
+                                """
+                            )
+                        
+                        if "Concept" in node_labels:
+                            tx.run(
+                                """
+                                MATCH (c:Concept) 
+                                WHERE NOT exists((c)--()) 
+                                DELETE c
+                                """
+                            )
+                        
+                        if "Legislation" in node_labels:
+                            tx.run(
+                                """
+                                MATCH (l:Legislation) 
+                                WHERE NOT exists((l)--()) 
+                                DELETE l
+                                """
+                            )
+                        
+                        if "Requirement" in node_labels:
+                            tx.run(
+                                """
+                                MATCH (r:Requirement) 
+                                WHERE NOT exists((r)--()) 
+                                DELETE r
+                                """
+                            )
+                        
+                        if "Deadline" in node_labels:
+                            tx.run(
+                                """
+                                MATCH (d:Deadline) 
+                                WHERE NOT exists((d)--()) 
+                                DELETE d
+                                """
+                            )
                     
                     tx.commit()
                     logger.info(f"Document {doc_id} deleted successfully with {chunk_count} chunks")
@@ -1818,6 +1867,53 @@ class DocumentParser:
                     tx.rollback()
                     logger.error(f"Error in document deletion transaction: {str(e)}")
                     raise
+                
+                # Verify deletion was successful with a separate transaction
+                verify_result = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id}) 
+                    RETURN count(d) as doc_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                doc_count = verify_result.single()["doc_count"]
+                if doc_count > 0:
+                    logger.error(f"Document {doc_id} still exists after deletion attempt")
+                    return {
+                        "status": "error",
+                        "message": f"Document {doc_id} still exists after deletion attempt"
+                    }
+                
+                # Also verify if chunks were deleted properly
+                chunk_verify_result = session.run(
+                    """
+                    MATCH (c:Chunk {doc_id: $doc_id}) 
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                orphaned_chunks = chunk_verify_result.single()["chunk_count"]
+                if orphaned_chunks > 0:
+                    logger.warning(f"Found {orphaned_chunks} orphaned chunks after document deletion")
+                    
+                    if purge_orphans:
+                        # Delete orphaned chunks in a new transaction
+                        cleanup_tx = session.begin_transaction()
+                        try:
+                            cleanup_tx.run(
+                                """
+                                MATCH (c:Chunk {doc_id: $doc_id})
+                                DETACH DELETE c
+                                """,
+                                doc_id=doc_id
+                            )
+                            cleanup_tx.commit()
+                            logger.info(f"Cleaned up {orphaned_chunks} orphaned chunks")
+                        except Exception as cleanup_error:
+                            cleanup_tx.rollback()
+                            logger.error(f"Error cleaning up orphaned chunks: {str(cleanup_error)}")
 
             deletion_stats["document_deleted"] = True
             deletion_stats["chunks_deleted"] = chunk_count

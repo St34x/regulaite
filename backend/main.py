@@ -1,5 +1,5 @@
 # plugins/regul_aite/backend/main.py
-from fastapi import FastAPI, HTTPException, Depends, Body, File, UploadFile, Form, Request
+from fastapi import FastAPI, HTTPException, Depends, Body, File, UploadFile, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -18,6 +18,16 @@ from neo4j.time import DateTime as Neo4jDateTime
 from openai import OpenAI
 from unstructured_parser.base_parser import BaseParser, ParserType
 import threading
+import sys
+import random
+import string
+import shutil
+import tempfile
+import asyncio
+import requests
+import uvicorn
+import mysql.connector
+from enum import Enum
 
 # Custom JSON encoder for Neo4j DateTime objects
 class Neo4jDateTimeEncoder(json.JSONEncoder):
@@ -1642,7 +1652,7 @@ async def update_llm_settings(llm_config: Dict[str, Any]):
 
 
 @app.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, background_tasks: BackgroundTasks = None):
     """Delete a document from the system."""
     try:
         logger.info(f"Processing request to delete document: {doc_id}")
@@ -1655,13 +1665,76 @@ async def delete_document(doc_id: str):
 
         # Step 2: Delete from Neo4j
         try:
-            neo4j_deleted = document_parser.delete_document(doc_id)
+            # Using purge_orphans=True to ensure all related nodes are properly cleaned up
+            neo4j_deleted = document_parser.delete_document(doc_id, purge_orphans=True)
             if isinstance(neo4j_deleted, dict) and neo4j_deleted.get("status") == "error":
                 logger.error(f"Error deleting document from Neo4j: {neo4j_deleted.get('message', 'Unknown error')}")
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document not found or could not be deleted from Neo4j: {doc_id}"
-                )
+                # Only raise 404 if document was truly not found
+                if neo4j_deleted.get("message") == "Document not found":
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Document not found in Neo4j: {doc_id}"
+                    )
+                # Otherwise attempt direct chunk cleanup by doc_id
+                else:
+                    logger.warning(f"Attempting direct cleanup of chunks for document {doc_id}")
+                    try:
+                        # Direct cleanup using Neo4j driver
+                        with driver.session() as session:
+                            # Start transaction for atomic deletion
+                            tx = session.begin_transaction()
+                            try:
+                                # Get chunk count
+                                chunk_count_result = tx.run(
+                                    """
+                                    MATCH (c:Chunk {doc_id: $doc_id})
+                                    RETURN count(c) as chunk_count
+                                    """,
+                                    doc_id=doc_id
+                                )
+                                
+                                chunk_count = chunk_count_result.single()["chunk_count"] if chunk_count_result.peek() else 0
+                                
+                                if chunk_count > 0:
+                                    logger.info(f"Found {chunk_count} orphaned chunks to delete with direct cleanup")
+                                    # Delete relationships from orphaned chunks first
+                                    tx.run(
+                                        """
+                                        MATCH (c:Chunk {doc_id: $doc_id})
+                                        OPTIONAL MATCH (c)-[r]-()
+                                        DELETE r
+                                        """,
+                                        doc_id=doc_id
+                                    )
+                                    
+                                    # Delete the orphaned chunks
+                                    tx.run(
+                                        """
+                                        MATCH (c:Chunk {doc_id: $doc_id})
+                                        DELETE c
+                                        """,
+                                        doc_id=doc_id
+                                    )
+                                
+                                tx.commit()
+                                logger.info(f"Direct cleanup successful, deleted {chunk_count} orphaned chunks")
+                                
+                                neo4j_deleted = {
+                                    "document_deleted": False,  # Document wasn't found
+                                    "chunks_deleted": chunk_count,
+                                    "orphaned_chunks_deleted": chunk_count,
+                                    "relationships_deleted": 0
+                                }
+                            except Exception as tx_error:
+                                tx.rollback()
+                                logger.error(f"Error in direct cleanup transaction: {str(tx_error)}")
+                                raise tx_error
+                    except Exception as cleanup_error:
+                        logger.error(f"Direct cleanup failed: {str(cleanup_error)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to clean up orphaned chunks: {str(cleanup_error)}"
+                        )
         except Exception as neo4j_error:
             logger.error(f"Error deleting document {doc_id} from Neo4j: {str(neo4j_error)}")
             raise HTTPException(
@@ -1675,8 +1748,16 @@ async def delete_document(doc_id: str):
             deletion_stats = {
                 "document_deleted": neo4j_deleted.get("document_deleted", True),
                 "chunks_deleted": neo4j_deleted.get("chunks_deleted", 0),
-                "relationships_deleted": neo4j_deleted.get("relationships_deleted", 0)
+                "relationships_deleted": neo4j_deleted.get("relationships_deleted", 0),
+                "orphaned_chunks_deleted": neo4j_deleted.get("orphaned_chunks_deleted", 0)
             }
+
+        # Step 3: Run a periodic orphaned chunk cleanup (background task)
+        try:
+            if driver:
+                background_tasks.add_task(clean_orphaned_chunks)
+        except Exception as cleanup_error:
+            logger.warning(f"Background cleanup task error: {str(cleanup_error)}")
 
         return {
             "status": "success",
@@ -1694,6 +1775,68 @@ async def delete_document(doc_id: str):
             status_code=500,
             detail=f"Error deleting document: {str(e)}"
         )
+
+
+async def clean_orphaned_chunks():
+    """Background task to clean up any orphaned chunks in the database."""
+    try:
+        if not driver:
+            logger.warning("Cannot clean orphaned chunks: Neo4j driver not initialized")
+            return
+            
+        logger.info("Running background task to clean up orphaned chunks")
+        with driver.session() as session:
+            # First, check for orphaned chunks (chunks without document)
+            count_result = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE NOT EXISTS {
+                    MATCH (d:Document {doc_id: c.doc_id})
+                }
+                RETURN count(c) as orphan_count
+                """
+            )
+            
+            orphan_count = count_result.single()["orphan_count"]
+            
+            if orphan_count > 0:
+                logger.info(f"Found {orphan_count} orphaned chunks to clean up")
+                
+                tx = session.begin_transaction()
+                try:
+                    # Delete relationships first
+                    tx.run(
+                        """
+                        MATCH (c:Chunk)
+                        WHERE NOT EXISTS {
+                            MATCH (d:Document {doc_id: c.doc_id})
+                        }
+                        OPTIONAL MATCH (c)-[r]-()
+                        DELETE r
+                        """
+                    )
+                    
+                    # Then delete the chunks
+                    tx.run(
+                        """
+                        MATCH (c:Chunk)
+                        WHERE NOT EXISTS {
+                            MATCH (d:Document {doc_id: c.doc_id})
+                        }
+                        DELETE c
+                        """
+                    )
+                    
+                    tx.commit()
+                    logger.info(f"Successfully cleaned up {orphan_count} orphaned chunks")
+                except Exception as tx_error:
+                    tx.rollback()
+                    logger.error(f"Error in orphaned chunks cleanup: {str(tx_error)}")
+            else:
+                logger.info("No orphaned chunks found to clean up")
+    
+    except Exception as e:
+        logger.error(f"Error in background cleanup task: {str(e)}")
 
 
 @app.get("/debug/qdrant/collections")
@@ -1892,4 +2035,84 @@ async def update_user_parser_settings(user_id: str, parser_settings: Dict[str, A
         raise HTTPException(
             status_code=500,
             detail=f"Error updating user parser settings: {str(e)}"
+        )
+
+
+@app.post("/maintenance/cleanup-orphaned-chunks")
+async def cleanup_orphaned_chunks():
+    """Manually clean up orphaned chunks in Neo4j."""
+    try:
+        if not driver:
+            return {
+                "status": "error", 
+                "message": "Neo4j driver not initialized"
+            }
+            
+        with driver.session() as session:
+            # First, get a count of orphaned chunks
+            count_result = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE NOT EXISTS {
+                    MATCH (d:Document {doc_id: c.doc_id})
+                }
+                RETURN count(c) as orphan_count
+                """
+            )
+            
+            orphan_count = count_result.single()["orphan_count"]
+            
+            if orphan_count == 0:
+                return {
+                    "status": "success",
+                    "message": "No orphaned chunks found to clean up",
+                    "chunks_deleted": 0
+                }
+            
+            # Start a transaction for the cleanup
+            tx = session.begin_transaction()
+            try:
+                # Delete relationships first
+                tx.run(
+                    """
+                    MATCH (c:Chunk)
+                    WHERE NOT EXISTS {
+                        MATCH (d:Document {doc_id: c.doc_id})
+                    }
+                    OPTIONAL MATCH (c)-[r]-()
+                    DELETE r
+                    """
+                )
+                
+                # Then delete the chunks
+                tx.run(
+                    """
+                    MATCH (c:Chunk)
+                    WHERE NOT EXISTS {
+                        MATCH (d:Document {doc_id: c.doc_id})
+                    }
+                    DELETE c
+                    """
+                )
+                
+                tx.commit()
+                logger.info(f"Manual cleanup deleted {orphan_count} orphaned chunks")
+                return {
+                    "status": "success",
+                    "message": f"Successfully cleaned up {orphan_count} orphaned chunks",
+                    "chunks_deleted": orphan_count
+                }
+            except Exception as tx_error:
+                tx.rollback()
+                logger.error(f"Error in manual orphaned chunks cleanup: {str(tx_error)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Transaction error during cleanup: {str(tx_error)}"
+                )
+    
+    except Exception as e:
+        logger.error(f"Error in manual cleanup: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error cleaning up orphaned chunks: {str(e)}"
         )

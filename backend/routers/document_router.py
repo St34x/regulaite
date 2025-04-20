@@ -745,7 +745,7 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
                 
                 # Don't raise exception here - continue with Neo4j deletion
 
-        # Then delete from Neo4j
+        # Then delete from Neo4j using a transaction to ensure atomicity
         try:
             with driver.session() as session:
                 # Check if document exists
@@ -754,11 +754,66 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
                     doc_id=doc_id
                 )
 
-                if doc_check.single()["count"] == 0:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Document not found: {doc_id}"
+                doc_exists = doc_check.single()["count"] > 0
+                
+                if not doc_exists:
+                    # Before raising a 404, check if there are orphaned chunks to clean up
+                    chunk_check = session.run(
+                        """
+                        MATCH (c:Chunk {doc_id: $doc_id})
+                        RETURN count(c) as chunk_count
+                        """,
+                        doc_id=doc_id
                     )
+                    
+                    chunk_count = chunk_check.single()["chunk_count"]
+                    
+                    if chunk_count > 0:
+                        # We have orphaned chunks but no document - clean them up
+                        logger.warning(f"Document {doc_id} not found, but found {chunk_count} orphaned chunks to clean up")
+                        
+                        # Use a transaction to delete orphaned chunks
+                        tx = session.begin_transaction()
+                        try:
+                            # Delete relationships from chunks first
+                            tx.run(
+                                """
+                                MATCH (c:Chunk {doc_id: $doc_id})
+                                OPTIONAL MATCH (c)-[r]-()
+                                DELETE r
+                                """,
+                                doc_id=doc_id
+                            )
+                            
+                            # Then delete the chunks
+                            tx.run(
+                                """
+                                MATCH (c:Chunk {doc_id: $doc_id})
+                                DELETE c
+                                """,
+                                doc_id=doc_id
+                            )
+                            
+                            tx.commit()
+                            logger.info(f"Cleaned up {chunk_count} orphaned chunks for document {doc_id}")
+                            
+                            return {
+                                "doc_id": doc_id,
+                                "deleted": False,
+                                "document_found": False,
+                                "chunks_deleted": chunk_count,
+                                "message": f"Document not found but {chunk_count} orphaned chunks were cleaned up{locals().get('index_message', '')}"
+                            }
+                        except Exception as tx_error:
+                            tx.rollback()
+                            logger.error(f"Error cleaning up orphaned chunks: {str(tx_error)}")
+                            raise tx_error
+                    else:
+                        # No document and no chunks - nothing to do
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Document not found: {doc_id}"
+                        )
                 
                 # First count the chunks that will be deleted
                 count_result = session.run(
@@ -774,48 +829,141 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
                 if chunks_count is None:
                     chunks_count = 0
                 
-                logger.info(f"Found {chunks_count} chunks to delete for document {doc_id}")
-                
-                # First delete the relationships between chunks and other nodes
-                session.run(
+                # Also look for chunks with the doc_id but missing the proper relationship
+                missing_rel_result = session.run(
                     """
-                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                    OPTIONAL MATCH (c)-[cr]-()
-                    DELETE cr
+                    MATCH (c:Chunk {doc_id: $doc_id})
+                    WHERE NOT EXISTS {
+                        MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
+                    }
+                    RETURN count(c) as orphan_count
                     """,
                     doc_id=doc_id
                 )
                 
-                # Then delete the chunk nodes themselves
-                session.run(
+                orphan_count = missing_rel_result.single()["orphan_count"]
+                if orphan_count > 0:
+                    logger.warning(f"Found {orphan_count} chunks missing proper relationships to document {doc_id}")
+                
+                total_chunks = chunks_count + orphan_count
+                logger.info(f"Found {total_chunks} total chunks to delete for document {doc_id}")
+                
+                # Use a transaction for the deletion to ensure atomicity
+                tx = session.begin_transaction()
+                try:
+                    # First delete the relationships between document-connected chunks and other nodes
+                    if chunks_count > 0:
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            OPTIONAL MATCH (c)-[cr]-()
+                            DELETE cr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        # Then delete the document-connected chunk nodes themselves
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            DETACH DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete any orphaned chunks with the same doc_id but missing relationships
+                    if orphan_count > 0:
+                        tx.run(
+                            """
+                            MATCH (c:Chunk {doc_id: $doc_id})
+                            WHERE NOT EXISTS {
+                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
+                            }
+                            OPTIONAL MATCH (c)-[r]-()
+                            DELETE r
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        tx.run(
+                            """
+                            MATCH (c:Chunk {doc_id: $doc_id})
+                            WHERE NOT EXISTS {
+                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
+                            }
+                            DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete document relationships
+                    tx.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        OPTIONAL MATCH (d)-[r]-()
+                        DELETE r
+                        """,
+                        doc_id=doc_id
+                    )
+                    
+                    # Finally delete the document node
+                    tx.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        DELETE d
+                        """,
+                        doc_id=doc_id
+                    )
+                    
+                    # Commit the transaction
+                    tx.commit()
+                    logger.info(f"Deleted document {doc_id} with {total_chunks} chunks from Neo4j")
+                    chunks_deleted = total_chunks
+                except Exception as tx_error:
+                    # Rollback on error
+                    tx.rollback()
+                    logger.error(f"Transaction error while deleting document from Neo4j: {str(tx_error)}")
+                    raise tx_error
+                
+                # Verify deletion was successful
+                verify_result = session.run(
                     """
-                    MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                    DETACH DELETE c
+                    MATCH (c:Chunk {doc_id: $doc_id})
+                    RETURN count(c) as remaining_chunks
                     """,
                     doc_id=doc_id
                 )
                 
-                # Delete document relationships
-                session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    OPTIONAL MATCH (d)-[r]-()
-                    DELETE r
-                    """,
-                    doc_id=doc_id
-                )
-                
-                # Finally delete the document node
-                session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    DELETE d
-                    """,
-                    doc_id=doc_id
-                )
-                
-                logger.info(f"Deleted document {doc_id} with {chunks_count} chunks from Neo4j")
-                chunks_deleted = chunks_count
+                remaining_chunks = verify_result.single()["remaining_chunks"]
+                if remaining_chunks > 0:
+                    logger.warning(f"Found {remaining_chunks} chunks still remaining after deletion")
+                    
+                    # Try one more direct deletion of any remaining chunks
+                    cleanup_tx = session.begin_transaction()
+                    try:
+                        cleanup_tx.run(
+                            """
+                            MATCH (c:Chunk {doc_id: $doc_id})
+                            OPTIONAL MATCH (c)-[r]-()
+                            DELETE r
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        cleanup_tx.run(
+                            """
+                            MATCH (c:Chunk {doc_id: $doc_id})
+                            DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        cleanup_tx.commit()
+                        logger.info(f"Cleaned up {remaining_chunks} remaining chunks in verification step")
+                        chunks_deleted += remaining_chunks
+                    except Exception as cleanup_error:
+                        cleanup_tx.rollback()
+                        logger.error(f"Error in verification cleanup: {str(cleanup_error)}")
                 
         except Exception as neo4j_error:
             logger.error(f"Error deleting document from Neo4j: {str(neo4j_error)}")
@@ -1015,4 +1163,229 @@ async def standardize_document_properties():
         raise HTTPException(
             status_code=500,
             detail=f"Error standardizing document properties: {str(e)}"
+        )
+
+
+@router.post("/maintenance/cleanup-orphaned-chunks", response_model=Dict[str, Any])
+async def cleanup_orphaned_chunks():
+    """Maintenance endpoint to clean up orphaned chunks that have no associated document."""
+    try:
+        # Get Neo4j driver
+        driver = await get_neo4j_driver()
+        
+        with driver.session() as session:
+            # First count all orphaned chunks
+            count_result = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE NOT EXISTS {
+                    MATCH (d:Document {doc_id: c.doc_id})
+                }
+                RETURN count(c) as orphan_count
+                """
+            )
+            
+            orphan_count = count_result.single()["orphan_count"]
+            
+            if orphan_count == 0:
+                return {
+                    "status": "success",
+                    "message": "No orphaned chunks found to clean up",
+                    "chunks_deleted": 0
+                }
+            
+            # Get the doc_ids of orphaned chunks for reporting
+            doc_ids_result = session.run(
+                """
+                MATCH (c:Chunk)
+                WHERE NOT EXISTS {
+                    MATCH (d:Document {doc_id: c.doc_id})
+                }
+                RETURN c.doc_id as doc_id, count(c) as chunk_count
+                """
+            )
+            
+            orphaned_docs = [{"doc_id": record["doc_id"], "chunk_count": record["chunk_count"]} 
+                            for record in doc_ids_result]
+            
+            # Start a transaction for deletion
+            tx = session.begin_transaction()
+            try:
+                # Delete relationships from orphaned chunks first
+                rel_result = tx.run(
+                    """
+                    MATCH (c:Chunk)
+                    WHERE NOT EXISTS {
+                        MATCH (d:Document {doc_id: c.doc_id})
+                    }
+                    OPTIONAL MATCH (c)-[r]-()
+                    DELETE r
+                    RETURN count(r) as rel_count
+                    """
+                )
+                
+                rel_count = rel_result.single()["rel_count"]
+                
+                # Now delete the orphaned chunks
+                tx.run(
+                    """
+                    MATCH (c:Chunk)
+                    WHERE NOT EXISTS {
+                        MATCH (d:Document {doc_id: c.doc_id})
+                    }
+                    DELETE c
+                    """
+                )
+                
+                tx.commit()
+                logger.info(f"Cleaned up {orphan_count} orphaned chunks with {rel_count} relationships")
+                
+                return {
+                    "status": "success",
+                    "message": f"Successfully cleaned up {orphan_count} orphaned chunks",
+                    "chunks_deleted": orphan_count,
+                    "relationships_deleted": rel_count,
+                    "affected_documents": orphaned_docs
+                }
+            except Exception as tx_error:
+                tx.rollback()
+                logger.error(f"Error in cleanup transaction: {str(tx_error)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Transaction error during cleanup: {str(tx_error)}"
+                )
+    
+    except Exception as e:
+        logger.error(f"Error in orphaned chunks cleanup: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error cleaning up orphaned chunks: {str(e)}"
+        )
+
+
+@router.delete("/maintenance/force-delete-chunks/{doc_id}", response_model=Dict[str, Any])
+async def force_delete_chunks(doc_id: str):
+    """Force delete all chunks with a given doc_id, even if the document itself doesn't exist."""
+    try:
+        # Get Neo4j driver
+        driver = await get_neo4j_driver()
+        
+        with driver.session() as session:
+            # First count the chunks to delete
+            count_result = session.run(
+                """
+                MATCH (c:Chunk {doc_id: $doc_id})
+                RETURN count(c) as chunk_count
+                """,
+                doc_id=doc_id
+            )
+            
+            chunk_count = count_result.single()["chunk_count"]
+            
+            if chunk_count == 0:
+                return {
+                    "status": "success",
+                    "message": f"No chunks found for document ID {doc_id}",
+                    "chunks_deleted": 0
+                }
+            
+            # Start a transaction for deletion
+            tx = session.begin_transaction()
+            try:
+                # Delete relationships from chunks first
+                rel_result = tx.run(
+                    """
+                    MATCH (c:Chunk {doc_id: $doc_id})
+                    OPTIONAL MATCH (c)-[r]-()
+                    DELETE r
+                    RETURN count(r) as rel_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                rel_count = rel_result.single()["rel_count"]
+                
+                # Now delete the chunks
+                tx.run(
+                    """
+                    MATCH (c:Chunk {doc_id: $doc_id})
+                    DELETE c
+                    """,
+                    doc_id=doc_id
+                )
+                
+                tx.commit()
+                logger.info(f"Force deleted {chunk_count} chunks for document {doc_id}")
+                
+                # Also check if document exists
+                doc_check = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    RETURN count(d) as doc_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                doc_exists = doc_check.single()["doc_count"] > 0
+                
+                # If document still exists and user wants to delete chunks, they probably
+                # want to delete the document too
+                if doc_exists:
+                    doc_tx = session.begin_transaction()
+                    try:
+                        # Delete document relationships
+                        doc_tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})
+                            OPTIONAL MATCH (d)-[r]-()
+                            DELETE r
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        # Delete document node
+                        doc_tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})
+                            DELETE d
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        doc_tx.commit()
+                        logger.info(f"Also deleted document node for {doc_id}")
+                        
+                        return {
+                            "status": "success",
+                            "message": f"Successfully force deleted {chunk_count} chunks and document node for {doc_id}",
+                            "chunks_deleted": chunk_count,
+                            "relationships_deleted": rel_count,
+                            "document_deleted": True
+                        }
+                    except Exception as doc_error:
+                        doc_tx.rollback()
+                        logger.error(f"Error deleting document node: {str(doc_error)}")
+                        # Continue with just reporting chunk deletion
+                
+                return {
+                    "status": "success",
+                    "message": f"Successfully force deleted {chunk_count} chunks for document {doc_id}",
+                    "chunks_deleted": chunk_count,
+                    "relationships_deleted": rel_count,
+                    "document_deleted": False
+                }
+                
+            except Exception as tx_error:
+                tx.rollback()
+                logger.error(f"Error in force delete transaction: {str(tx_error)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Transaction error during force delete: {str(tx_error)}"
+                )
+    
+    except Exception as e:
+        logger.error(f"Error force deleting chunks: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error force deleting chunks: {str(e)}"
         )

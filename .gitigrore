@@ -12,6 +12,7 @@ backend/venv.bak/
 backend/.Python
 backend/build/
 backend/develop-eggs/
+backend/model_cache/
 backend/dist/
 backend/downloads/
 backend/eggs/
@@ -36,20 +37,20 @@ backend/coverage.xml
 backend/*.cover
 backend/.hypothesis/
 
-# React frontend (regulaite)
+# React frontend (front_end)
 front-end/node_modules/
-regulaite/.pnp
-regulaite/.pnp.js
-regulaite/coverage/
-regulaite/build/
-regulaite/.DS_Store
-regulaite/.env.local
-regulaite/.env.development.local
-regulaite/.env.test.local
-regulaite/.env.production.local
-regulaite/npm-debug.log*
-regulaite/yarn-debug.log*
-regulaite/yarn-error.log*
+front_end/.pnp
+front_end/.pnp.js
+front_end/coverage/
+front_end/build/
+front_end/.DS_Store
+front_end/.env.local
+front_end/.env.development.local
+front_end/.env.test.local
+front_end/.env.production.local
+front_end/npm-debug.log*
+front_end/yarn-debug.log*
+front_end/yarn-error.log*
 
 # IDE specific files
 .idea/

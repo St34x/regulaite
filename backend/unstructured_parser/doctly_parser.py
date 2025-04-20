@@ -489,11 +489,12 @@ class DoctlyParser(BaseParser):
                 relationship_count = rel_stats.single()["rel_count"] or 0
                 logger.info(f"Found {chunk_count} chunks, {text_count} text nodes and {relationship_count} relationships to delete")
                 
-                # Delete the document and all its relationships and connected nodes
-                if purge_orphans:
+                # Use a transaction for the deletion to ensure atomicity
+                tx = session.begin_transaction()
+                try:
                     # First delete any relationships between chunks and other nodes
                     if chunk_count > 0:
-                        session.run(
+                        tx.run(
                             """
                             MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
                             OPTIONAL MATCH (c)-[cr]-()
@@ -503,7 +504,7 @@ class DoctlyParser(BaseParser):
                         )
                         
                         # Delete the chunks
-                        session.run(
+                        tx.run(
                             """
                             MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
                             DETACH DELETE c
@@ -513,7 +514,7 @@ class DoctlyParser(BaseParser):
                     
                     # Delete Text nodes if they exist
                     if text_count > 0:
-                        session.run(
+                        tx.run(
                             """
                             MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
                             OPTIONAL MATCH (t)-[tr]-()
@@ -522,7 +523,7 @@ class DoctlyParser(BaseParser):
                             doc_id=doc_id
                         )
                         
-                        session.run(
+                        tx.run(
                             """
                             MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
                             DETACH DELETE t
@@ -531,7 +532,7 @@ class DoctlyParser(BaseParser):
                         )
                     
                     # Delete document relationships
-                    session.run(
+                    tx.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
                         OPTIONAL MATCH (d)-[r]-()
@@ -541,63 +542,84 @@ class DoctlyParser(BaseParser):
                     )
                     
                     # Delete document node
-                    result = session.run(
+                    tx.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
                         DELETE d
                         """,
                         doc_id=doc_id
                     )
-                else:
-                    # First delete any relationships between chunks and other nodes
-                    if chunk_count > 0:
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            OPTIONAL MATCH (c)-[cr]-()
-                            DELETE cr
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        # Delete the chunks
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            DETACH DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
                     
-                    # Delete Text nodes if they exist
-                    if text_count > 0:
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
-                            OPTIONAL MATCH (t)-[tr]-()
-                            DELETE tr
-                            """,
-                            doc_id=doc_id
-                        )
+                    # If purge_orphans, clean up any orphaned nodes
+                    if purge_orphans:
+                        # Delete orphaned nodes with no relationships
+                        logger.info("Purging orphaned nodes without relationships")
                         
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
-                            DETACH DELETE t
-                            """,
-                            doc_id=doc_id
-                        )
+                        for label in ["Entity", "Concept", "Legislation", "Requirement", "Deadline"]:
+                            if label in node_labels:
+                                tx.run(
+                                    f"""
+                                    MATCH (n:{label})
+                                    WHERE NOT exists((n)--())
+                                    DELETE n
+                                    """
+                                )
+                                
+                    # Commit the transaction
+                    tx.commit()
+                    logger.info(f"Document {doc_id} deletion transaction committed successfully")
+                except Exception as e:
+                    # Rollback on error
+                    tx.rollback()
+                    logger.error(f"Error during document deletion transaction: {str(e)}")
+                    raise
+                
+                # Verify deletion was successful
+                verify_result = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id}) 
+                    RETURN count(d) as doc_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                doc_count = verify_result.single()["doc_count"]
+                if doc_count > 0:
+                    logger.error(f"Document {doc_id} still exists after deletion attempt")
+                    return {
+                        "status": "error",
+                        "message": f"Document {doc_id} still exists after deletion attempt"
+                    }
+                
+                # Check for orphaned chunks
+                chunk_verify_result = session.run(
+                    """
+                    MATCH (c:Chunk {doc_id: $doc_id}) 
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                orphaned_chunks = chunk_verify_result.single()["chunk_count"]
+                if orphaned_chunks > 0:
+                    logger.warning(f"Found {orphaned_chunks} orphaned chunks after document deletion")
                     
-                    # Delete document relationships and the document itself
-                    result = session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        DETACH DELETE d
-                        """,
-                        doc_id=doc_id
-                    )
-
-                summary = result.consume()
+                    if purge_orphans:
+                        # Delete orphaned chunks in a new transaction
+                        cleanup_tx = session.begin_transaction()
+                        try:
+                            cleanup_tx.run(
+                                """
+                                MATCH (c:Chunk {doc_id: $doc_id})
+                                DETACH DELETE c
+                                """,
+                                doc_id=doc_id
+                            )
+                            cleanup_tx.commit()
+                            logger.info(f"Cleaned up {orphaned_chunks} orphaned chunks")
+                        except Exception as cleanup_error:
+                            cleanup_tx.rollback()
+                            logger.error(f"Error cleaning up orphaned chunks: {str(cleanup_error)}")
                 
                 total_deleted = chunk_count + text_count + 1  # +1 for the document node
                 logger.info(f"Document {doc_id} deleted with {chunk_count} chunks and {text_count} text nodes")

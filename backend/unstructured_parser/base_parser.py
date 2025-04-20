@@ -69,12 +69,13 @@ class BaseParser(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def delete_document(self, doc_id: str, **kwargs) -> Dict[str, Any]:
+    def delete_document(self, doc_id: str, purge_orphans: bool = False, **kwargs) -> Dict[str, Any]:
         """
         Delete a document from the storage.
 
         Args:
             doc_id: Document ID to delete
+            purge_orphans: Whether to purge orphaned nodes after deletion
             **kwargs: Additional parser-specific arguments
 
         Returns:
