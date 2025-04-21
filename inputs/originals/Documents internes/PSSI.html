@@ -649,7 +649,7 @@ RSSI    DSI     Conformité
                 </td>
                 <td>
                     <ul>
-                        <li>≥ 90%</li>
+                        <li>≥ 95%</li>
                         <li>≥ 85%</li>
                         <li>4.3/5 d'ici 24 mois</li>
                     </ul>
@@ -687,7 +687,7 @@ RSSI    DSI     Conformité
                     <ul>
                         <li>≥ 95%</li>
                         <li>< 5%</li>
-                        <li>≥ 90%</li>
+                        <li>≥ 95%</li>
                     </ul>
                 </td>
                 <td>Trimestrielle</td>
@@ -703,7 +703,7 @@ RSSI    DSI     Conformité
                 </td>
                 <td>
                     <ul>
-                        <li>≥ 90%</li>
+                        <li>≥ 95%</li>
                         <li>100%</li>
                         <li>≥ 95%</li>
                     </ul>
@@ -3849,28 +3849,28 @@ RSSI    DSI     Conformité
             </tr>
             <tr>
                 <td>Critique (données transactionnelles)</td>
-                <td>15 minutes</td>
+                <td>< 15 minutes</td>
                 <td>Continue (CDC + log shipping)</td>
                 <td>7 jours complet, 30 jours archives</td>
                 <td>Test hebdomadaire</td>
             </tr>
             <tr>
                 <td>Importante (données clients)</td>
-                <td>1 heure</td>
+                <td>< 4 heures</td>
                 <td>Toutes les heures</td>
                 <td>30 jours complet, 1 an archives</td>
                 <td>Test bi-mensuel</td>
             </tr>
             <tr>
                 <td>Standard (données opérationnelles)</td>
-                <td>24 heures</td>
+                <td>> 4 heures < 24 heures</td>
                 <td>Quotidienne</td>
                 <td>30 jours</td>
                 <td>Test mensuel</td>
             </tr>
             <tr>
                 <td>Faible (données analytiques)</td>
-                <td>72 heures</td>
+                <td>> 24 heures < 72 heures</td>
                 <td>3 fois par semaine</td>
                 <td>15 jours</td>
                 <td>Test trimestriel</td>
@@ -4411,7 +4411,7 @@ RSSI    DSI     Conformité
             </tr>
             <tr>
                 <td>Services web externes (Internet)</td>
-                <td>TLS 1.3 obligatoire</td>
+                <td>TLSv1.2 minimum obligatoire</td>
                 <td>
                     <ul>
                         <li>Certificate Extended Validation</li>
@@ -4423,7 +4423,7 @@ RSSI    DSI     Conformité
             </tr>
             <tr>
                 <td>Communications internes critiques</td>
-                <td>TLS 1.3 ou IPsec</td>
+                <td>TLSv1.2 minimum ou IPsec</td>
                 <td>
                     <ul>
                         <li>PKI interne avec validation stricte</li>
@@ -4434,7 +4434,7 @@ RSSI    DSI     Conformité
             </tr>
             <tr>
                 <td>API externes</td>
-                <td>TLS 1.3 + jeton signé</td>
+                <td>TLSv1.2 minimum + jeton signé</td>
                 <td>
                     <ul>
                         <li>Signature des requêtes (JWS)</li>
@@ -4508,8 +4508,8 @@ RSSI    DSI     Conformité
             
             <p><strong>Protocoles de chiffrement :</strong></p>
             <ul>
-                <li>TLS 1.3 (privilégié)</li>
-                <li>TLS 1.2 (compatible)</li>
+                <li>TLSv1.3 (privilégié)</li>
+                <li>TLSv1.2 (compatible)</li>
                 <li>IPsec avec IKEv2</li>
                 <li>SSH v2</li>
             </ul>
@@ -4539,7 +4539,7 @@ RSSI    DSI     Conformité
         <div class="warning-box">
             <p><strong>Protocoles et algorithmes interdits :</strong></p>
             <ul>
-                <li>SSL 2.0/3.0 et TLS 1.0/1.1</li>
+                <li>SSL 2.0/3.0 et TLSv1.0/1.1</li>
                 <li>RC4, DES, 3DES, Blowfish</li>
                 <li>MD5, SHA-1</li>
                 <li>RSA inférieur à 2048 bits</li>
