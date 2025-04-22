@@ -69,7 +69,8 @@ export const uploadDocument = async (
     language: null,
     useQueue: false,
     parserType: 'unstructured',
-    extractImages: false
+    extractImages: false,
+    parserSettings: null
   }
 ) => {
   try {
@@ -93,8 +94,10 @@ export const uploadDocument = async (
     // Add parser type
     formData.append('parser_type', options.parserType);
     
-    // Add extract_images option
-    formData.append('extract_images', options.extractImages.toString());
+    // Add parser settings if provided
+    if (options.parserSettings) {
+      formData.append('parser_settings', JSON.stringify(options.parserSettings));
+    }
 
     const response = await axios.post(`${API_URL}/documents/process`, formData, {
       headers: {

@@ -77,8 +77,20 @@ const DocumentsPage = () => {
     detectLanguage: true,
     parserType: 'unstructured',
     useQueue: false,
-    extractImages: false
+    extractImages: false,
+    chunkingStrategy: 'fixed',
+    chunkSize: 1000,
+    chunkOverlap: 200
   });
+
+  // Available chunking strategies
+  const chunkingStrategies = [
+    { value: 'fixed', label: 'Fixed Size', description: 'Split by fixed character count with natural breaks at sentences' },
+    { value: 'recursive', label: 'Recursive', description: 'Recursively split by paragraphs and other structural elements' },
+    { value: 'semantic', label: 'Semantic', description: 'Split based on semantic boundaries and section markers' },
+    { value: 'hierarchical', label: 'Hierarchical', description: 'Maintain document hierarchy with parent-child relationships' },
+    { value: 'token', label: 'Token', description: 'Split by token count rather than character count (better for LLMs)' }
+  ];
 
   // Load documents, stats, and parser types on mount
   useEffect(() => {
@@ -194,7 +206,13 @@ const DocumentsPage = () => {
           detectLanguage: processingOptions.detectLanguage,
           parserType: processingOptions.parserType,
           useQueue: processingOptions.useQueue,
-          extractImages: processingOptions.extractImages
+          extractImages: processingOptions.extractImages,
+          parserSettings: {
+            chunking_strategy: processingOptions.chunkingStrategy,
+            chunk_size: processingOptions.chunkSize,
+            chunk_overlap: processingOptions.chunkOverlap,
+            extract_images: processingOptions.extractImages
+          }
         }
       );
 
@@ -606,6 +624,88 @@ const DocumentsPage = () => {
               )}
             </FormControl>
             
+            <FormControl mb={4}>
+              <FormLabel display="flex" alignItems="center">
+                Chunking Strategy
+                <Tooltip 
+                  label="Select how documents will be split into chunks for processing and retrieval"
+                  placement="top"
+                >
+                  <Box as="span" ml={1} color="gray.500" cursor="help">
+                    <FiInfo size={14} />
+                  </Box>
+                </Tooltip>
+              </FormLabel>
+              <Select
+                value={processingOptions.chunkingStrategy}
+                onChange={(e) => setProcessingOptions(prev => ({ 
+                  ...prev, 
+                  chunkingStrategy: e.target.value 
+                }))}
+              >
+                {chunkingStrategies.map(strategy => (
+                  <option key={strategy.value} value={strategy.value}>
+                    {strategy.label}
+                  </option>
+                ))}
+              </Select>
+              {chunkingStrategies.find(s => s.value === processingOptions.chunkingStrategy)?.description && (
+                <Text fontSize="sm" mt={1} color="gray.500">
+                  {chunkingStrategies.find(s => s.value === processingOptions.chunkingStrategy)?.description}
+                </Text>
+              )}
+            </FormControl>
+            
+            <Grid templateColumns="repeat(2, 1fr)" gap={4}>
+              <FormControl mb={4}>
+                <FormLabel display="flex" alignItems="center">
+                  Chunk Size
+                  <Tooltip 
+                    label="Maximum size of each chunk in characters (or tokens for Token strategy)"
+                    placement="top"
+                  >
+                    <Box as="span" ml={1} color="gray.500" cursor="help">
+                      <FiInfo size={14} />
+                    </Box>
+                  </Tooltip>
+                </FormLabel>
+                <Input
+                  type="number"
+                  value={processingOptions.chunkSize}
+                  onChange={(e) => setProcessingOptions(prev => ({ 
+                    ...prev, 
+                    chunkSize: parseInt(e.target.value) 
+                  }))}
+                  min={100}
+                  max={10000}
+                />
+              </FormControl>
+              
+              <FormControl mb={4}>
+                <FormLabel display="flex" alignItems="center">
+                  Chunk Overlap
+                  <Tooltip 
+                    label="Number of characters (or tokens) to overlap between chunks"
+                    placement="top"
+                  >
+                    <Box as="span" ml={1} color="gray.500" cursor="help">
+                      <FiInfo size={14} />
+                    </Box>
+                  </Tooltip>
+                </FormLabel>
+                <Input
+                  type="number"
+                  value={processingOptions.chunkOverlap}
+                  onChange={(e) => setProcessingOptions(prev => ({ 
+                    ...prev, 
+                    chunkOverlap: parseInt(e.target.value) 
+                  }))}
+                  min={0}
+                  max={processingOptions.chunkSize / 2}
+                />
+              </FormControl>
+            </Grid>
+
             <FormControl display="flex" alignItems="center" mb={2}>
               <FormLabel htmlFor="useNlp" mb="0">
                 Use NLP Processing

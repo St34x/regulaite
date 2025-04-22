@@ -16,6 +16,14 @@ import time
 import math
 import re
 
+# Import LangChain TokenTextSplitter with fallback
+try:
+    from langchain_text_splitters import TokenTextSplitter
+    HAS_TOKEN_SPLITTER = True
+except ImportError:
+    HAS_TOKEN_SPLITTER = False
+    logging.warning("langchain_text_splitters package not found. Token-based chunking will fall back to fixed size chunking.")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Define chunking strategies
-ChunkingStrategy = Literal["fixed", "recursive", "semantic", "hierarchical"]
+ChunkingStrategy = Literal["fixed", "recursive", "semantic", "hierarchical", "token"]
 
 class DocumentParser:
     """
@@ -60,7 +68,7 @@ class DocumentParser:
           chunk_size: Maximum size of text chunks in characters
           chunk_overlap: Number of characters to overlap between chunks
           use_enrichment: Whether to enrich documents by default
-          chunking_strategy: Strategy for chunking text ("fixed", "recursive", "semantic", "hierarchical")
+          chunking_strategy: Strategy for chunking text ("fixed", "recursive", "semantic", "hierarchical", "token")
           extract_tables: Whether to extract tables from documents
           extract_metadata: Whether to extract detailed metadata
           extract_images: Whether to extract and process images
@@ -475,6 +483,13 @@ class DocumentParser:
             return self._semantic_chunking(text)
         elif self.chunking_strategy == "hierarchical":
             return self._hierarchical_chunking(text)
+        elif self.chunking_strategy == "token":
+            # Check if token-based chunking is available and enabled
+            if HAS_TOKEN_SPLITTER and os.environ.get("ENABLE_TOKEN_CHUNKING", "true").lower() != "false":
+                return self._token_chunking(text)
+            else:
+                logger.warning(f"Token-based chunking requested but not available or disabled, using fixed size chunking")
+                return self._fixed_size_chunking(text)
         else:
             # Default to fixed size chunking
             logger.warning(f"Unknown chunking strategy '{self.chunking_strategy}', using fixed size chunking")
@@ -618,6 +633,50 @@ class DocumentParser:
         # In a production environment, this would track parent-child relationships
         # and store them in Neo4j for hierarchical retrieval
         return self._semantic_chunking(text)
+
+    def _token_chunking(self, text: str) -> List[str]:
+        """
+        Split text into chunks based on token count rather than character count.
+        This uses LangChain's TokenTextSplitter which is more aware of token boundaries
+        and is better aligned with how LLMs process text.
+
+        Args:
+            text: Text to chunk
+
+        Returns:
+            List of text chunks split by token count
+        """
+        if not text or len(text.strip()) == 0:
+            return []
+
+        # If TokenTextSplitter is not available, fall back to fixed size chunking
+        if not HAS_TOKEN_SPLITTER:
+            logger.warning("Token-based chunking not available - falling back to fixed size chunking")
+            return self._fixed_size_chunking(text)
+
+        try:
+            # Convert character sizes to approximate token counts
+            # Rule of thumb: ~4 chars per token for English text
+            chars_per_token = 4
+            token_size = max(1, self.chunk_size // chars_per_token)
+            token_overlap = max(1, self.chunk_overlap // chars_per_token)
+            
+            # Create TokenTextSplitter with appropriate settings
+            splitter = TokenTextSplitter(
+                chunk_size=token_size,
+                chunk_overlap=token_overlap
+            )
+            
+            # Split the text
+            chunks = splitter.split_text(text)
+            logger.info(f"Token-based chunking created {len(chunks)} chunks from text of length {len(text)}")
+            
+            return chunks
+        except Exception as e:
+            logger.error(f"Error in token chunking: {str(e)}")
+            # Fall back to fixed size chunking if token chunking fails
+            logger.warning("Falling back to fixed size chunking")
+            return self._fixed_size_chunking(text)
 
     def _hierarchical_chunking_from_elements(self, elements: List[Dict[str, Any]], doc_id: str) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """

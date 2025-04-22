@@ -26,6 +26,8 @@ unstructured-client>=0.13.0  # Client for Unstructured Cloud API
 spacy>=3.7.2
 langdetect>=1.0.9
 langid>=1.1.6
+langchain-text-splitters>=0.3.8  # For TokenTextSplitter
+langchain-core>=0.3.54  # Core LangChain functionality
 
 # Additional document parsing APIs
 doctly>=0.1.0
