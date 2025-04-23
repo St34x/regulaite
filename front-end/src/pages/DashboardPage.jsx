@@ -21,31 +21,43 @@ import {
 } from '@chakra-ui/react';
 import { useAuth } from '../contexts/AuthContext';
 import UserProfile from '../components/auth/UserProfile';
+import { getDocumentStats } from '../services/documentService';
+
+// Import our custom dashboard widgets
+import ComplianceDonutChart from '../components/dashboard/ComplianceDonutChart';
+import RiskTrendChart from '../components/dashboard/RiskTrendChart';
+import FrameworkComplianceChart from '../components/dashboard/FrameworkComplianceChart';
+import RiskRadarChart from '../components/dashboard/RiskRadarChart';
+import RecentAlertsWidget from '../components/dashboard/RecentAlertsWidget';
 
 const DashboardPage = () => {
   const { currentUser } = useAuth();
   const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState(null);
+  const [error, setError] = useState(null);
   
   // Chakra UI colors
   const accentColor = '#4415b6';
   const cardBg = useColorModeValue('white', 'gray.700');
 
   useEffect(() => {
-    // Simulate fetching dashboard data
     const fetchData = async () => {
       try {
-        // This would be replaced with a real API call
-        setTimeout(() => {
-          setDashboardData({
-            documentCount: 5,
-            recentDocuments: [],
-            recentChats: []
-          });
-          setLoading(false);
-        }, 800);
+        // Get real document statistics from API
+        const docStats = await getDocumentStats();
+        
+        setDashboardData({
+          documentCount: docStats.total_documents,
+          totalChunks: docStats.total_chunks,
+          documentsByType: docStats.documents_by_type,
+          documentsByLanguage: docStats.documents_by_language,
+          recentUploads: docStats.recent_uploads,
+          totalStorageMb: docStats.total_storage_mb
+        });
+        setLoading(false);
       } catch (error) {
         console.error('Error fetching dashboard data:', error);
+        setError('Failed to load dashboard data. Please try again later.');
         setLoading(false);
       }
     };
@@ -58,6 +70,17 @@ const DashboardPage = () => {
       <Flex justify="center" align="center" height="100vh">
         <Spinner size="xl" color={accentColor} />
         <Text ml={4}>Loading dashboard...</Text>
+      </Flex>
+    );
+  }
+
+  if (error) {
+    return (
+      <Flex justify="center" align="center" height="100vh" direction="column">
+        <Text color="red.500" fontSize="lg" mb={4}>{error}</Text>
+        <Button onClick={() => window.location.reload()} colorScheme="purple">
+          Retry
+        </Button>
       </Flex>
     );
   }
@@ -94,9 +117,11 @@ const DashboardPage = () => {
           </Flex>
         </Flex>
 
+        {/* Original widgets */}
         <Grid 
           templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
           gap={6}
+          mb={8}
         >
           <Card bg={cardBg} boxShadow="md" borderRadius="lg">
             <CardHeader>
@@ -108,6 +133,18 @@ const DashboardPage = () => {
                 <StatNumber fontSize="3xl">{dashboardData?.documentCount || 0}</StatNumber>
                 <StatHelpText>Total documents in your repository</StatHelpText>
               </Stat>
+              {dashboardData?.totalStorageMb > 0 && (
+                <Stat mt={2}>
+                  <StatNumber fontSize="xl">{dashboardData.totalStorageMb.toFixed(2)} MB</StatNumber>
+                  <StatHelpText>Total storage used</StatHelpText>
+                </Stat>
+              )}
+              {dashboardData?.totalChunks > 0 && (
+                <Stat mt={2}>
+                  <StatNumber fontSize="xl">{dashboardData.totalChunks}</StatNumber>
+                  <StatHelpText>Total document chunks</StatHelpText>
+                </Stat>
+              )}
             </CardBody>
             <CardFooter>
               <Button 
@@ -152,6 +189,38 @@ const DashboardPage = () => {
               <UserProfile />
             </CardBody>
           </Card>
+        </Grid>
+
+        {/* New visualization widgets */}
+        <Heading as="h2" size="lg" mb={4}>Compliance & Risk Analytics</Heading>
+        <Grid 
+          templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
+          gap={6}
+          mb={8}
+        >
+          <GridItem colSpan={{ base: 1, lg: 1 }}>
+            <ComplianceDonutChart />
+          </GridItem>
+          <GridItem colSpan={{ base: 1, lg: 2 }}>
+            <RiskTrendChart />
+          </GridItem>
+          <GridItem colSpan={{ base: 1, lg: 2 }}>
+            <FrameworkComplianceChart />
+          </GridItem>
+          <GridItem colSpan={{ base: 1, lg: 1 }}>
+            <RecentAlertsWidget />
+          </GridItem>
+        </Grid>
+        
+        {/* Additional widget section */}
+        <Heading as="h2" size="lg" mb={4}>Risk Assessment</Heading>
+        <Grid 
+          templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
+          gap={6}
+        >
+          <GridItem colSpan={{ base: 1, lg: 3 }}>
+            <RiskRadarChart />
+          </GridItem>
         </Grid>
       </Box>
     </Box>

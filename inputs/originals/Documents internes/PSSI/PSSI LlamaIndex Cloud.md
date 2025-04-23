@@ -56,7 +56,7 @@ Annuelle
 
 # Présentation de Neo Financia
 
-Neo Financia est une néobanque européenne offrant des services bancaires innovants exclusivement à travers les canaux numériques. Fondée sur un modèle digital-first, Neo Financia sert 2 millions de clients avec une équipe de 1000 collaborateurs répartis entre son siège social à Paris et ses bureaux de Lyon et Londres.
+Neo Financia est une néobanque européenne offrant des services bancaires innovants exclusivement à travers les canaux numériques. Fondée sur un modèle digital-first, Neo Financia sert 2 millions de clients avec une équipe de 500 collaborateurs répartis entre son siège social à Paris et ses bureaux de Lyon et Londres.
 
 La banque propose une gamme complète de services financiers incluant
 
@@ -585,7 +585,7 @@ Neo Financia reconnaît que le facteur humain est à la fois un élément clé d
 - Promouvoir une culture de sécurité à tous les niveaux de l'organisation
 - Protéger les intérêts de Neo Financia, de ses clients et de ses partenaires
 
-Cette politique s'applique à l'ensemble des collaborateurs de Neo Financia (1000 personnes), quelle que soit leur localisation (Paris, Lyon, Londres), leur statut (CDI, CDD, alternants, stagiaires) ou leur niveau hiérarchique, ainsi qu'aux prestataires et consultants externes intervenant sur nos systèmes.
+Cette politique s'applique à l'ensemble des collaborateurs de Neo Financia (500 personnes), quelle que soit leur localisation (Paris, Lyon, Londres), leur statut (CDI, CDD, alternants, stagiaires) ou leur niveau hiérarchique, ainsi qu'aux prestataires et consultants externes intervenant sur nos systèmes.
 
 ## Mesures de sécurité avant l'embauche
 
