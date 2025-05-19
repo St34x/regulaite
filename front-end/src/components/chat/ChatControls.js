@@ -47,12 +47,10 @@ const ChatControls = ({
         <Button
           leftIcon={<SettingsIcon />}
           size="sm"
-          variant="outline"
+          variant="secondary"
           onClick={onOpen}
-          bg={buttonBg}
           color={accentColor}
-          _hover={{ bg: buttonHoverBg }}
-          borderColor={accentColor}
+          _hover={{ color: textColor }}
         >
           Settings
         </Button>

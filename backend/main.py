@@ -291,6 +291,26 @@ def initialize_database(conn):
     try:
         cursor = conn.cursor()
         
+        # Create regulaite_settings table if it doesn't exist
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS regulaite_settings (
+            setting_key VARCHAR(255) PRIMARY KEY,
+            setting_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            description TEXT
+        ) ENGINE=InnoDB;
+        """)
+        
+        # Insert default settings if they don't exist
+        cursor.execute("""
+        INSERT IGNORE INTO regulaite_settings (setting_key, setting_value, description) VALUES
+        ('llm_model', 'gpt-4', 'Default LLM model'),
+        ('llm_temperature', '0.7', 'Default temperature for LLM'),
+        ('llm_max_tokens', '2048', 'Default max tokens for LLM'),
+        ('llm_top_p', '1', 'Default top_p value for LLM'),
+        ('enable_chat_history', 'true', 'Whether to save chat history');
+        """)
+        
         # Create users table if it doesn't exist
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -299,8 +319,11 @@ def initialize_database(conn):
             password_hash VARCHAR(255) NOT NULL,
             full_name VARCHAR(255) NOT NULL,
             company VARCHAR(255),
+            username VARCHAR(255) UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            last_login TIMESTAMP NULL,
+            settings JSON
         ) ENGINE=InnoDB;
         """)
         

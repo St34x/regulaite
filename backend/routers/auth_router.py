@@ -127,7 +127,7 @@ def create_auth_tables(conn):
         password_hash VARCHAR(255) NOT NULL,
         full_name VARCHAR(255) NOT NULL,
         company VARCHAR(255),
-        username VARCHAR(255) UNIQUE NOT NULL,
+        username VARCHAR(255) UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         last_login TIMESTAMP NULL,
@@ -268,8 +268,8 @@ async def register_user(user: UserCreate):
         
         try:
             cursor.execute(
-                "INSERT INTO users (user_id, email, password_hash, full_name, company) VALUES (?, ?, ?, ?, ?)",
-                (user_id, user.email, password_hash, user.full_name, user.company)
+                "INSERT INTO users (user_id, email, password_hash, full_name, company, username) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, user.email, password_hash, user.full_name, user.company, user.username)
             )
             conn.commit()
         except mariadb.Error as e:
@@ -293,7 +293,7 @@ async def register_user(user: UserCreate):
         email=user.email,
         full_name=user.full_name,
         company=user.company,
-        username=None,
+        username=user.username,
         created_at=datetime.now()
     )
 
