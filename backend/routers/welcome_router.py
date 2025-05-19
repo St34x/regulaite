@@ -228,10 +228,14 @@ async def get_dashboard_data():
             # Get recent document details
             recent_docs_details_query = """
                 MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title,
-                       d.original_filename as filename, d.created as created,
-                       d.file_type as file_type, d.size as size
-                ORDER BY d.created DESC
+                RETURN d.doc_id as doc_id, 
+                       COALESCE(d.title, d.name, 'Untitled') as title,
+                       COALESCE(d.original_filename, d.name, d.doc_id) as filename, 
+                       COALESCE(d.created, d.created_at, datetime()) as created,
+                       COALESCE(d.file_type, '') as file_type, 
+                       COALESCE(d.size, 0) as size,
+                       COALESCE(d.is_indexed, false) as is_indexed
+                ORDER BY COALESCE(d.created, d.created_at, datetime()) DESC
                 LIMIT 5
             """
             recent_docs_details = [dict(record) for record in session.run(recent_docs_details_query)]
@@ -362,7 +366,7 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_user)):
             result = session.run(
                 """
                 MATCH (d:Document)
-                WHERE d.owner_id = $user_id
+                WHERE COALESCE(d.owner_id, 'unknown') = $user_id
                 RETURN count(d) as document_count
                 """,
                 user_id=user_id
@@ -373,7 +377,8 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_user)):
             result = session.run(
                 """
                 MATCH (d:Document)
-                WHERE d.owner_id = $user_id AND datetime(d.created_at) > datetime() - duration('P7D')
+                WHERE COALESCE(d.owner_id, 'unknown') = $user_id 
+                  AND COALESCE(d.created_at, d.created, datetime()) > datetime() - duration('P7D')
                 RETURN count(d) as recent_document_count
                 """,
                 user_id=user_id
@@ -384,8 +389,8 @@ async def get_user_dashboard(current_user: dict = Depends(get_current_user)):
             result = session.run(
                 """
                 MATCH (d:Document)
-                WHERE d.owner_id = $user_id
-                RETURN sum(d.file_size) as total_size
+                WHERE COALESCE(d.owner_id, 'unknown') = $user_id
+                RETURN sum(COALESCE(d.file_size, d.size, 0)) as total_size
                 """,
                 user_id=user_id
             )

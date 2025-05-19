@@ -54,7 +54,12 @@ RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore spacy lang
     python -m spacy download de_core_news_sm && \
     python -m spacy download it_core_news_sm && \
     python -m spacy download pt_core_news_sm && \
-    python -m spacy download xx_ent_wiki_sm
+    python -m spacy download xx_ent_wiki_sm && \
+    # Pre-download these models so they're ready at container start
+    python -c "from sentence_transformers import SentenceTransformer; \
+                SentenceTransformer('all-MiniLM-L6-v2'); \
+                SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); \
+                SentenceTransformer('LaBSE')"
 
 
 # Install dependency scanning tools and scan dependencies

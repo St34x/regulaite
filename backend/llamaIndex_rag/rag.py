@@ -374,16 +374,19 @@ class RAGSystem:
     Uses lazy-loading of models to optimize memory usage.
     """
 
-    # Mapping of language codes to embedding models
+    # Default embedding dimensions for FastEmbed
+    DEFAULT_EMBED_DIM = 384  # Update to match the actual dimension of FastEmbed's default model
+    
+    # Keeping this for backward compatibility but we'll use FastEmbed for all languages
     LANGUAGE_EMBEDDING_MODELS = {
-        'en': "BAAI/bge-small-en-v1.5",       # English
-        'de': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # German
-        'es': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # Spanish
-        'fr': "sentence-transformers/distiluse-base-multilingual-cased-v2",   # French - Updated
-        'it': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # Italian
-        'nl': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # Dutch
-        'pt': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # Portuguese
-        'multi': "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" # Multilingual fallback
+        'en': "default",
+        'de': "default",
+        'es': "default", 
+        'fr': "default",
+        'it': "default",
+        'nl': "default",
+        'pt': "default",
+        'multi': "default"
     }
 
     def __init__(
@@ -517,6 +520,19 @@ class RAGSystem:
         logger.error(f"Failed to connect to Neo4j after {max_retries} attempts. Last error: {str(last_error)}")
         raise last_error
 
+    def _get_vector_dim_for_model(self, model_name: str) -> int:
+        """
+        Get the vector dimension for a specific model.
+        
+        Args:
+            model_name: Name of the embedding model
+            
+        Returns:
+            Vector dimension for the model
+        """
+        # For FastEmbed models, use the default dimension
+        return self.DEFAULT_EMBED_DIM
+
     def _initialize_language(self, lang_code: str) -> bool:
         """
         Initialize resources for a specific language (lazy-loading).
@@ -534,25 +550,76 @@ class RAGSystem:
         try:
             logger.info(f"Initializing resources for language: {lang_code}")
 
-            # Get embedding model name for this language
-            if lang_code not in self.LANGUAGE_EMBEDDING_MODELS:
-                logger.warning(f"No embedding model defined for language: {lang_code}")
+            # Create embedding model - use FastEmbed with consistent model for all languages
+            try:
+                # Use BAAI/bge-small-en-v1.5 which has 384 dimensions
+                embed_model = FastEmbedEmbedding(model_name="BAAI/bge-small-en-v1.5")
+                logger.info(f"Successfully initialized FastEmbedEmbedding with model BAAI/bge-small-en-v1.5 for language: {lang_code}")
+            except Exception as emb_err:
+                logger.error(f"Error creating FastEmbedEmbedding: {str(emb_err)}")
                 return False
-
-            model_name = self.LANGUAGE_EMBEDDING_MODELS[lang_code]
-
-            # Create embedding model
-            embed_model = FastEmbedEmbedding(model_name=model_name)
             
             # Get model-specific vector dimensions
-            vector_dim = self._get_vector_dim_for_model(model_name)
-            logger.info(f"Using vector dimension {vector_dim} for model {model_name}")
+            vector_dim = self._get_vector_dim_for_model("default")
+            logger.info(f"Using vector dimension {vector_dim} for FastEmbed")
             
             # Check if Qdrant collection exists
             collection_name = f"{self.qdrant_collection_prefix}_{lang_code}"
             try:
-                collection_exists = self.qdrant_client.get_collection(collection_name=collection_name)
-                logger.info(f"Collection {collection_name} exists: {collection_exists}")
+                collection_info = self.qdrant_client.get_collection(collection_name=collection_name)
+                logger.info(f"Collection {collection_name} exists: {collection_info}")
+                
+                # Check if existing collection has the correct vector dimension
+                if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
+                    existing_dim = None
+                    if hasattr(collection_info.config.params, 'vectors'):
+                        if 'embed' in collection_info.config.params.vectors:
+                            existing_dim = collection_info.config.params.vectors['embed'].size
+                        elif 'default' in collection_info.config.params.vectors:
+                            existing_dim = collection_info.config.params.vectors['default'].size
+                    
+                    if existing_dim is not None and existing_dim != vector_dim:
+                        logger.warning(f"Collection {collection_name} has dimension {existing_dim}, but we need {vector_dim}")
+                        logger.warning(f"Recreating collection {collection_name} with correct dimension")
+                        
+                        # Get existing points if available
+                        try:
+                            existing_points = []
+                            scroll_result = self.qdrant_client.scroll(
+                                collection_name=collection_name,
+                                limit=100
+                            )
+                            points, next_page_offset = scroll_result
+                            existing_points.extend(points)
+                            
+                            # If there are points in the collection, save metadata for later re-indexing
+                            if existing_points:
+                                logger.warning(f"Found {len(existing_points)} points in collection. You'll need to re-index these documents.")
+                                doc_ids = set()
+                                for point in existing_points:
+                                    if hasattr(point, 'payload') and point.payload:
+                                        if 'doc_id' in point.payload:
+                                            doc_ids.add(point.payload['doc_id'])
+                                
+                                logger.warning(f"Documents to re-index: {doc_ids}")
+                        except Exception as e:
+                            logger.error(f"Error retrieving existing points: {str(e)}")
+                        
+                        # Delete the collection and recreate it
+                        self.qdrant_client.delete_collection(collection_name=collection_name)
+                        logger.info(f"Deleted collection {collection_name}")
+                        
+                        # Create a new collection with correct dimensions
+                        self.qdrant_client.create_collection(
+                            collection_name=collection_name,
+                            vectors_config={
+                                "embed": {
+                                    "size": vector_dim,
+                                    "distance": "Cosine"
+                                }
+                            }
+                        )
+                        logger.info(f"Recreated collection {collection_name} with dimension {vector_dim}")
             except Exception as e:
                 # Collection doesn't exist, create it
                 logger.info(f"Creating new collection {collection_name}: {str(e)}")
@@ -560,7 +627,7 @@ class RAGSystem:
                     collection_name=collection_name,
                     vectors_config={
                         "embed": {
-                            "size": vector_dim,  # Use model-specific dimension
+                            "size": vector_dim,
                             "distance": "Cosine"
                         }
                     }
@@ -615,26 +682,6 @@ class RAGSystem:
             if "max() arg is an empty sequence" in str(e):
                 logger.warning(f"This may indicate that the Qdrant collection {self.qdrant_collection_prefix}_{lang_code} is empty or not properly configured")
             return False
-
-    def _get_vector_dim_for_model(self, model_name: str) -> int:
-        """
-        Get the correct vector dimension for a specific model.
-        
-        Args:
-            model_name: Name of the embedding model
-            
-        Returns:
-            Vector dimension size
-        """
-        # Known vector dimensions for specific models
-        dimensions = {
-            "BAAI/bge-small-en-v1.5": 384,
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
-            "sentence-transformers/distiluse-base-multilingual-cased-v2": 512
-        }
-        
-        # Return known dimension or default to 384
-        return dimensions.get(model_name, 384)
 
     def retrieve(
         self,
@@ -882,17 +929,17 @@ class RAGSystem:
             elif "multi" in self.language_resources:
                 return "multi"
 
-        # Last resort: default language
+        # Try default language as a final fallback
         if self.default_lang not in self.language_resources:
             success = self._initialize_language(self.default_lang)
-            if not success:
-                logger.error(f"Failed to initialize any language models")
-                # Rather than raising an exception, we'll initialize a fallback placeholder
-                # This allows the system to continue operating with no retrieval
-                self._initialize_fallback_placeholder()
-                return "fallback"
+            if success:
+                return self.default_lang
+        elif self.default_lang in self.language_resources:
+            return self.default_lang
 
-        return self.default_lang
+        # If we get here, nothing worked
+        logger.error(f"Failed to initialize any language model (requested: {lang_code})")
+        raise ValueError(f"Failed to initialize any language model (requested: {lang_code})")
 
     def _apply_comparison_filter(self, value: Any, filter_dict: Dict[str, Any]) -> bool:
         """
@@ -950,3 +997,477 @@ class RAGSystem:
         }
         
         logger.info("Fallback placeholder initialized - system will return empty results")
+
+    def delete_document(self, doc_id: str) -> bool:
+        """
+        Delete a document from all vector stores.
+        
+        Args:
+            doc_id: Document ID to delete
+            
+        Returns:
+            bool: True if deletion was successful, False otherwise
+        """
+        try:
+            logger.info(f"Deleting document {doc_id} from vector stores")
+            
+            # Check all language collections
+            deleted = False
+            deletion_errors = []
+            
+            # Get list of all collections
+            try:
+                collections_info = self.qdrant_client.get_collections()
+                collections = collections_info.collections
+                collection_names = [c.name for c in collections if c.name.startswith(self.qdrant_collection_prefix)]
+            except Exception as e:
+                logger.error(f"Error getting collections from Qdrant: {str(e)}")
+                # Try to reconnect to Qdrant
+                try:
+                    logger.info("Attempting to reconnect to Qdrant...")
+                    self.qdrant_client = QdrantClient(url=self.qdrant_url)
+                    collections_info = self.qdrant_client.get_collections()
+                    collections = collections_info.collections
+                    collection_names = [c.name for c in collections if c.name.startswith(self.qdrant_collection_prefix)]
+                except Exception as reconnect_error:
+                    logger.error(f"Failed to reconnect to Qdrant: {str(reconnect_error)}")
+                    return False
+            
+            if not collection_names:
+                logger.warning(f"No collections found with prefix {self.qdrant_collection_prefix}")
+                # Not really an error - document might not be in any collection yet
+                return True
+                
+            logger.info(f"Found collections: {collection_names}")
+            
+            # Delete from each collection
+            for collection_name in collection_names:
+                # Use retry logic for each collection
+                max_retries = 3
+                retry_delay = 1  # seconds
+                
+                for retry in range(max_retries):
+                    try:
+                        # Check if the collection has points with payload fields
+                        try:
+                            # Get collection info to check if it has points and the payload schema
+                            collection_info = self.qdrant_client.get_collection(collection_name=collection_name)
+                            if collection_info.points_count == 0:
+                                logger.info(f"Collection {collection_name} is empty, skipping")
+                                break  # Skip to next collection
+                        except Exception as e:
+                            logger.warning(f"Failed to get collection info for {collection_name}: {str(e)}")
+                            # Continue anyway - we'll try to find points
+
+                        # Determine correct payload field for filtering
+                        # This is crucial - sometimes it might be stored in metadata.doc_id instead of doc_id
+                        possible_payload_fields = ["doc_id", "metadata.doc_id", "document_id", "document"]
+                        payload_field = "doc_id"  # Default field
+                        
+                        # First, check if we can find any points with any of the potential doc_id fields
+                        found_points = False
+                        
+                        for field in possible_payload_fields:
+                            try:
+                                # Try the current field
+                                logger.info(f"Checking if collection {collection_name} has points with {field} = {doc_id}")
+                                
+                                # Create the appropriate filter based on field structure
+                                if "." in field:
+                                    # Nested field like metadata.doc_id
+                                    parent, child = field.split(".", 1)
+                                    filter_condition = rest.Filter(
+                                        must=[
+                                            rest.FieldCondition(
+                                                key=parent,
+                                                match=rest.MatchAny(
+                                                    any=[{child: doc_id}]
+                                                )
+                                            )
+                                        ]
+                                    )
+                                else:
+                                    # Top-level field
+                                    filter_condition = rest.Filter(
+                                        must=[
+                                            rest.FieldCondition(
+                                                key=field,
+                                                match=rest.MatchValue(value=doc_id)
+                                            )
+                                        ]
+                                    )
+                                
+                                # Try to find points with this field
+                                search_result = self.qdrant_client.scroll(
+                                    collection_name=collection_name,
+                                    scroll_filter=filter_condition,
+                                    limit=1  # Just need to know if any exist
+                                )
+                                
+                                points, _ = search_result
+                                
+                                if points:
+                                    logger.info(f"Found points with {field} = {doc_id}")
+                                    payload_field = field
+                                    found_points = True
+                                    break
+                            except Exception as field_error:
+                                logger.warning(f"Error checking field {field}: {str(field_error)}")
+                        
+                        if not found_points:
+                            logger.info(f"No points found for document {doc_id} in collection {collection_name}")
+                            break  # No need for further retries
+                        
+                        # Now get all points to delete using the correct field
+                        logger.info(f"Using payload field '{payload_field}' for deletion filter in {collection_name}")
+                        
+                        # Create the appropriate filter based on field structure
+                        if "." in payload_field:
+                            # Nested field like metadata.doc_id
+                            parent, child = payload_field.split(".", 1)
+                            filter_condition = rest.Filter(
+                                must=[
+                                    rest.FieldCondition(
+                                        key=parent,
+                                        match=rest.MatchAny(
+                                            any=[{child: doc_id}]
+                                        )
+                                    )
+                                ]
+                            )
+                        else:
+                            # Top-level field
+                            filter_condition = rest.Filter(
+                                must=[
+                                    rest.FieldCondition(
+                                        key=payload_field,
+                                        match=rest.MatchValue(value=doc_id)
+                                    )
+                                ]
+                            )
+                        
+                        search_result = self.qdrant_client.scroll(
+                            collection_name=collection_name,
+                            scroll_filter=filter_condition,
+                            limit=100  # Get up to 100 matching points
+                        )
+                        
+                        points, next_page_offset = search_result
+                        
+                        if not points:
+                            logger.info(f"No points found for document {doc_id} in collection {collection_name}")
+                            break  # No need for further retries
+                        
+                        logger.info(f"Found {len(points)} points to delete in collection {collection_name}")
+                        
+                        # We have two options: 
+                        # 1. Delete by IDs if we have a manageable number of points
+                        # 2. Delete by filter for larger sets
+                        
+                        if len(points) <= 100:
+                            # Extract point IDs and delete them directly
+                            point_ids = [point.id for point in points]
+                            
+                            # Delete by IDs
+                            self.qdrant_client.delete(
+                                collection_name=collection_name,
+                                points_selector=rest.PointIdsList(
+                                    points=point_ids
+                                )
+                            )
+                            logger.info(f"Deleted {len(point_ids)} points by ID from collection {collection_name}")
+                        else:
+                            # For larger sets, use filter-based deletion
+                            # Use the same filter that we used to find the points
+                            self.qdrant_client.delete(
+                                collection_name=collection_name,
+                                points_selector=rest.FilterSelector(
+                                    filter=filter_condition
+                                )
+                            )
+                            logger.info(f"Deleted points by filter from collection {collection_name}")
+                        
+                        deleted = True
+                        break  # Success, no need for further retries
+                        
+                    except Exception as e:
+                        error_msg = f"Error deleting from collection {collection_name} (attempt {retry+1}/{max_retries}): {str(e)}"
+                        logger.error(error_msg)
+                        
+                        if retry < max_retries - 1:
+                            logger.info(f"Retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        else:
+                            deletion_errors.append(error_msg)
+            
+            if deletion_errors and not deleted:
+                logger.error(f"All deletion attempts failed: {deletion_errors}")
+                return False
+                
+            # If we reach here, at least one collection was processed successfully or had no points to delete
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error deleting document from vector stores: {str(e)}")
+            # Check for specific error types and provide more detailed information
+            if "connection" in str(e).lower():
+                logger.error("Connection error occurred. Qdrant service may be unavailable.")
+            elif "timeout" in str(e).lower():
+                logger.error("Timeout error occurred. The operation took too long to complete.")
+            return False
+
+    def index_document(self, doc_id: str, force_reindex: bool = False) -> Dict[str, Any]:
+        """
+        Index a document in the vector store.
+        
+        Args:
+            doc_id: Document ID to index
+            force_reindex: Whether to force reindexing if already indexed
+            
+        Returns:
+            Dictionary with indexing results
+        """
+        try:
+            logger.info(f"Indexing document {doc_id} in vector stores")
+            
+            # 1. Get document chunks from Neo4j
+            if not self.neo4j_driver:
+                self._connect_to_neo4j()
+                
+            if not self.neo4j_driver:
+                logger.error("Failed to connect to Neo4j, cannot index document")
+                return False
+                
+            with self.neo4j_driver.session() as session:
+                # Check if document exists
+                doc_check = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id}) 
+                    RETURN d.name as name, 
+                           COALESCE(d.title, d.name) as title, 
+                           COALESCE(d.language, 'en') as language,
+                           COALESCE(d.category, '') as category, 
+                           COALESCE(d.author, '') as author, 
+                           COALESCE(d.file_type, '') as file_type,
+                           COALESCE(d.is_indexed, false) as is_indexed
+                    """,
+                    doc_id=doc_id
+                )
+                
+                doc_record = doc_check.single()
+                if not doc_record:
+                    logger.error(f"Document {doc_id} not found in Neo4j")
+                    return False
+                
+                # Check if document is already indexed and we're not forcing reindex
+                if not force_reindex and doc_record.get("is_indexed") == True:
+                    logger.info(f"Document {doc_id} is already indexed. Use force_reindex=True to reindex.")
+                    return {
+                        "doc_id": doc_id,
+                        "vector_count": 0,
+                        "message": "Document already indexed"
+                    }
+                    
+                # Handle potentially missing properties with safe gets
+                doc_name = doc_record.get("title") or doc_record.get("name", f"Document-{doc_id}")
+                doc_language = doc_record.get("language") or self.default_lang
+                doc_category = doc_record.get("category", "")
+                doc_author = doc_record.get("author", "")
+                doc_file_type = doc_record.get("file_type", "")
+                
+                # Get all chunks for the document
+                chunk_query = """
+                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                RETURN c.chunk_id as chunk_id, c.text as text, 
+                       COALESCE(c.section, 'Default') as section, 
+                       COALESCE(c.page_num, 0) as page_num, 
+                       COALESCE(c.order_index, c.index, 0) as order_index
+                ORDER BY COALESCE(c.order_index, c.index, 0)
+                """
+                
+                chunks_result = session.run(chunk_query, doc_id=doc_id)
+                chunks = list(chunks_result)
+                
+                if not chunks:
+                    logger.warning(f"Document {doc_id} has no chunks to index")
+                    return {
+                        "doc_id": doc_id,
+                        "vector_count": 0,
+                        "message": "Document has no chunks to index"
+                    }
+                    
+                # Ensure the language is initialized
+                actual_lang = self.ensure_language_initialized(doc_language)
+                
+                # Get the correct resources for this language
+                if actual_lang not in self.language_resources:
+                    logger.error(f"Language {actual_lang} not available for indexing")
+                    return False
+                    
+                resources = self.language_resources[actual_lang]
+                embed_model = resources.get("embedding_model")
+                if not embed_model:
+                    logger.error(f"No embedding model for language {actual_lang}")
+                    return False
+                
+                # 2. Convert chunks to nodes and embed them
+                indexed_chunks = 0
+                for chunk in chunks:
+                    try:
+                        chunk_id = chunk["chunk_id"]
+                        
+                        # If chunk_id is None or empty, generate a new one
+                        if not chunk_id:
+                            chunk_id = f"{doc_id}_chunk_{chunk['order_index']}"
+                            logger.warning(f"Generated chunk_id for missing ID: {chunk_id}")
+                        
+                        # Generate a UUID for Qdrant point ID
+                        point_id = str(uuid.uuid4())
+                        
+                        # Create metadata
+                        metadata = {
+                            "doc_id": doc_id,
+                            "doc_name": doc_name,
+                            "chunk_id": chunk_id,
+                            "language": actual_lang,
+                            "section": chunk["section"] or "Default",
+                            "page_num": chunk["page_num"] or 0,
+                            "order_index": chunk["order_index"] or 0,
+                            "category": doc_category or "",
+                            "author": doc_author or "",
+                            "file_type": doc_file_type or ""
+                        }
+                        
+                        # Create vector
+                        text = chunk["text"]
+                        if not text or len(text.strip()) == 0:
+                            logger.warning(f"Skipping empty chunk: {chunk_id}")
+                            continue
+                            
+                        # Get embedding from the model
+                        try:
+                            embedding = embed_model.get_text_embedding(text)
+                            logger.info(f"Generated embedding of size {len(embedding)} for chunk {chunk_id}")
+                        except Exception as embed_error:
+                            logger.error(f"Error generating embedding for chunk {chunk_id}: {str(embed_error)}")
+                            continue
+                        
+                        # Add to Qdrant
+                        collection_name = f"{self.qdrant_collection_prefix}_{actual_lang}"
+                        
+                        # Check if collection exists, create if it doesn't
+                        try:
+                            collection_info = self.qdrant_client.get_collection(collection_name)
+                            logger.info(f"Collection {collection_name} exists with {collection_info.points_count} points")
+                            
+                            # Check vector name configuration to determine proper vector name
+                            vector_name = "default"
+                            if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
+                                if hasattr(collection_info.config.params, 'vectors') and 'embed' in collection_info.config.params.vectors:
+                                    vector_name = "embed"
+                                    logger.info(f"Using 'embed' as vector name for existing collection {collection_name}")
+                            
+                        except Exception as collection_error:
+                            logger.info(f"Creating new collection {collection_name}: {str(collection_error)}")
+                            vector_size = len(embedding)
+                            vector_name = "default"  # Use default for new collections
+                            
+                            self.qdrant_client.create_collection(
+                                collection_name=collection_name,
+                                vectors_config=rest.VectorParams(
+                                    size=vector_size,
+                                    distance=rest.Distance.COSINE
+                                ),
+                                # Define the vector name explicitly as the default
+                                vectors={
+                                    vector_name: rest.VectorParams(
+                                        size=vector_size,
+                                        distance=rest.Distance.COSINE
+                                    )
+                                }
+                            )
+                            logger.info(f"Created new collection {collection_name} with vector size {vector_size}")
+                        
+                        # Upsert the point using UUID as the point_id
+                        logger.info(f"Upserting point {point_id} for chunk {chunk_id} in collection {collection_name} with vector name {vector_name}")
+                        
+                        try:
+                            # Convert embedding to list if it's a numpy array
+                            if hasattr(embedding, 'tolist'):
+                                embedding = embedding.tolist()
+                                
+                            # Prepare vector with the appropriate name
+                            vector_dict = {vector_name: embedding}
+                            
+                            result = self.qdrant_client.upsert(
+                                collection_name=collection_name,
+                                points=[
+                                    rest.PointStruct(
+                                        id=point_id,
+                                        vector=vector_dict,  # Use named vector format with appropriate name
+                                        payload=metadata
+                                    )
+                                ]
+                            )
+                            logger.info(f"Successfully upserted point in {collection_name}: {result}")
+                            indexed_chunks += 1
+                        except Exception as upsert_error:
+                            logger.error(f"Error upserting point to Qdrant: {str(upsert_error)}")
+                            # Continue with other chunks
+                    except Exception as chunk_error:
+                        logger.error(f"Error indexing chunk {chunk.get('chunk_id')}: {str(chunk_error)}")
+                
+                if indexed_chunks > 0:
+                    logger.info(f"Successfully indexed {indexed_chunks} chunks from document {doc_id}")
+                    
+                    # After successful indexing, update the document's is_indexed status
+                    try:
+                        session.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})
+                            SET d.is_indexed = true,
+                                d.indexed_at = datetime(),
+                                d.language = COALESCE(d.language, $language)
+                            """,
+                            doc_id=doc_id,
+                            language=actual_lang
+                        )
+                        logger.info(f"Updated document {doc_id} as indexed in Neo4j")
+                    except Exception as update_error:
+                        logger.error(f"Failed to update document indexing status: {str(update_error)}")
+                    
+                    return {
+                        "doc_id": doc_id,
+                        "vector_count": indexed_chunks,
+                        "language": actual_lang,
+                        "status": "success",
+                        "message": f"Successfully indexed {indexed_chunks} chunks"
+                    }
+                else:
+                    logger.error(f"Failed to index any chunks for document {doc_id}")
+                    return {
+                        "doc_id": doc_id,
+                        "vector_count": 0,
+                        "status": "error",
+                        "message": "Failed to index any chunks"
+                    }
+                
+        except Exception as e:
+            logger.error(f"Error indexing document {doc_id}: {str(e)}")
+            return {
+                "doc_id": doc_id,
+                "vector_count": 0,
+                "status": "error",
+                "message": f"Error: {str(e)}"
+            }
+
+    def get_initialized_languages(self) -> List[str]:
+        """
+        Get a list of currently initialized languages in the system
+        
+        Returns:
+            List of language codes that have been initialized
+        """
+        return list(self.language_resources.keys())
+    

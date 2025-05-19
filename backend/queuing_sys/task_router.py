@@ -65,7 +65,7 @@ class ParserSettingsRequest(BaseModel):
     extract_images: Optional[bool] = None
     chunk_size: Optional[int] = None
     chunk_overlap: Optional[int] = None
-    chunking_strategy: Optional[str] = None
+    chunking_strategy: Optional[Literal["fixed", "recursive", "semantic", "hierarchical", "token"]] = None
 
 # Routes
 @router.post("/documents/process", response_model=TaskResponse)

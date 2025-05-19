@@ -11,7 +11,8 @@ import json
 import uuid
 import tempfile
 from typing import Dict, List, Any, Optional, BinaryIO
-from datetime import datetime
+from datetime import datetime as py_datetime
+import datetime
 from neo4j import GraphDatabase
 
 from .base_parser import BaseParser
@@ -269,7 +270,7 @@ class DoctlyParser(BaseParser):
         doc_metadata.update({
             "file_name": file_name,
             "parser": "doctly",
-            "processing_time": datetime.now().isoformat(),
+            "processing_time": py_datetime.now().isoformat(),
         })
 
         try:
@@ -388,6 +389,18 @@ class DoctlyParser(BaseParser):
                             metadata=element.get("metadata", {})
                         )
 
+            # Add processing metadata
+            metadata["processing_info"] = {
+                "api": "doctly",
+                "version": "1.0",
+                "processing_time": py_datetime.now().isoformat(),
+                "parameters": {
+                    "extract_metadata": self.extract_metadata,
+                    "extract_tables": self.extract_tables,
+                    "extract_images": self.extract_images
+                }
+            }
+
             return {
                 "doc_id": doc_id,
                 "status": "success",
@@ -419,32 +432,205 @@ class DoctlyParser(BaseParser):
 
         try:
             with self.driver.session() as session:
-                # Delete the document and all its relationships and connected nodes
-                if purge_orphans:
-                    result = session.run(
+                # Check if document exists
+                check_result = session.run(
+                    "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                    doc_id=doc_id
+                )
+                
+                if check_result.single()["count"] == 0:
+                    logger.warning(f"Document {doc_id} not found in Neo4j")
+                    return {"status": "error", "message": "Document not found"}
+                
+                # Check available node labels in the database
+                labels_result = session.run(
+                    """
+                    CALL db.labels() YIELD label
+                    RETURN collect(label) as labels
+                    """
+                )
+                node_labels = labels_result.single()["labels"]
+                
+                # First get deletion statistics for Chunk nodes
+                chunk_stats = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                chunk_count = chunk_stats.single()["chunk_count"] or 0
+                
+                # Check for Text nodes
+                text_count = 0
+                if "Text" in node_labels:
+                    text_stats = session.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
-                        OPTIONAL MATCH (d)-[:CONTAINS]->(t)
-                        DETACH DELETE d, t
+                        OPTIONAL MATCH (d)-[:CONTAINS]->(t:Text)
+                        RETURN count(t) as text_count
                         """,
                         doc_id=doc_id
                     )
-                else:
-                    result = session.run(
+                    text_count = text_stats.single()["text_count"] or 0
+                
+                # Get relationship count
+                rel_stats = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id})
+                    OPTIONAL MATCH (d)-[r]-()
+                    RETURN count(r) as rel_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                relationship_count = rel_stats.single()["rel_count"] or 0
+                logger.info(f"Found {chunk_count} chunks, {text_count} text nodes and {relationship_count} relationships to delete")
+                
+                # Use a transaction for the deletion to ensure atomicity
+                tx = session.begin_transaction()
+                try:
+                    # First delete any relationships between chunks and other nodes
+                    if chunk_count > 0:
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            OPTIONAL MATCH (c)-[cr]-()
+                            DELETE cr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        # Delete the chunks
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                            DETACH DELETE c
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete Text nodes if they exist
+                    if text_count > 0:
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            OPTIONAL MATCH (t)-[tr]-()
+                            DELETE tr
+                            """,
+                            doc_id=doc_id
+                        )
+                        
+                        tx.run(
+                            """
+                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
+                            DETACH DELETE t
+                            """,
+                            doc_id=doc_id
+                        )
+                    
+                    # Delete document relationships
+                    tx.run(
                         """
                         MATCH (d:Document {doc_id: $doc_id})
-                        DETACH DELETE d
+                        OPTIONAL MATCH (d)-[r]-()
+                        DELETE r
                         """,
                         doc_id=doc_id
                     )
-
-                summary = result.consume()
+                    
+                    # Delete document node
+                    tx.run(
+                        """
+                        MATCH (d:Document {doc_id: $doc_id})
+                        DELETE d
+                        """,
+                        doc_id=doc_id
+                    )
+                    
+                    # If purge_orphans, clean up any orphaned nodes
+                    if purge_orphans:
+                        # Delete orphaned nodes with no relationships
+                        logger.info("Purging orphaned nodes without relationships")
+                        
+                        for label in ["Entity", "Concept", "Legislation", "Requirement", "Deadline"]:
+                            if label in node_labels:
+                                tx.run(
+                                    f"""
+                                    MATCH (n:{label})
+                                    WHERE NOT exists((n)--())
+                                    DELETE n
+                                    """
+                                )
+                                
+                    # Commit the transaction
+                    tx.commit()
+                    logger.info(f"Document {doc_id} deletion transaction committed successfully")
+                except Exception as e:
+                    # Rollback on error
+                    tx.rollback()
+                    logger.error(f"Error during document deletion transaction: {str(e)}")
+                    raise
+                
+                # Verify deletion was successful
+                verify_result = session.run(
+                    """
+                    MATCH (d:Document {doc_id: $doc_id}) 
+                    RETURN count(d) as doc_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                doc_count = verify_result.single()["doc_count"]
+                if doc_count > 0:
+                    logger.error(f"Document {doc_id} still exists after deletion attempt")
+                    return {
+                        "status": "error",
+                        "message": f"Document {doc_id} still exists after deletion attempt"
+                    }
+                
+                # Check for orphaned chunks
+                chunk_verify_result = session.run(
+                    """
+                    MATCH (c:Chunk {doc_id: $doc_id}) 
+                    RETURN count(c) as chunk_count
+                    """,
+                    doc_id=doc_id
+                )
+                
+                orphaned_chunks = chunk_verify_result.single()["chunk_count"]
+                if orphaned_chunks > 0:
+                    logger.warning(f"Found {orphaned_chunks} orphaned chunks after document deletion")
+                    
+                    if purge_orphans:
+                        # Delete orphaned chunks in a new transaction
+                        cleanup_tx = session.begin_transaction()
+                        try:
+                            cleanup_tx.run(
+                                """
+                                MATCH (c:Chunk {doc_id: $doc_id})
+                                DETACH DELETE c
+                                """,
+                                doc_id=doc_id
+                            )
+                            cleanup_tx.commit()
+                            logger.info(f"Cleaned up {orphaned_chunks} orphaned chunks")
+                        except Exception as cleanup_error:
+                            cleanup_tx.rollback()
+                            logger.error(f"Error cleaning up orphaned chunks: {str(cleanup_error)}")
+                
+                total_deleted = chunk_count + text_count + 1  # +1 for the document node
+                logger.info(f"Document {doc_id} deleted with {chunk_count} chunks and {text_count} text nodes")
 
                 return {
                     "doc_id": doc_id,
                     "status": "success",
-                    "nodes_deleted": summary.counters.nodes_deleted,
-                    "relationships_deleted": summary.counters.relationships_deleted
+                    "nodes_deleted": total_deleted,
+                    "chunks_deleted": chunk_count,
+                    "text_nodes_deleted": text_count,
+                    "relationships_deleted": relationship_count
                 }
 
         except Exception as e:

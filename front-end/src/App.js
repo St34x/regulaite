@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
+import DocumentsPage from './pages/DocumentsPage';
 import { chakraTheme } from './theme';
 import './App.css';
 
@@ -37,6 +38,15 @@ function App() {
                 element={
                   <Layout>
                     <ChatPage />
+                  </Layout>
+                } 
+              />
+              
+              <Route 
+                path="/documents" 
+                element={
+                  <Layout>
+                    <DocumentsPage />
                   </Layout>
                 } 
               />

@@ -11,11 +11,11 @@ services:
     environment:
       - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc"]
-    volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
-      - neo4j_import:/import
-      - neo4j_plugins:/plugins
+    # volumes:
+    #   - neo4j_data:/data
+    #   - neo4j_logs:/logs
+    #   - neo4j_import:/import
+    #   - neo4j_plugins:/plugins
     networks:
       - regulaite_network
     restart: unless-stopped
@@ -71,8 +71,8 @@ services:
       - "6334:6334"
     networks:
       - regulaite_network
-    volumes:
-      - qdrant_data:/qdrant/storage
+    # volumes:
+    #   - qdrant_data:/qdrant/storage
     restart: on-failure
     healthcheck:
       test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
@@ -241,7 +241,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - REACT_APP_API_URL=${AI_BACKEND_API_URL:-http://ai-backend:8080}
+      - REACT_APP_API_URL=${AI_BACKEND_API_URL:-http://localhost:8090}
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
       - WDS_SOCKET_PORT=3000

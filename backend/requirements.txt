@@ -26,6 +26,8 @@ unstructured-client>=0.13.0  # Client for Unstructured Cloud API
 spacy>=3.7.2
 langdetect>=1.0.9
 langid>=1.1.6
+langchain-text-splitters>=0.3.8  # For TokenTextSplitter
+langchain-core>=0.3.54  # Core LangChain functionality
 
 # Additional document parsing APIs
 doctly>=0.1.0
@@ -39,6 +41,10 @@ llama-index-core==0.12.30
 sentence-transformers==4.0.2
 llama-index-retrievers-bm25==0.5.2
 PyStemmer==2.2.0.3
+
+# Language-specific models
+# Required for better French language support
+transformers>=4.51.3
 
 # Task queuing
 celery>=5.5.1
