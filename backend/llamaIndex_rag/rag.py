@@ -4,6 +4,7 @@ import os
 from typing import List, Dict, Any, Optional, Union, Tuple
 from collections import defaultdict
 import uuid
+import openai
 
 # Updated imports for the current LlamaIndex structure
 from llama_index.core import (
@@ -12,9 +13,11 @@ from llama_index.core import (
     Settings,
     Document,
 )
-from llama_index.core.schema import QueryBundle, NodeWithScore
+from llama_index.core.schema import QueryBundle, NodeWithScore, TextNode
+from llama_index.core.vector_stores.types import VectorStoreQueryMode
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.fastembed import FastEmbedEmbedding
+from llama_index.core.postprocessor import SentenceTransformerRerank
 
 from llama_index.core.retrievers import BaseRetriever
 
@@ -26,6 +29,7 @@ from qdrant_client.http import models as rest
 from neo4j import GraphDatabase
 import time
 import numpy as np
+import Stemmer
 
 from data_enrichment.language_detector import LanguageDetector
 
@@ -83,9 +87,9 @@ class HybridRetriever(BaseRetriever):
         self.keyword_weight = keyword_weight
         self.top_k = top_k
 
-        # Ensure weights sum to 1
+        # Normalize weights if they don't sum to 1
         total_weight = vector_weight + keyword_weight
-        if total_weight != 1.0:
+        if abs(total_weight - 1.0) > 1e-9:
             self.vector_weight = vector_weight / total_weight
             self.keyword_weight = keyword_weight / total_weight
 
@@ -152,6 +156,25 @@ class HybridRetriever(BaseRetriever):
 
         return BaseRetrieverOutput(nodes=results)
 
+    def retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        """
+        Override the base retrieve method to ensure we always return a List[NodeWithScore].
+        
+        Args:
+            query_bundle: Query bundle
+            
+        Returns:
+            List of NodeWithScore objects
+        """
+        output = self._retrieve(query_bundle)
+        if hasattr(output, 'nodes'):
+            return output.nodes
+        elif isinstance(output, list):
+            return output
+        else:
+            logger.error(f"Unexpected output type from _retrieve: {type(output)}")
+            return []
+
 class HierarchicalRetriever(BaseRetriever):
     """
     Retriever that considers document hierarchy for better contextual retrieval.
@@ -196,17 +219,31 @@ class HierarchicalRetriever(BaseRetriever):
         Returns:
             BaseRetrieverOutput containing retrieved nodes
         """
-        # Get base results
-        base_results = self.base_retriever.retrieve(query_bundle)
+        # Get base results - CALL _retrieve DIRECTLY to avoid problematic base implementation
+        try:
+            base_result = self.base_retriever._retrieve(query_bundle)
+            
+            # Handle different return types
+            base_nodes_with_scores = []
+            if hasattr(base_result, 'nodes'):
+                base_nodes_with_scores = base_result.nodes
+            elif isinstance(base_result, list):
+                base_nodes_with_scores = base_result
+            else:
+                logger.error(f"Unexpected base retriever output type: {type(base_result)}")
+                return BaseRetrieverOutput(nodes=[])
+        except Exception as e:
+            logger.error(f"Error calling base retriever: {str(e)}")
+            return BaseRetrieverOutput(nodes=[])
 
         # Check if we have Neo4j connectivity before trying hierarchical retrieval
         if not self.neo4j_driver:
             logger.warning("No Neo4j driver available, skipping hierarchical retrieval")
-            return base_results
+            return BaseRetrieverOutput(nodes=base_nodes_with_scores)
 
         # Extract node IDs from base results
         initial_nodes = {}
-        for node in base_results:
+        for node in base_nodes_with_scores:
             node_id = node.node.node_id
             initial_nodes[node_id] = {
                 "node": node.node,
@@ -216,7 +253,7 @@ class HierarchicalRetriever(BaseRetriever):
 
         # If no results or too few, just return what we have
         if len(initial_nodes) < 2:
-            return base_results
+            return BaseRetrieverOutput(nodes=base_nodes_with_scores)
 
         # Get hierarchical context from Neo4j
         augmented_nodes = self._augment_with_hierarchical_context(initial_nodes)
@@ -256,20 +293,51 @@ class HierarchicalRetriever(BaseRetriever):
             # Find parent, sibling, and child nodes in Neo4j
             with self.neo4j_driver.session() as session:
                 # Query for hierarchical relationships
+                # MODIFIED QUERY:
+                # - Uses c.order_index
+                # - Identifies parent Section node via Document and c.section property
+                # - Identifies sibling Chunks via shared Document and section property
                 result = session.run("""
                     MATCH (c:Chunk) WHERE c.id IN $node_ids
-                    // Find parents
-                    OPTIONAL MATCH (c)-[:PART_OF]->(parent:Section)
-                    // Find siblings (chunks in the same section)
-                    OPTIONAL MATCH (parent)<-[:PART_OF]-(sibling:Chunk)
-                    WHERE sibling.id <> c.id
-                    // Find sequence information
-                    WITH c, parent, sibling,
-                         CASE WHEN sibling IS NOT NULL THEN abs(sibling.sequence_num - c.sequence_num) ELSE null END as distance
+                    
+                    // Find the Document this chunk belongs to
+                    OPTIONAL MATCH (doc:Document)-[:CONTAINS]->(c)
+
+                    // Directly find sections/chunks based on section name without requiring HAS_SECTION relationship
+                    WITH c, doc
+                    
+                    // Get parent section info directly from chunk properties
+                    WITH c, doc,
+                         CASE WHEN c.section IS NOT NULL 
+                              THEN {id: c.section, name: c.section, type: 'parent_section'} 
+                              ELSE NULL 
+                         END as parent_section_info
+                    
+                    // Find sibling Chunks: other chunks in the same document and same section name
+                    WITH c, parent_section_info
+                    OPTIONAL MATCH (sibling_c_node:Chunk {doc_id: c.doc_id, section: c.section})
+                    WHERE sibling_c_node.id <> c.id
+
+                    // Sequence information using order_index
+                    WITH c, parent_section_info, sibling_c_node,
+                         CASE
+                           WHEN sibling_c_node IS NOT NULL AND c.order_index IS NOT NULL AND sibling_c_node.order_index IS NOT NULL
+                           THEN abs(sibling_c_node.order_index - c.order_index)
+                           ELSE null
+                         END as distance
                     WHERE distance IS NULL OR distance <= $context_window
-                    RETURN c.id as chunk_id,
-                           collect(DISTINCT {id: parent.id, type: 'parent'}) as parents,
-                           collect(DISTINCT {id: sibling.id, type: 'sibling', distance: distance}) as siblings
+                    
+                    // Group by chunk ID to fix the aggregation issue
+                    WITH c.id as chunk_id, 
+                         CASE WHEN parent_section_info IS NOT NULL 
+                              THEN collect(DISTINCT parent_section_info) 
+                              ELSE [] 
+                         END as parent_section_nodes,
+                         collect(DISTINCT {id: sibling_c_node.chunk_id, type: 'sibling_chunk', distance: distance}) as sibling_chunk_nodes
+                    
+                    RETURN chunk_id, 
+                           parent_section_nodes,
+                           sibling_chunk_nodes
                 """, node_ids=node_ids, context_window=self.context_window)
 
                 # Process results and add to initial nodes
@@ -278,40 +346,55 @@ class HierarchicalRetriever(BaseRetriever):
                 # Track additional nodes to fetch
                 additional_node_ids = set()
 
+                # Store raw query results for second pass to avoid re-iteration or complex data structures
+                processed_records = list(result)
+
                 # First pass: identify additional nodes to retrieve
-                for record in result:
-                    chunk_id = record["chunk_id"]
-                    parents = record["parents"]
-                    siblings = record["siblings"]
+                for record in processed_records:
+                    # chunk_id = record["chunk_id"] # Chunk itself is already in initial_nodes
+                    parent_section_nodes = record["parent_section_nodes"]
+                    sibling_chunk_nodes = record["sibling_chunk_nodes"]
 
-                    # Add parent IDs
-                    for parent in parents:
-                        if parent["id"] and parent["id"] not in augmented_nodes:
-                            additional_node_ids.add(parent["id"])
+                    # Add parent section IDs
+                    for parent_sec_node in parent_section_nodes:
+                        if parent_sec_node["id"] and parent_sec_node["id"] not in augmented_nodes:
+                            additional_node_ids.add(parent_sec_node["id"])
 
-                    # Add sibling IDs
-                    for sibling in siblings:
-                        if sibling["id"] and sibling["id"] not in augmented_nodes:
-                            additional_node_ids.add(sibling["id"])
+                    # Add sibling chunk IDs
+                    for sibling_chunk_node in sibling_chunk_nodes:
+                        if sibling_chunk_node["id"] and sibling_chunk_node["id"] not in augmented_nodes:
+                            additional_node_ids.add(sibling_chunk_node["id"])
 
                 # If we have additional nodes to fetch, get them from Neo4j
                 if additional_node_ids:
                     # Convert to list for Neo4j query
                     add_ids = list(additional_node_ids)
 
-                    # Fetch the additional nodes
+                    # Fetch the additional nodes (could be Section nodes or Chunk nodes)
+                    # Ensure 'text' and 'metadata' are handled, using defaults if not present (e.g. for Section nodes if they don't have 'text')
                     add_result = session.run("""
-                        MATCH (n) WHERE n.id IN $node_ids
-                        RETURN n.id as id, n.text as text, n.metadata as metadata
+                        MATCH (n) WHERE n.id IN $node_ids OR n.chunk_id IN $node_ids OR n.section_id IN $node_ids
+                        RETURN n.id as id, 
+                               COALESCE(n.text, n.name, n.content, 'No text content') as text, 
+                               // Attempt to get metadata, if not, check for properties typical of Section or Chunk
+                               CASE 
+                                 WHEN n.metadata IS NOT NULL THEN n.metadata
+                                 ELSE properties(n) // Fallback to all properties as metadata
+                               END as metadata,
+                               labels(n) as labels 
                     """, node_ids=add_ids)
 
                     # Create document nodes for additional content
                     for record in add_result:
                         node_id = record["id"]
                         text = record["text"]
-                        metadata = record["metadata"] if record["metadata"] else {}
+                        metadata = record["metadata"] if isinstance(record["metadata"], dict) else {}
+                        
+                        # Add label info to metadata for clarity
+                        if record["labels"]:
+                            metadata["node_type"] = record["labels"][0] # Assuming primary label
 
-                        # Create a Document node
+                        # Create a TextNode (generic enough for Chunks or Sections if they have text)
                         from llama_index.core.schema import TextNode
                         doc_node = TextNode(
                             text=text,
@@ -327,18 +410,18 @@ class HierarchicalRetriever(BaseRetriever):
                         }
 
                 # Second pass: apply score adjustments
-                for record in result:
+                for record in processed_records:
                     chunk_id = record["chunk_id"]
                     if chunk_id not in augmented_nodes:
                         continue
 
                     base_score = augmented_nodes[chunk_id]["score"]
-                    parents = record["parents"]
-                    siblings = record["siblings"]
+                    parent_section_nodes = record["parent_section_nodes"]
+                    sibling_chunk_nodes = record["sibling_chunk_nodes"]
 
-                    # Boost parent nodes
-                    for parent in parents:
-                        parent_id = parent["id"]
+                    # Boost parent section nodes
+                    for parent_sec_node in parent_section_nodes:
+                        parent_id = parent_sec_node["id"] # This is section_id
                         if parent_id and parent_id in augmented_nodes:
                             # Set parent score to a fraction of this node's score
                             augmented_nodes[parent_id]["score"] = max(
@@ -346,26 +429,45 @@ class HierarchicalRetriever(BaseRetriever):
                                 base_score * self.parent_boost
                             )
 
-                    # Boost sibling nodes based on distance
-                    for sibling in siblings:
-                        sibling_id = sibling["id"]
+                    # Boost sibling chunk nodes based on distance
+                    for sibling_chunk_node in sibling_chunk_nodes:
+                        sibling_id = sibling_chunk_node["id"] # This is chunk_id
                         if sibling_id and sibling_id in augmented_nodes:
-                            distance = sibling["distance"]
+                            distance = sibling_chunk_node["distance"]
+                            if distance is None: # Should not happen with current query if sibling_chunk_node exists
+                                distance = self.context_window + 1 
                             # Apply distance-based decay
                             distance_factor = 1 - (distance / (self.context_window + 1))
-                            sibling_boost = self.sibling_boost * distance_factor
+                            sibling_boost_score = self.sibling_boost * distance_factor
 
                             # Set sibling score with boost
                             augmented_nodes[sibling_id]["score"] = max(
                                 augmented_nodes[sibling_id]["score"],
-                                base_score * sibling_boost
+                                base_score * sibling_boost_score
                             )
-
                 return augmented_nodes
-
         except Exception as e:
             logger.error(f"Error in hierarchical context retrieval: {str(e)}")
             return initial_nodes
+
+    def retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
+        """
+        Override the base retrieve method to ensure we always return a List[NodeWithScore].
+        
+        Args:
+            query_bundle: Query bundle
+            
+        Returns:
+            List of NodeWithScore objects
+        """
+        output = self._retrieve(query_bundle)
+        if hasattr(output, 'nodes'):
+            return output.nodes
+        elif isinstance(output, list):
+            return output
+        else:
+            logger.error(f"Unexpected output type from _retrieve: {type(output)}")
+            return []
 
 class RAGSystem:
     """
@@ -374,20 +476,8 @@ class RAGSystem:
     Uses lazy-loading of models to optimize memory usage.
     """
 
-    # Default embedding dimensions for FastEmbed
-    DEFAULT_EMBED_DIM = 384  # Update to match the actual dimension of FastEmbed's default model
-    
-    # Keeping this for backward compatibility but we'll use FastEmbed for all languages
-    LANGUAGE_EMBEDDING_MODELS = {
-        'en': "default",
-        'de': "default",
-        'es': "default", 
-        'fr': "default",
-        'it': "default",
-        'nl': "default",
-        'pt': "default",
-        'multi': "default"
-    }
+    DEFAULT_EMBED_DIM = 384
+    DEFAULT_MODEL_KEY = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" # Updated to a good multilingual model
 
     def __init__(
         self,
@@ -397,85 +487,75 @@ class RAGSystem:
         qdrant_url: str = None,
         qdrant_collection_prefix: str = "regulaite_docs",
         openai_api_key: str = None,
-        default_lang: str = "en",
+        default_lang: str = "fr",  # Updated default language
         chunk_size: int = 1000,
-        preload_languages: List[str] = None,
-        hybrid_search: bool = True,  # New parameter for hybrid search
-        vector_weight: float = 0.7,  # New parameter for vector search weight
-        keyword_weight: float = 0.3,  # New parameter for keyword search weight
-        hierarchical_retrieval: bool = True,  # New parameter for hierarchical retrieval
-        parent_boost: float = 0.2,   # New parameter for parent boost
-        sibling_boost: float = 0.1,  # New parameter for sibling boost
+        preload_languages: List[str] = ["fr"],  # Updated to preload French by default
+        hybrid_search: bool = True,
+        vector_weight: float = 0.5,  # Adjusted to give less weight to vector search
+        keyword_weight: float = 0.5,  # Increased keyword weight for better term matching
+        hierarchical_retrieval: bool = True,
+        parent_boost: float = 0.2,
+        sibling_boost: float = 0.1,
+        use_reranker: bool = True,
+        reranker_model_name: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",  # Updated multilingual reranker
+        reranker_top_n: int = 10,  # Increased to get more candidates for reranking
+        reranker_threshold: float = -5.0,  # New parameter to filter out low-scoring results
+        query_expansion: bool = True  # New parameter to enable query expansion
     ):
-        """
-        Initialize the multilingual RAG system with lazy-loading of models.
-
-        Args:
-            neo4j_uri: URI for the Neo4j database
-            neo4j_user: Username for Neo4j
-            neo4j_password: Password for Neo4j
-            qdrant_url: URL for the Qdrant server (defaults to env var)
-            qdrant_collection_prefix: Prefix for language-specific collections
-            openai_api_key: OpenAI API key for LLM
-            default_lang: Default language code
-            chunk_size: Size of chunks for text splitting
-            preload_languages: List of language codes to preload
-            hybrid_search: Whether to use hybrid search (vector + keyword)
-            vector_weight: Weight for vector search in hybrid retrieval (0-1)
-            keyword_weight: Weight for keyword search in hybrid retrieval (0-1)
-            hierarchical_retrieval: Whether to use hierarchical retrieval
-            parent_boost: Score boost for parent sections in hierarchical retrieval
-            sibling_boost: Score boost for sibling sections in hierarchical retrieval
-        """
-        # Store initialization parameters
         self.neo4j_uri = neo4j_uri
         self.neo4j_user = neo4j_user
         self.neo4j_password = neo4j_password
-
-        # Get Qdrant URL from environment if not provided
-        self.qdrant_url = qdrant_url or os.getenv("QDRANT_URL", "http://qdrant:6333")
-
-        # Collections
-        self.qdrant_collection_prefix = qdrant_collection_prefix
-
-        # OpenAI key (if used)
-        self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY", "")
-
-        # Default language
-        self.default_lang = default_lang
-
-        # Chunking parameters
-        self.chunk_size = chunk_size
-
-        # Retrieval options
-        self.hybrid_search = hybrid_search
-        self.vector_weight = vector_weight
-        self.keyword_weight = keyword_weight
-        self.hierarchical_retrieval = hierarchical_retrieval
-        self.parent_boost = parent_boost
-        self.sibling_boost = sibling_boost
-
-        # Language detector
-        self.language_detector = LanguageDetector()
-
-        # Initialize Neo4j connection
         self.neo4j_driver = None
         self._connect_to_neo4j()
 
-        # Initialize Qdrant client
-        self.qdrant_client = QdrantClient(url=self.qdrant_url)
+        self.qdrant_url = qdrant_url
+        self.qdrant_collection_prefix = qdrant_collection_prefix
+        self.qdrant_client = None
+        if qdrant_url:
+            try:
+                self.qdrant_client = QdrantClient(url=qdrant_url)
+                logger.info(f"Connected to Qdrant at {qdrant_url}")
+            except Exception as e:
+                logger.error(f"Failed to connect to Qdrant at {qdrant_url}: {e}")
+                self.qdrant_client = None # Ensure it's None if connection failed
+        else:
+            logger.warning("Qdrant URL not provided, vector store operations will be limited.")
 
-        # Dictionary to store language-specific resources
-        self.language_resources = {}
+        self.openai_api_key = openai_api_key
+        self.default_lang = default_lang
+        self.chunk_size = chunk_size
+        self.language_settings = {}
+        self.language_detector = LanguageDetector()
+        
+        self.hybrid_search_enabled = hybrid_search
+        self.vector_weight = vector_weight
+        self.keyword_weight = keyword_weight
+        self.hierarchical_retrieval_enabled = hierarchical_retrieval
+        self.parent_boost = parent_boost
+        self.sibling_boost = sibling_boost
 
-        # Preload specified languages
+        self.use_reranker = use_reranker
+        self.reranker_model_name = reranker_model_name
+        self.reranker_top_n = reranker_top_n
+        self.reranker_threshold = reranker_threshold  # New parameter
+        self.query_expansion = query_expansion  # New parameter
+        self.reranker = None
+        
+        # Try initializing reranker immediately
+        if self.use_reranker:
+            try:
+                self.reranker = SentenceTransformerRerank(
+                    model_name=self.reranker_model_name,
+                    top_n=self.reranker_top_n
+                )
+                logger.info(f"Initialized reranker with model {self.reranker_model_name}")
+            except Exception as e:
+                logger.error(f"Failed to initialize reranker: {str(e)}")
+
         if preload_languages:
-            for lang in preload_languages:
-                self._initialize_language(lang)
-
-        # Always initialize default language
+            for lang_code in preload_languages:
+                self._initialize_language(lang_code)
         self._initialize_language(self.default_lang)
-
         logger.info(f"RAG System initialized with default language: {self.default_lang}")
 
     def _connect_to_neo4j(self):
@@ -521,362 +601,496 @@ class RAGSystem:
         raise last_error
 
     def _get_vector_dim_for_model(self, model_name: str) -> int:
-        """
-        Get the vector dimension for a specific model.
-        
-        Args:
-            model_name: Name of the embedding model
-            
-        Returns:
-            Vector dimension for the model
-        """
-        # For FastEmbed models, use the default dimension
         return self.DEFAULT_EMBED_DIM
 
     def _initialize_language(self, lang_code: str) -> bool:
-        """
-        Initialize resources for a specific language (lazy-loading).
-
-        Args:
-            lang_code: Language code to initialize
-
-        Returns:
-            True if initialization was successful, False otherwise
-        """
-        # Skip if already initialized
-        if lang_code in self.language_resources:
+        if lang_code in self.language_settings:
             return True
 
         try:
             logger.info(f"Initializing resources for language: {lang_code}")
 
-            # Create embedding model - use FastEmbed with consistent model for all languages
-            try:
-                # Use BAAI/bge-small-en-v1.5 which has 384 dimensions
-                embed_model = FastEmbedEmbedding(model_name="BAAI/bge-small-en-v1.5")
-                logger.info(f"Successfully initialized FastEmbedEmbedding with model BAAI/bge-small-en-v1.5 for language: {lang_code}")
-            except Exception as emb_err:
-                logger.error(f"Error creating FastEmbedEmbedding: {str(emb_err)}")
-                return False
+            embed_model = FastEmbedEmbedding(model_name=self.DEFAULT_MODEL_KEY)
+            logger.info(f"Successfully initialized FastEmbedEmbedding model {self.DEFAULT_MODEL_KEY} for language: {lang_code}")
             
-            # Get model-specific vector dimensions
-            vector_dim = self._get_vector_dim_for_model("default")
+            vector_dim = self._get_vector_dim_for_model(self.DEFAULT_MODEL_KEY)
             logger.info(f"Using vector dimension {vector_dim} for FastEmbed")
             
-            # Check if Qdrant collection exists
             collection_name = f"{self.qdrant_collection_prefix}_{lang_code}"
+            
+            if not self.qdrant_client:
+                logger.error("Qdrant client not available. Cannot initialize language.")
+                return False
+
             try:
                 collection_info = self.qdrant_client.get_collection(collection_name=collection_name)
-                logger.info(f"Collection {collection_name} exists: {collection_info}")
+                logger.info(f"Collection {collection_name} exists.")
                 
-                # Check if existing collection has the correct vector dimension
-                if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
-                    existing_dim = None
-                    if hasattr(collection_info.config.params, 'vectors'):
-                        if 'embed' in collection_info.config.params.vectors:
-                            existing_dim = collection_info.config.params.vectors['embed'].size
-                        elif 'default' in collection_info.config.params.vectors:
-                            existing_dim = collection_info.config.params.vectors['default'].size
-                    
-                    if existing_dim is not None and existing_dim != vector_dim:
-                        logger.warning(f"Collection {collection_name} has dimension {existing_dim}, but we need {vector_dim}")
-                        logger.warning(f"Recreating collection {collection_name} with correct dimension")
-                        
-                        # Get existing points if available
-                        try:
-                            existing_points = []
-                            scroll_result = self.qdrant_client.scroll(
-                                collection_name=collection_name,
-                                limit=100
-                            )
-                            points, next_page_offset = scroll_result
-                            existing_points.extend(points)
-                            
-                            # If there are points in the collection, save metadata for later re-indexing
-                            if existing_points:
-                                logger.warning(f"Found {len(existing_points)} points in collection. You'll need to re-index these documents.")
-                                doc_ids = set()
-                                for point in existing_points:
-                                    if hasattr(point, 'payload') and point.payload:
-                                        if 'doc_id' in point.payload:
-                                            doc_ids.add(point.payload['doc_id'])
-                                
-                                logger.warning(f"Documents to re-index: {doc_ids}")
-                        except Exception as e:
-                            logger.error(f"Error retrieving existing points: {str(e)}")
-                        
-                        # Delete the collection and recreate it
+                existing_vector_config = collection_info.config.params.vectors
+                current_vector_name = "text-dense" # The name we intend to use
+
+                if isinstance(existing_vector_config, dict): # Named vectors
+                    if current_vector_name not in existing_vector_config or \
+                       existing_vector_config[current_vector_name].size != vector_dim:
+                        logger.warning(f"Collection {collection_name} has incompatible vector config. Recreating.")
                         self.qdrant_client.delete_collection(collection_name=collection_name)
-                        logger.info(f"Deleted collection {collection_name}")
-                        
-                        # Create a new collection with correct dimensions
-                        self.qdrant_client.create_collection(
-                            collection_name=collection_name,
-                            vectors_config={
-                                "embed": {
-                                    "size": vector_dim,
-                                    "distance": "Cosine"
-                                }
-                            }
-                        )
-                        logger.info(f"Recreated collection {collection_name} with dimension {vector_dim}")
-            except Exception as e:
-                # Collection doesn't exist, create it
-                logger.info(f"Creating new collection {collection_name}: {str(e)}")
-                self.qdrant_client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config={
-                        "embed": {
-                            "size": vector_dim,
-                            "distance": "Cosine"
+                        raise ValueError("Recreating collection") # Force recreation
+                elif hasattr(existing_vector_config, 'size'): # Single unnamed vector
+                    if existing_vector_config.size != vector_dim:
+                        logger.warning(f"Collection {collection_name} has incompatible vector dimension. Recreating.")
+                        self.qdrant_client.delete_collection(collection_name=collection_name)
+                        raise ValueError("Recreating collection") # Force recreation
+                else: # Unknown config, recreate
+                    logger.warning(f"Unknown vector config for {collection_name}. Recreating.")
+                    self.qdrant_client.delete_collection(collection_name=collection_name)
+                    raise ValueError("Recreating collection")
+
+
+            except Exception as e: # Catches Qdrant client errors (e.g. collection not found) or our ValueError
+                if "not found" in str(e).lower() or "recreating collection" in str(e).lower() :
+                    logger.info(f"Creating new collection {collection_name} or recreating due to: {str(e)}")
+                    self.qdrant_client.recreate_collection( # Use recreate_collection for simplicity
+                        collection_name=collection_name,
+                        vectors_config={
+                            "text-dense": rest.VectorParams(size=vector_dim, distance=rest.Distance.COSINE)
                         }
-                    }
-                )
+                    )
+                    logger.info(f"Collection {collection_name} created/recreated with vector 'text-dense' dim {vector_dim}")
+                else:
+                    logger.error(f"Error checking/creating Qdrant collection {collection_name}: {e}")
+                    return False
             
-            # Initialize vector store
             vector_store = QdrantVectorStore(
                 client=self.qdrant_client,
                 collection_name=collection_name,
-                vector_name="embed"
+                vector_name="text-dense" 
             )
-            
-            # Create vector index
-            Settings.embed_model = embed_model
-            vector_index = VectorStoreIndex.from_vector_store(vector_store)
-            
-            # Create a proper retriever from the index
-            vector_retriever = vector_index.as_retriever(similarity_top_k=5)
-            
-            # Store resources
-            self.language_resources[lang_code] = {
-                "embedding_model": embed_model,
-                "vector_retriever": vector_retriever
+            logger.info(f"Initialized QdrantVectorStore for {collection_name} with vector_name='text-dense'")
+
+            # Configure global LlamaIndex settings for this operation context if needed
+            # Settings.embed_model = embed_model # This might be better done locally if possible
+
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store,
+                embed_model=embed_model # Pass embed_model for from_vector_store
+            )
+            logger.info(f"Initialized VectorStoreIndex for {collection_name}")
+
+            vector_retriever = VectorIndexRetriever(
+                index=index,
+                similarity_top_k=10, 
+                embed_model=embed_model, 
+                vector_store_query_mode=VectorStoreQueryMode.DEFAULT
+            )
+            logger.info(f"Base VectorIndexRetriever initialized for {lang_code} with mode DEFAULT")
+
+            # Store the main components
+            self.language_settings[lang_code] = {
+                "embed_model_container": {"model": embed_model}, # Wrapped the embed_model
+                "vector_store": vector_store,
+                "index": index,
+                "vector_retriever": vector_retriever, # This is the base dense retriever
+                "retriever": vector_retriever # Start with this, potentially wrap it later
             }
-            
-            # Add BM25 retriever if available
-            if BM25Retriever is not None:
+
+            # BM25 Retriever Setup (if enabled globally)
+            if self.hybrid_search_enabled and BM25Retriever is not None:
                 try:
-                    # Create a new VectorStoreIndex with the right vector name for BM25
-                    # to ensure it uses the correct docstore
-                    bm25_vector_store = QdrantVectorStore(
-                        client=self.qdrant_client,
-                        collection_name=collection_name,
-                        vector_name="embed"
-                    )
-                    bm25_index = VectorStoreIndex.from_vector_store(bm25_vector_store)
+                    # Fetch all nodes from Qdrant for BM25. This can be memory intensive.
+                    # Consider a more sophisticated way if collections are very large.
+                    logger.info(f"Attempting to initialize BM25Retriever for {lang_code}. Fetching nodes...")
+                    all_nodes_for_bm25 = []
+                    # Scroll through all points in the Qdrant collection
+                    offset = None
+                    while True:
+                        points_page, next_offset = self.qdrant_client.scroll(
+                            collection_name=collection_name,
+                            limit=250, # Adjust batch size as needed
+                            offset=offset,
+                            with_payload=True,
+                            with_vectors=False # No need for vectors for BM25
+                        )
+                        for point in points_page:
+                            node_text = point.payload.get("text", "") if point.payload else ""
+                            node_metadata = point.payload if point.payload else {}
+                            # Ensure 'chunk_id' and 'doc_id' are in metadata for BM25 nodes if possible
+                            if 'chunk_id' not in node_metadata: node_metadata['chunk_id'] = point.id
+                            if 'doc_id' not in node_metadata and 'doc_id' in point.payload:
+                                node_metadata['doc_id'] = point.payload['doc_id']
+
+                            all_nodes_for_bm25.append(TextNode(text=node_text, id_=point.id, metadata=node_metadata))
+                        
+                        if next_offset is None:
+                            break
+                        offset = next_offset
                     
-                    # Create BM25 retriever from the docstore
-                    self.language_resources[lang_code]["bm25_retriever"] = BM25Retriever.from_defaults(
-                        docstore=bm25_index.docstore,
-                        similarity_top_k=5
-                    )
-                except Exception as bm25_error:
-                    logger.warning(f"Failed to initialize BM25Retriever: {str(bm25_error)}")
-                    # Continue without BM25 retriever
+                    logger.info(f"Fetched {len(all_nodes_for_bm25)} nodes for BM25 for {lang_code}.")
+                    if all_nodes_for_bm25:
+                        # Determine language for BM25 retriever
+                        # Use lang_code, which is the language of the documents being indexed/retrieved for
+                        bm25_language = lang_code
+                        logger.info(f"Using language '{bm25_language}' for BM25Retriever.")
+
+                        bm25_retriever = BM25Retriever.from_defaults(
+                            nodes=all_nodes_for_bm25,
+                            similarity_top_k=10,
+                            language=bm25_language, # Added language
+                            stemmer=Stemmer.Stemmer(bm25_language) if bm25_language else None # Changed from Stemmer(bm25_language)
+                        )
+                        self.language_settings[lang_code]["bm25_retriever"] = bm25_retriever
+                        logger.info(f"BM25Retriever initialized for {lang_code} with language '{bm25_language}'.")
+                        
+                        # If BM25 is setup, the main retriever becomes HybridRetriever
+                        self.language_settings[lang_code]["retriever"] = HybridRetriever(
+                            vector_retriever=vector_retriever,
+                            keyword_retriever=bm25_retriever,
+                            vector_weight=self.vector_weight,
+                            keyword_weight=self.keyword_weight,
+                            top_k=10 
+                        )
+                        logger.info(f"HybridRetriever (Vector+BM25) set as main retriever for {lang_code}.")
+                    else:
+                        logger.warning(f"No nodes found to initialize BM25Retriever for {lang_code}. Hybrid search (BM25 part) will be disabled for this language.")
+                        self.language_settings[lang_code]["bm25_retriever"] = None
+
+                except Exception as e:
+                    logger.error(f"Failed to initialize BM25Retriever for {lang_code}: {e}", exc_info=True)
+                    self.language_settings[lang_code]["bm25_retriever"] = None
             
-            # Mark as initialized
+            # Hierarchical Retriever Setup (if enabled globally and Neo4j is available)
+            # This wraps the current main retriever (which could be VectorIndexRetriever or HybridRetriever)
+            if self.hierarchical_retrieval_enabled and self.neo4j_driver:
+                current_main_retriever = self.language_settings[lang_code]["retriever"]
+                self.language_settings[lang_code]["retriever"] = HierarchicalRetriever(
+                    base_retriever=current_main_retriever,
+                    neo4j_driver=self.neo4j_driver,
+                    top_k=10, 
+                    parent_boost=self.parent_boost,
+                    sibling_boost=self.sibling_boost
+                )
+                logger.info(f"HierarchicalRetriever wrapped main retriever for {lang_code}.")
+            
+            logger.info(f"Language settings for {lang_code} fully populated. Embedding model container is: {self.language_settings[lang_code].get('embed_model_container')}")
             return True
 
         except Exception as e:
-            logger.error(f"Error initializing resources for language {lang_code}: {str(e)}")
-            if "max() arg is an empty sequence" in str(e):
-                logger.warning(f"This may indicate that the Qdrant collection {self.qdrant_collection_prefix}_{lang_code} is empty or not properly configured")
+            logger.error(f"Fatal error initializing language {lang_code}: {e}", exc_info=True)
             return False
+
+    def _expand_query(self, query: str, lang_code: str = "fr") -> str:
+        """
+        Expand query with synonyms or related terms to improve retrieval.
+        
+        Args:
+            query: Original query string
+            lang_code: Language code for query expansion
+            
+        Returns:
+            Expanded query string
+        """
+        # Simple query expansion logic - can be enhanced with more sophisticated methods
+        if not self.query_expansion:
+            return query
+            
+        try:
+            # For French queries about risk levels
+            if lang_code == "fr" and any(term in query.lower() for term in ["risque", "critique", "niveau", "score", "note"]):
+                expanded_terms = []
+                
+                # Add specific risk-related terms
+                if "critique" in query.lower():
+                    expanded_terms.extend(["critique", "sévère", "grave", "majeur", "important"])
+                
+                if "risque" in query.lower():
+                    expanded_terms.extend(["danger", "menace", "vulnérabilité"])
+                    
+                if any(level in query.lower() for level in ["niveau", "score", "note"]):
+                    expanded_terms.extend(["classification", "évaluation", "catégorie"])
+                
+                # Create expanded query with original plus new terms
+                if expanded_terms:
+                    expanded_query = f"{query} {' '.join(expanded_terms)}"
+                    logger.info(f"Expanded query: '{query}' -> '{expanded_query}'")
+                    return expanded_query
+            
+            return query
+        except Exception as e:
+            logger.error(f"Error in query expansion: {str(e)}")
+            return query  # Fall back to original query
+
+    def _matches_filter(self, metadata: Dict[str, Any], filter_criteria: Dict[str, Any]) -> bool:
+        """
+        Check if a document's metadata matches filter criteria.
+        
+        Args:
+            metadata: Document metadata
+            filter_criteria: Filter criteria dict
+            
+        Returns:
+            Whether the document matches the filter
+        """
+        if not filter_criteria:
+            return True
+            
+        for field, value in filter_criteria.items():
+            # Handle special filter operations
+            if field == "any_of":
+                # any_of: At least one of the nested conditions must match
+                if not isinstance(value, list) or not value:
+                    continue
+                    
+                any_matched = False
+                for sub_filter in value:
+                    if self._matches_filter(metadata, sub_filter):
+                        any_matched = True
+                        break
+                        
+                if not any_matched:
+                    return False
+                    
+            elif field == "all_of":
+                # all_of: All nested conditions must match
+                if not isinstance(value, list) or not value:
+                    continue
+                    
+                for sub_filter in value:
+                    if not self._matches_filter(metadata, sub_filter):
+                        return False
+                
+            elif field == "not":
+                # not: Inverts the matching of nested conditions
+                if not isinstance(value, dict) or not value:
+                    continue
+                    
+                if self._matches_filter(metadata, value):
+                    return False
+                    
+            # Handle field-specific filtering
+            elif field in metadata:
+                meta_value = metadata[field]
+                
+                # Handle different filter value types
+                if isinstance(value, dict):
+                    # Complex comparison operators (eq, gt, lt, etc.)
+                    if not self._apply_comparison_filter(meta_value, value):
+                        return False
+                elif isinstance(value, list):
+                    # List of possible values (IN operator)
+                    if meta_value not in value:
+                        return False
+                else:
+                    # Direct equality comparison
+                    if meta_value != value:
+                        return False
+            else:
+                # Field not in metadata
+                return False
+                
+        return True
+
+    def _get_context_based_filter(self, query: str) -> Optional[Dict[str, Any]]:
+        """
+        Generate query-specific filter criteria based on the query content.
+        
+        Args:
+            query: The query string
+            
+        Returns:
+            Filter criteria dictionary or None
+        """
+        lower_query = query.lower()
+        
+        # For risk-related questions, prioritize security documentation
+        if any(term in lower_query for term in ["risque", "critique", "danger", "menace", "vulnerability", "sécurité"]):
+            return {
+                "any_of": [
+                    {"category": "security"},
+                    {"category": "risk"},
+                    {"category": "compliance"},
+                    {"doc_name": "PSSI"} # Prioritize security policy documents
+                ]
+            }
+            
+        # For compliance questions
+        if any(term in lower_query for term in ["conforme", "conformité", "rgpd", "gdpr", "compliance"]):
+            return {
+                "any_of": [
+                    {"category": "compliance"},
+                    {"category": "legal"},
+                    {"category": "regulatory"}
+                ]
+            }
+            
+        # No specific filter for other query types
+        return None
 
     def retrieve(
         self,
         query: str,
         top_k: int = 5,
-        use_cross_lingual: bool = True,
-        use_hybrid: Optional[bool] = None,
+        use_cross_lingual: bool = True, # If true, attempts to retrieve from default_lang if query lang is not initialized
+        use_hybrid: Optional[bool] = None, # Overrides system hybrid setting
         filter_criteria: Optional[Dict[str, Any]] = None,
-        use_neo4j: bool = True,  # New parameter to control Neo4j usage
-        use_hierarchical: Optional[bool] = None  # New parameter to control hierarchical retrieval
+        use_neo4j: bool = True,  # Parameter to control Neo4j usage for hierarchical parts
+        use_hierarchical: Optional[bool] = None, # Overrides system hierarchical setting
+        use_query_expansion: Optional[bool] = None, # Overrides system query expansion setting
+        auto_filter: bool = True  # Whether to apply automatic context-based filtering
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve documents based on a query.
-
+        Retrieves documents based on a query, with multilingual support.
+        
         Args:
-            query: Query string
-            top_k: Number of documents to retrieve
-            use_cross_lingual: Whether to use cross-lingual retrieval if language detection is different
-            use_hybrid: Whether to use hybrid retrieval (overrides instance setting)
-            filter_criteria: Optional criteria to filter results (metadata filtering)
-            use_neo4j: Whether to use Neo4j for additional context retrieval
-            use_hierarchical: Whether to use hierarchical retrieval (overrides instance setting)
-
+            query: The search query string
+            top_k: Maximum number of results to retrieve
+            use_cross_lingual: Whether to attempt retrieval from default language if query language not initialized
+            use_hybrid: Whether to use hybrid search (overrides default setting)
+            filter_criteria: Dictionary of metadata filters to apply
+            use_neo4j: Whether to utilize Neo4j for hierarchical retrieval
+            use_hierarchical: Whether to use hierarchical retrieval (overrides default setting)
+            use_query_expansion: Whether to use query expansion (overrides default setting)
+            auto_filter: Whether to apply automatic context-based filtering
+            
         Returns:
-            List of retrieved documents
+            List of dictionaries containing retrieved information
         """
-        if not query.strip():
-            logger.warning("Empty query received")
-            return []
-
-        # Detect query language
-        query_lang = self.detect_language(query)
-        logger.info(f"Query language detected: {query_lang}")
-
-        # Handle fallback case if no languages were initialized properly
-        if not self.language_resources and "fallback" not in self.language_resources:
-            logger.warning("No language models initialized, initializing fallback placeholder")
-            self._initialize_fallback_placeholder()
+        if not query or not query.strip():
+            logger.warning("Empty query received, cannot perform retrieval")
             return []
             
-        # If only fallback is available, use it
-        if list(self.language_resources.keys()) == ["fallback"]:
-            logger.warning("Only fallback placeholder available, returning empty results")
-            return []
+        query_lang = self.detect_language(query)
+        logger.info(f"Detected query language: {query_lang}")
+        
+        # Apply context-based filtering if enabled
+        context_filter = None
+        if auto_filter and not filter_criteria:
+            context_filter = self._get_context_based_filter(query)
+            if context_filter:
+                logger.info(f"Applied context-based filter: {context_filter}")
+                filter_criteria = context_filter
 
-        # Determine retrieval languages
-        retrieval_languages = [query_lang]
-        if use_cross_lingual and query_lang != self.default_lang:
-            retrieval_languages.append(self.default_lang)
-            logger.info(f"Using cross-lingual retrieval with languages: {retrieval_languages}")
-
-        # Determine whether to use hybrid search
-        if use_hybrid is None:
-            use_hybrid = self.hybrid_search
-
-        # Determine whether to use hierarchical retrieval
-        if use_hierarchical is None:
-            use_hierarchical = self.hierarchical_retrieval
-
-        # Ensure all languages are initialized
-        for lang in retrieval_languages:
-            actual_lang = self.ensure_language_initialized(lang)
-            # Replace with actual language if it was a fallback
-            if actual_lang != lang:
-                index = retrieval_languages.index(lang)
-                retrieval_languages[index] = actual_lang
-
-        # Get results from each language
-        all_results = []
-        for lang in retrieval_languages:
-            logger.info(f"Retrieving for language: {lang}")
-
-            # Get the right index and search resources
-            if lang not in self.language_resources:
-                logger.warning(f"Language {lang} not initialized, skipping")
-                continue
-
-            resources = self.language_resources[lang]
-
-            # Select appropriate retriever based on settings
-            retriever = None
-
-            # Build base retriever (vector or hybrid)
-            if use_hybrid and BM25Retriever is not None and resources.get("bm25_retriever"):
-                vector_retriever = resources["vector_retriever"]
-                keyword_retriever = resources["bm25_retriever"]
-
-                try:
-                    # Create hybrid retriever
-                    base_retriever = HybridRetriever(
-                        vector_retriever=vector_retriever,
-                        keyword_retriever=keyword_retriever,
-                        vector_weight=self.vector_weight,
-                        keyword_weight=self.keyword_weight,
-                        top_k=top_k
-                    )
-                    logger.info(f"Using hybrid retriever for {lang}")
-                except Exception as hybrid_error:
-                    logger.warning(f"Failed to create hybrid retriever: {str(hybrid_error)}, falling back to vector search")
-                    base_retriever = resources["vector_retriever"]
+        # Determine which language to use for retrieval
+        target_lang = self.ensure_language_initialized(query_lang)
+        if not target_lang:
+            # If primary language not available, try default language for cross-lingual search
+            if use_cross_lingual and query_lang != self.default_lang:
+                logger.info(f"Query language {query_lang} not available, attempting cross-lingual search with {self.default_lang}")
+                target_lang = self.ensure_language_initialized(self.default_lang)
+                if not target_lang:
+                    logger.error(f"Failed to initialize default language {self.default_lang}")
+                    return []
             else:
-                # Use just vector retrieval
-                base_retriever = resources["vector_retriever"]
-                if use_hybrid:
-                    logger.warning("Hybrid search requested but BM25Retriever not available, falling back to vector search")
-
-            # Apply hierarchical retrieval if enabled
-            if use_hierarchical and self.neo4j_driver and use_neo4j:
-                retriever = HierarchicalRetriever(
-                    base_retriever=base_retriever,
-                    neo4j_driver=self.neo4j_driver,
-                    top_k=top_k,
-                    parent_boost=self.parent_boost,
-                    sibling_boost=self.sibling_boost
-                )
-                logger.info(f"Using hierarchical retriever for {lang}")
-            else:
-                retriever = base_retriever
-
-            # Build query bundle
-            from llama_index.core.schema import QueryBundle
-            query_bundle = QueryBundle(query_str=query)
-
-            # Apply metadata filtering if specified
-            if filter_criteria and isinstance(filter_criteria, dict):
-                # Create a metadata filter function
-                def metadata_filter_fn(node):
-                    # Only apply filter if node has metadata
-                    if not hasattr(node, 'metadata') or not node.metadata:
-                        return False
-
-                    # Check each filter criterion
-                    for key, value in filter_criteria.items():
-                        if key not in node.metadata:
-                            return False
-
-                        # Handle different types of values
-                        if isinstance(value, list):
-                            # List type - check if any value matches
-                            if node.metadata[key] not in value:
-                                return False
-                        elif isinstance(value, dict) and 'operator' in value:
-                            # Dict with operator for numeric comparisons
-                            if not self._apply_comparison_filter(node.metadata[key], value):
-                                return False
-                        else:
-                            # Direct equality comparison
-                            if node.metadata[key] != value:
-                                return False
-
-                    # If passed all checks, include this node
-                    return True
-
-                # Apply the filter function to the retriever
-                retriever.filter_fn = metadata_filter_fn
-                logger.info(f"Applied metadata filters: {filter_criteria}")
-
-            # Execute retrieval
-            try:
-                # Check if collection is empty before attempting retrieval
-                try:
-                    # Get collection info to check if it has points
-                    collection_info = self.qdrant_client.get_collection(
-                        collection_name=f"{self.qdrant_collection_prefix}_{lang}"
-                    )
-                    point_count = collection_info.points_count
-                    
-                    if point_count == 0:
-                        logger.warning(f"Collection {self.qdrant_collection_prefix}_{lang} is empty, skipping retrieval")
-                        continue
-                except Exception as e:
-                    logger.warning(f"Failed to check collection status: {str(e)}")
+                logger.error(f"Language {query_lang} not available and cross-lingual search not enabled")
+                return []
                 
-                # Attempt retrieval if we get here
-                retrieval_results = retriever.retrieve(query_bundle)
-
-                # Convert to standard format
-                for result in retrieval_results.nodes:
-                    node = result.node
-
-                    # Extract text and metadata
-                    result_item = {
-                        "text": node.text,
-                        "score": result.score,
-                        "id": node.node_id,
-                        "metadata": node.metadata or {},
-                        "language": lang
-                    }
-
-                    all_results.append(result_item)
-
-            except Exception as e:
-                logger.error(f"Error during retrieval for language {lang}: {str(e)}")
-
-        return all_results
+        logger.info(f"Using language {target_lang} for retrieval")
+        
+        # Apply query expansion if enabled
+        should_expand = self.query_expansion if use_query_expansion is None else use_query_expansion
+        expanded_query = self._expand_query(query, target_lang) if should_expand else query
+        
+        # Get the retriever for this language
+        lang_settings = self.language_settings.get(target_lang)
+        if not lang_settings:
+            logger.error(f"Language {target_lang} settings not found")
+            return []
+            
+        # Create query bundle with expanded query
+        query_bundle = QueryBundle(query_str=expanded_query)
+        
+        # Get the appropriate retriever based on settings and overrides
+        retriever = self._get_retriever_for_query(
+            lang_settings=lang_settings,
+            use_hybrid=use_hybrid,
+            use_neo4j=use_neo4j,
+            use_hierarchical=use_hierarchical,
+        )
+        
+        if not retriever:
+            logger.error("No suitable retriever found")
+            return []
+            
+        # Retrieve nodes
+        try:
+            logger.info(f"Retrieving with {type(retriever).__name__}")
+            output = retriever._retrieve(query_bundle)
+            
+            # Handle different return types from the retriever
+            retrieved_nodes = []
+            if hasattr(output, 'nodes'):
+                # It's a BaseRetrieverOutput object
+                retrieved_nodes = output.nodes
+            elif isinstance(output, list):
+                # It's a list of NodeWithScore
+                if not output:
+                    logger.info("Retriever returned empty list")
+                    return []
+                if all(isinstance(n, NodeWithScore) for n in output):
+                    retrieved_nodes = output
+                else:
+                    logger.error(f"Retriever returned list with non-NodeWithScore elements")
+                    return []
+            else:
+                logger.error(f"Retriever returned unexpected type: {type(output)}")
+                return []
+                
+            logger.info(f"Retrieved {len(retrieved_nodes)} nodes")
+                
+            # Apply reranker if enabled
+            if self.reranker and self.use_reranker and retrieved_nodes:
+                logger.info(f"Applying reranking with {self.reranker_model_name}")
+                try:
+                    # Get more candidates for reranking if possible
+                    reranked_nodes = self.reranker.postprocess_nodes(
+                        retrieved_nodes,
+                        query_bundle=QueryBundle(query_str=query)  # Use original query for reranking
+                    )
+                    logger.info(f"Reranked nodes: {len(reranked_nodes)}")
+                    retrieved_nodes = reranked_nodes
+                    
+                    # Apply threshold to filter out low-scoring results
+                    if self.reranker_threshold is not None:
+                        original_count = len(retrieved_nodes)
+                        retrieved_nodes = [n for n in retrieved_nodes if n.score >= self.reranker_threshold]
+                        logger.info(f"Applied score threshold {self.reranker_threshold}: {original_count} -> {len(retrieved_nodes)} nodes")
+                except Exception as e:
+                    logger.error(f"Error during reranking: {str(e)}", exc_info=True)
+            
+            # Process results into final format
+            final_results = []
+            for node_with_score in retrieved_nodes:
+                node = node_with_score.node
+                score = node_with_score.score
+                
+                # Create result dictionary with node data
+                result = {
+                    "text": node.get_content(),
+                    "metadata": node.metadata or {},
+                    "score": score,
+                    "doc_id": node.metadata.get("doc_id", node.node_id),
+                    "chunk_id": node.node_id
+                }
+                
+                # Add reranker information if used
+                if self.reranker and self.use_reranker:
+                    result["metadata"]["reranked_score"] = score
+                    result["metadata"]["reranker_model"] = self.reranker_model_name
+                
+                # Apply filter criteria if provided
+                if filter_criteria:
+                    if not self._matches_filter(result["metadata"], filter_criteria):
+                        continue
+                
+                final_results.append(result)
+            
+            # Limit to top_k results
+            final_results = final_results[:top_k]
+            logger.info(f"Returning {len(final_results)} final results")
+            
+            return final_results
+                
+        except Exception as e:
+            logger.error(f"Error during retrieval: {str(e)}", exc_info=True)
+            return []
 
     def detect_language(self, text: str) -> str:
         """
@@ -892,9 +1106,9 @@ class RAGSystem:
         lang_code = lang_info["language_code"]
 
         # If language not supported, use multilingual or default
-        if lang_code not in self.LANGUAGE_EMBEDDING_MODELS:
-            if "multi" in self.LANGUAGE_EMBEDDING_MODELS:
-                return "multi"
+        if lang_code not in self.language_settings:
+            if "multilingual" in self.language_settings:
+                return "multilingual"
             return self.default_lang
 
         return lang_code
@@ -910,31 +1124,31 @@ class RAGSystem:
             The initialized language code (might be different if fallback was used)
         """
         # Try to initialize the requested language
-        if lang_code not in self.language_resources:
+        if lang_code not in self.language_settings:
             success = self._initialize_language(lang_code)
             if success:
                 return lang_code
 
         # If we get here, either initialization failed or was not needed
         # Check if the language is already initialized
-        if lang_code in self.language_resources:
+        if lang_code in self.language_settings:
             return lang_code
 
         # Try multilingual fallback
-        if "multi" in self.LANGUAGE_EMBEDDING_MODELS:
-            if "multi" not in self.language_resources:
-                success = self._initialize_language("multi")
+        if "multilingual" in self.language_settings:
+            if "multilingual" not in self.language_settings:
+                success = self._initialize_language("multilingual")
                 if success:
-                    return "multi"
-            elif "multi" in self.language_resources:
-                return "multi"
+                    return "multilingual"
+            elif "multilingual" in self.language_settings:
+                return "multilingual"
 
         # Try default language as a final fallback
-        if self.default_lang not in self.language_resources:
+        if self.default_lang not in self.language_settings:
             success = self._initialize_language(self.default_lang)
             if success:
                 return self.default_lang
-        elif self.default_lang in self.language_resources:
+        elif self.default_lang in self.language_settings:
             return self.default_lang
 
         # If we get here, nothing worked
@@ -991,7 +1205,7 @@ class RAGSystem:
                 return BaseRetrieverOutput(nodes=[])
         
         # Store fallback resources
-        self.language_resources["fallback"] = {
+        self.language_settings["fallback"] = {
             "embedding_model": None,
             "vector_retriever": EmptyRetriever(),
         }
@@ -1237,7 +1451,10 @@ class RAGSystem:
                 
             if not self.neo4j_driver:
                 logger.error("Failed to connect to Neo4j, cannot index document")
-                return False
+                return {
+                    "doc_id": doc_id, "vector_count": 0, "status": "error",
+                    "message": f"Failed to connect to Neo4j, cannot index document"
+                }
                 
             with self.neo4j_driver.session() as session:
                 # Check if document exists
@@ -1258,20 +1475,34 @@ class RAGSystem:
                 doc_record = doc_check.single()
                 if not doc_record:
                     logger.error(f"Document {doc_id} not found in Neo4j")
-                    return False
+                    return {
+                        "doc_id": doc_id, "vector_count": 0, "status": "error",
+                        "message": f"Document {doc_id} not found in Neo4j"
+                    }
                 
                 # Check if document is already indexed and we're not forcing reindex
                 if not force_reindex and doc_record.get("is_indexed") == True:
                     logger.info(f"Document {doc_id} is already indexed. Use force_reindex=True to reindex.")
                     return {
                         "doc_id": doc_id,
-                        "vector_count": 0,
-                        "message": "Document already indexed"
+                        "vector_count": 0, # Or fetch existing count if important
+                        "message": "Document already indexed",
+                        "status": "skipped"
                     }
                     
                 # Handle potentially missing properties with safe gets
                 doc_name = doc_record.get("title") or doc_record.get("name", f"Document-{doc_id}")
-                doc_language = doc_record.get("language") or self.default_lang
+                # doc_language = doc_record.get("language") or self.default_lang # Original line
+
+                # --- MODIFICATION FOR FRENCH-ONLY ---
+                detected_doc_language = doc_record.get("language")
+                if detected_doc_language != 'fr':
+                    logger.warning(f"Document {doc_id} (title: {doc_name}) detected by parser as '{detected_doc_language}'. Forcing to 'fr' for indexing as per French-only requirement.")
+                    doc_language = 'fr'
+                else:
+                    doc_language = 'fr' # It's already French
+                # --- END MODIFICATION ---
+
                 doc_category = doc_record.get("category", "")
                 doc_author = doc_record.get("author", "")
                 doc_file_type = doc_record.get("file_type", "")
@@ -1282,8 +1513,8 @@ class RAGSystem:
                 RETURN c.chunk_id as chunk_id, c.text as text, 
                        COALESCE(c.section, 'Default') as section, 
                        COALESCE(c.page_num, 0) as page_num, 
-                       COALESCE(c.order_index, c.index, 0) as order_index
-                ORDER BY COALESCE(c.order_index, c.index, 0)
+                       COALESCE(c.order_index, 0) as order_index
+                ORDER BY COALESCE(c.order_index, 0)
                 """
                 
                 chunks_result = session.run(chunk_query, doc_id=doc_id)
@@ -1294,28 +1525,56 @@ class RAGSystem:
                     return {
                         "doc_id": doc_id,
                         "vector_count": 0,
-                        "message": "Document has no chunks to index"
+                        "message": "Document has no chunks to index",
+                        "status": "skipped"
                     }
                     
                 # Ensure the language is initialized
                 actual_lang = self.ensure_language_initialized(doc_language)
                 
+                # --- ADDED SAFETY CHECK FOR FRENCH --- 
+                if actual_lang != 'fr':
+                    logger.error(f"CRITICAL: actual_lang in index_document is '{actual_lang}' instead of 'fr' for doc {doc_id} (title: {doc_name}). This indicates a problem in ensure_language_initialized or default_lang setup.")
+                    return {
+                        "doc_id": doc_id, "vector_count": 0, "status": "error",
+                        "message": f"Language initialization for indexing yielded '{actual_lang}' instead of 'fr'."
+                    }
+                # --- END SAFETY CHECK --- 
+
                 # Get the correct resources for this language
-                if actual_lang not in self.language_resources:
-                    logger.error(f"Language {actual_lang} not available for indexing")
-                    return False
+                if actual_lang not in self.language_settings: # This check might be redundant if ensure_language_initialized is robust
+                    logger.error(f"Language {actual_lang} not available in language_settings for indexing doc {doc_id}")
+                    return {
+                        "doc_id": doc_id, "vector_count": 0, "status": "error",
+                        "message": f"Language {actual_lang} not available in language_settings for indexing"
+                    }
                     
-                resources = self.language_resources[actual_lang]
-                embed_model = resources.get("embedding_model")
+                resources = self.language_settings[actual_lang]
+                logger.info(f"Resources content for {actual_lang} in index_document (doc_id: {doc_id}): {str(resources)[:500]}...")
+                
+                embed_model = None # Initialize embed_model to None
+                embed_model_container = resources.get("embed_model_container")
+                logger.info(f"Retrieved embed_model_container for {actual_lang} (doc_id: {doc_id}): {embed_model_container}")
+
+                if embed_model_container and isinstance(embed_model_container, dict):
+                    embed_model = embed_model_container.get("model")
+                    logger.info(f"Retrieved embed_model from container for {actual_lang} (doc_id: {doc_id}): {embed_model}")
+                else:
+                    logger.warning(f"embed_model_container was missing or not a dict for {actual_lang} (doc_id: {doc_id}).")
+
                 if not embed_model:
-                    logger.error(f"No embedding model for language {actual_lang}")
-                    return False
+                    logger.error(f"No embedding model retrieved for language {actual_lang} (doc_id: {doc_id}) [Container Check]")
+                    return {
+                        "doc_id": doc_id, "vector_count": 0, "status": "error",
+                        "message": f"No embedding model retrieved for language {actual_lang} (doc_id: {doc_id}) [Container Check]"
+                    }
                 
                 # 2. Convert chunks to nodes and embed them
                 indexed_chunks = 0
                 for chunk in chunks:
                     try:
                         chunk_id = chunk["chunk_id"]
+                        text = chunk["text"] # Get the text for payload and embedding
                         
                         # If chunk_id is None or empty, generate a new one
                         if not chunk_id:
@@ -1336,11 +1595,11 @@ class RAGSystem:
                             "order_index": chunk["order_index"] or 0,
                             "category": doc_category or "",
                             "author": doc_author or "",
-                            "file_type": doc_file_type or ""
+                            "file_type": doc_file_type or "",
+                            "text": text  # Store the text content in the payload for BM25
                         }
                         
                         # Create vector
-                        text = chunk["text"]
                         if not text or len(text.strip()) == 0:
                             logger.warning(f"Skipping empty chunk: {chunk_id}")
                             continue
@@ -1355,50 +1614,51 @@ class RAGSystem:
                         
                         # Add to Qdrant
                         collection_name = f"{self.qdrant_collection_prefix}_{actual_lang}"
+                        vector_name_to_use = "text-dense" # Standardize to use 'text-dense'
                         
                         # Check if collection exists, create if it doesn't
                         try:
                             collection_info = self.qdrant_client.get_collection(collection_name)
                             logger.info(f"Collection {collection_name} exists with {collection_info.points_count} points")
                             
-                            # Check vector name configuration to determine proper vector name
-                            vector_name = "default"
+                            # Verify existing collection uses the correct vector name, otherwise log a warning
                             if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
-                                if hasattr(collection_info.config.params, 'vectors') and 'embed' in collection_info.config.params.vectors:
-                                    vector_name = "embed"
-                                    logger.info(f"Using 'embed' as vector name for existing collection {collection_name}")
+                                if not (hasattr(collection_info.config.params, 'vectors') and \
+                                        vector_name_to_use in collection_info.config.params.vectors):
+                                    logger.warning(
+                                        f"Collection {collection_name} exists but may not be configured for vector name '{vector_name_to_use}'. Expected config: {collection_info.config.params.vectors}"
+                                    )
                             
                         except Exception as collection_error:
-                            logger.info(f"Creating new collection {collection_name}: {str(collection_error)}")
+                            # Simplified error handling: if any error (likely collection not found), try to create.
+                            logger.info(f"Attempting to create collection {collection_name} as it might not exist or other error occurred: {str(collection_error)}")
                             vector_size = len(embedding)
-                            vector_name = "default"  # Use default for new collections
                             
-                            self.qdrant_client.create_collection(
-                                collection_name=collection_name,
-                                vectors_config=rest.VectorParams(
-                                    size=vector_size,
-                                    distance=rest.Distance.COSINE
-                                ),
-                                # Define the vector name explicitly as the default
-                                vectors={
-                                    vector_name: rest.VectorParams(
-                                        size=vector_size,
-                                        distance=rest.Distance.COSINE
-                                    )
-                                }
-                            )
-                            logger.info(f"Created new collection {collection_name} with vector size {vector_size}")
+                            try:
+                                self.qdrant_client.create_collection(
+                                    collection_name=collection_name,
+                                    vectors_config={
+                                        vector_name_to_use: rest.VectorParams(
+                                            size=vector_size,
+                                            distance=rest.Distance.COSINE
+                                        )
+                                    }
+                                )
+                                logger.info(f"Created new collection {collection_name} with vector name '{vector_name_to_use}' and size {vector_size}")
+                            except Exception as create_exc:
+                                logger.error(f"Failed to create collection {collection_name}: {create_exc}")
+                                continue # Skip this chunk if collection creation fails
                         
                         # Upsert the point using UUID as the point_id
-                        logger.info(f"Upserting point {point_id} for chunk {chunk_id} in collection {collection_name} with vector name {vector_name}")
+                        logger.info(f"Upserting point {point_id} for chunk {chunk_id} in collection {collection_name} with vector name {vector_name_to_use}")
                         
                         try:
                             # Convert embedding to list if it's a numpy array
                             if hasattr(embedding, 'tolist'):
                                 embedding = embedding.tolist()
                                 
-                            # Prepare vector with the appropriate name
-                            vector_dict = {vector_name: embedding}
+                            # Prepare vector with the standardized name
+                            vector_dict = {vector_name_to_use: embedding}
                             
                             result = self.qdrant_client.upsert(
                                 collection_name=collection_name,
@@ -1469,5 +1729,60 @@ class RAGSystem:
         Returns:
             List of language codes that have been initialized
         """
-        return list(self.language_resources.keys())
+        return list(self.language_settings.keys())
+
+    def _get_retriever_for_query(
+        self,
+        lang_settings: Dict[str, Any],
+        use_hybrid: Optional[bool] = None,
+        use_neo4j: bool = True,
+        use_hierarchical: Optional[bool] = None
+    ) -> Optional[BaseRetriever]:
+        """
+        Constructs and returns the appropriate retriever based on settings.
+        
+        Args:
+            lang_settings: Language-specific settings including base retrievers
+            use_hybrid: Whether to use hybrid search (overrides system setting)
+            use_neo4j: Whether to use Neo4j for hierarchical retrieval
+            use_hierarchical: Whether to use hierarchical retrieval (overrides system setting)
+            
+        Returns:
+            Configured retriever or None if no suitable retriever could be constructed
+        """
+        # Start with the base vector retriever
+        vector_retriever = lang_settings.get("vector_retriever")
+        if not vector_retriever:
+            logger.error("Vector retriever not available in language settings")
+            return None
+            
+        current_retriever = vector_retriever
+        
+        # Determine if hybrid search should be used
+        final_use_hybrid = self.hybrid_search_enabled if use_hybrid is None else use_hybrid
+        if final_use_hybrid and BM25Retriever is not None:
+            keyword_retriever = lang_settings.get("bm25_retriever")
+            if keyword_retriever:
+                logger.info("Using hybrid retriever (vector + keyword)")
+                current_retriever = HybridRetriever(
+                    vector_retriever=vector_retriever,
+                    keyword_retriever=keyword_retriever,
+                    vector_weight=self.vector_weight,
+                    keyword_weight=self.keyword_weight
+                )
+            else:
+                logger.warning("BM25 retriever not available, falling back to vector-only search")
+                
+        # Determine if hierarchical retrieval should be used
+        final_use_hierarchical = self.hierarchical_retrieval_enabled if use_hierarchical is None else use_hierarchical
+        if final_use_hierarchical and use_neo4j and self.neo4j_driver:
+            logger.info("Using hierarchical retriever")
+            current_retriever = HierarchicalRetriever(
+                base_retriever=current_retriever,
+                neo4j_driver=self.neo4j_driver,
+                parent_boost=self.parent_boost,
+                sibling_boost=self.sibling_boost
+            )
+            
+        return current_retriever
     

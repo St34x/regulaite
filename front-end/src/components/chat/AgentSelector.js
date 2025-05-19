@@ -10,7 +10,7 @@ const DEFAULT_AGENT_SETTINGS = {
   use_agent: false, 
   agent_type: null, 
   use_tree_reasoning: false,
-  tree_template: 'default'
+  tree_template: 'default_understanding'
 };
 
 /**
@@ -223,12 +223,12 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
               </FormLabel>
               <Select 
                 id="tree-select" 
-                value={settings.tree_template || 'default'} 
+                value={settings.tree_template || 'default_understanding'} 
                 onChange={handleTreeChange}
                 size="sm"
                 focusBorderColor={accentColor}
               >
-                <option value="default">Default Tree</option>
+                <option value="default_understanding">Default Tree</option>
                 {Object.entries(availableTrees).map(([id, tree]) => (
                   <option key={id} value={id}>
                     {tree.name || id}

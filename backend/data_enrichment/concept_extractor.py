@@ -40,6 +40,7 @@ class ConceptExtractor:
         self.spacy_model_name = spacy_model
         self.regulatory_domain = regulatory_domain
         self.multilingual = multilingual
+        self.max_models = max_models
 
         # Initialize language detector
         self.language_detector = LanguageDetector(fallback_language='en')
@@ -47,25 +48,9 @@ class ConceptExtractor:
         # Dictionary to store NLP models by language
         self.models = {}
         self.matchers = {}  # Store phrase matchers by language
+        self.regulatory_terms = {}
 
-        # Load default spaCy model
-        if multilingual:
-            self.nlp = self._load_model_for_language('en', spacy_model)
-        else:
-            # Load single spaCy model
-            try:
-                logger.info(f"Loading spaCy model: {spacy_model}")
-                self.nlp = spacy.load(spacy_model)
-                logger.info(f"Successfully loaded spaCy model: {spacy_model}")
-            except Exception as e:
-                logger.error(f"Failed to load spaCy model: {str(e)}")
-                self.nlp = None
-
-        # Load regulatory domain knowledge if requested
-        if regulatory_domain:
-            self._load_regulatory_knowledge()
-
-        # Load custom glossary if provided
+        # Load custom glossary if provided, BEFORE models are loaded
         self.custom_glossary = None
         if custom_glossary and os.path.exists(custom_glossary):
             try:
@@ -75,9 +60,45 @@ class ConceptExtractor:
             except Exception as e:
                 logger.error(f"Failed to load custom glossary: {str(e)}")
 
-        # Set up phrase matcher for concepts if NLP is available
-        if self.nlp:
-            self._setup_phrase_matcher('en')
+        # Load default spaCy model
+        self.nlp = None
+        if multilingual:
+            self.nlp = self._load_model_for_language('en', spacy_model)
+        else:
+            # Load single spaCy model
+            try:
+                logger.info(f"Loading spaCy model: {spacy_model}")
+                # Determine lang_code from model_name (very basic, assumes 'en' if not specified)
+                # A more robust way would be to inspect the model's meta.json or have a mapping
+                lang_code_from_model = spacy_model[:2] if len(spacy_model) >= 2 and spacy_model[2] == '_' else 'en' 
+
+                nlp_instance = spacy.load(spacy_model)
+                logger.info(f"Successfully loaded spaCy model: {spacy_model} for language {lang_code_from_model}")
+                
+                # Store it as the default self.nlp and also in self.models for consistency
+                self.nlp = nlp_instance
+                self.models[lang_code_from_model] = nlp_instance
+
+                if self.regulatory_domain:
+                    self._load_regulatory_knowledge_for_lang_code(lang_code_from_model)
+                    self._load_regulatory_knowledge_for_language(nlp_instance, lang_code_from_model)
+                
+                # Setup phrase matcher for the loaded model
+                self._setup_phrase_matcher(lang_code_from_model, nlp_instance)
+
+            except Exception as e:
+                logger.error(f"Failed to load spaCy model {spacy_model}: {str(e)}", exc_info=True)
+                self.nlp = None
+
+        # This setup_phrase_matcher call was potentially redundant if multilingual was true,
+        # or for the non-multilingual case if it was already set up.
+        # It's better to ensure matchers are set up when models are loaded.
+        # If self.nlp is the English model and multilingual is true, it's already set up.
+        # If multilingual is false, it's set up in the try block.
+        # Consider removing the call below or making it conditional.
+        # For now, let's ensure the primary 'en' matcher is available if nlp is set.
+        if self.nlp and 'en' not in self.matchers: # Only set up if 'en' matcher doesn't exist yet
+             self._setup_phrase_matcher('en', self.nlp)
 
     def _load_model_for_language(self, lang_code: str, model_name: Optional[str] = None) -> Optional[Language]:
         """
@@ -130,14 +151,19 @@ class ConceptExtractor:
             self.models[lang_code] = nlp
 
             # If we have too many models, remove the oldest ones
-            if len(self.models) > 3:  # Keep at most 3 models
-                # Don't remove the default English model
-                languages_to_check = [lang for lang in self.models.keys() if lang != 'en']
+            if len(self.models) > self.max_models:
+                english_model_instance = None
+                if 'en' in self.models and self.nlp == self.models['en']:
+                    english_model_instance = self.models['en']
+                
+                languages_to_check = [lang for lang, model_instance in self.models.items() if model_instance != english_model_instance]
+                
                 if languages_to_check:
-                    # Remove the first language (oldest)
                     lang_to_remove = languages_to_check[0]
+                    logger.info(f"Max models ({self.max_models}) reached. Removing model for language {lang_to_remove} to conserve memory.")
                     del self.models[lang_to_remove]
-                    logger.info(f"Removed model for language {lang_to_remove} to conserve memory")
+                    if lang_to_remove in self.matchers:
+                        del self.matchers[lang_to_remove]
 
             logger.info(f"Successfully loaded model {model_name} for language {lang_code}")
             return nlp
@@ -210,21 +236,22 @@ class ConceptExtractor:
                 "policy": ["Richtlinie", "Standard", "Regel", "Verordnung", "Gesetz", "Direktive"]
             },
             'it': {
-                "compliance": ["conformità", "conformità normativa", "aderenza", "conformità"],
-                "risk": ["rischio", "gestione dei rischi", "valutazione dei rischi", "analisi dei rischi"],
-                "governance": ["governance", "corporate governance", "quadro di governance"],
-                "reporting": ["reportistica", "divulgazione", "notifica", "rapporto", "dichiarazione"],
+                "compliance": ["conformità", "conformità normativa", "aderenza"],
+                "risk": ["rischio", "gestione del rischio", "valutazione del rischio", "analisi del rischio"],
+                "governance": ["governance", "governance aziendale", "quadro di governance"],
+                "reporting": ["reporting", "informativa", "notifica", "rapporto", "dichiarazione"],
                 "audit": ["audit", "ispezione", "esame", "revisione", "valutazione"],
-                "sanction": ["sanzione", "penalità", "multa", "azione di applicazione"],
+                "sanction": ["sanzione", "penalità", "multa", "azione esecutiva"],
                 "requirement": ["requisito", "obbligo", "mandato", "dovere", "necessità"],
                 "procedure": ["procedura", "processo", "protocollo", "metodo", "linea guida"],
-                "documentation": ["documentazione", "registrazione", "evidenza", "scartoffie"],
-                "policy": ["politica", "standard", "regola", "regolamento", "legge", "direttiva"]
+                "documentation": ["documentazione", "registrazione", "prova", "documenti"],
+                "policy": ["politica", "standard", "norma", "regolamento", "legge", "direttiva"]
             }
         }
 
         # Load for default language (English)
-        self._load_regulatory_knowledge_for_language(self.nlp, 'en')
+        if self.nlp:
+            self._load_regulatory_knowledge_for_language(self.nlp, 'en')
 
     def _load_regulatory_knowledge_for_language(self, nlp: Language, lang_code: str):
         """

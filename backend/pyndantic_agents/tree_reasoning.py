@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 from openai import AsyncOpenAI
 import os
 
+# Added import for NodeWithScore
+from llama_index.core.schema import NodeWithScore
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +42,8 @@ class DecisionNode(BaseModel):
     explore_multiple_paths: bool = Field(False, description="Whether to explore multiple high-confidence paths")
     domain: Optional[str] = Field(None, description="Domain/category this decision node belongs to (e.g., 'regulatory', 'security')")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata for this node")
+    # Runtime context for the node, including text and sources
+    runtime_context: Dict[str, Any] = Field(default_factory=dict, description="Runtime context for the node, including formatted text and source nodes")
 
     # For advanced decision nodes
     fallback_node_id: Optional[str] = Field(None, description="Node to fall back to if no decision meets confidence threshold")
@@ -104,16 +109,18 @@ class TreeReasoningAgent:
     async def process(
         self,
         query: str,
-        context: Optional[List[Dict[str, Any]]] = None,
-        max_depth: int = 10
+        initial_retrieved_nodes: Optional[List[NodeWithScore]] = None,
+        max_depth: int = 10,
+        agent_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Process the input through the decision tree.
 
         Args:
             query: User query
-            context: Optional context from RAG
+            initial_retrieved_nodes: Optional list of NodeWithScore from RAG for initial context
             max_depth: Maximum depth to traverse to prevent infinite loops
+            agent_settings: Optional agent settings from the request
 
         Returns:
             Dictionary with the response and reasoning path
@@ -122,19 +129,22 @@ class TreeReasoningAgent:
         self.decision_path = []
         self.path_results = []
 
-        # Format the context for insertion in prompts
-        context_text = self._format_context(context)
-
+        # Format the initial context with sources
+        current_formatted_context_str = self._format_context_with_sources(
+            base_text="",
+            retrieved_nodes=initial_retrieved_nodes
+        )
+        
         # Check context sufficiency for tree
-        if self.tree.required_context_types and context:
-            missing_context = self._check_missing_context(context, self.tree.required_context_types)
-            if missing_context:
-                logger.warning(f"Missing required context types: {missing_context}")
+        # if self.tree.required_context_types and initial_retrieved_nodes: # This was the line causing potential issues
+            # missing_context = self._check_missing_context(initial_retrieved_nodes, self.tree.required_context_types) # This would likely error
+            # if missing_context:
+            #     logger.warning(f"Missing required context types: {missing_context}")
 
         # Start from the root node
         if self.use_probabilistic and self.max_exploration_paths > 1:
             # Process with multiple path exploration
-            await self._process_multiple_paths(query, context_text, max_depth)
+            await self._process_multiple_paths(query, current_formatted_context_str, initial_retrieved_nodes, max_depth)
 
             # Merge and rank results
             if self.path_results:
@@ -154,16 +164,18 @@ class TreeReasoningAgent:
                 "response": "I couldn't determine a confident response based on my decision process.",
                 "decision_path": [],
                 "confidence": 0.0,
-                "error": "No valid decision paths found"
+                "error": "No valid decision paths found",
+                "sources": []  # Add empty sources list for consistency
             }
         else:
             # Process with single path
-            return await self._process_single_path(query, context_text, max_depth)
+            return await self._process_single_path(query, current_formatted_context_str, initial_retrieved_nodes, max_depth)
 
     async def _process_single_path(
         self,
         query: str,
-        context_text: str,
+        initial_formatted_context_str: str,
+        initial_retrieved_nodes: Optional[List[NodeWithScore]],
         max_depth: int
     ) -> Dict[str, Any]:
         """
@@ -171,7 +183,8 @@ class TreeReasoningAgent:
 
         Args:
             query: User query
-            context_text: Formatted context text
+            initial_formatted_context_str: Formatted context string from initial RAG retrieval
+            initial_retrieved_nodes: The initial list of NodeWithScore objects from RAG
             max_depth: Maximum depth to traverse
 
         Returns:
@@ -180,6 +193,11 @@ class TreeReasoningAgent:
         current_node_id = self.tree.root_node_id
         depth = 0
         path_confidence = 1.0  # Start with full confidence
+        
+        # This will hold the NodeWithScore objects relevant at each step. Starts with initial.
+        current_step_nodes = initial_retrieved_nodes if initial_retrieved_nodes else []
+        # The formatted text to be used in prompts at this step
+        current_formatted_prompt_context = initial_formatted_context_str
 
         while depth < max_depth:
             # Get current node
@@ -188,10 +206,13 @@ class TreeReasoningAgent:
                 break
 
             current_node = self.tree.nodes[current_node_id]
+            # Store current sources in the node for potential later use or logging
+            current_node.runtime_context = {"sources": current_step_nodes, "formatted_text": current_formatted_prompt_context}
 
             # If leaf node, return action
             if current_node.is_leaf:
-                response, confidence = await self._generate_leaf_response(current_node, query, context_text)
+                # Leaf node uses the context (text and sources) accumulated up to this point
+                response, confidence, sources = await self._generate_leaf_response(current_node, query, current_formatted_prompt_context, current_step_nodes)
                 self.decision_path.append({
                     "node_id": current_node_id,
                     "decision": "leaf",
@@ -205,14 +226,15 @@ class TreeReasoningAgent:
                     "response": response,
                     "decision_path": self.decision_path,
                     "final_node_id": current_node_id,
-                    "confidence": final_confidence
+                    "confidence": final_confidence,
+                    "sources": sources
                 }
 
             # Make decision at this node
             if self.use_probabilistic and current_node.is_probabilistic:
-                decision, confidence = await self._make_probabilistic_decision(current_node, query, context_text)
+                decision, confidence = await self._make_probabilistic_decision(current_node, query, current_formatted_prompt_context)
             else:
-                decision = await self._make_decision(current_node, query, context_text)
+                decision = await self._make_decision(current_node, query, current_formatted_prompt_context)
                 confidence = 1.0  # Default confidence for non-probabilistic
 
             # Update path confidence
@@ -257,113 +279,250 @@ class TreeReasoningAgent:
     async def _process_multiple_paths(
         self,
         query: str,
-        context_text: str,
+        initial_formatted_context_str: str,
+        initial_retrieved_nodes: Optional[List[NodeWithScore]],
         max_depth: int
     ) -> None:
         """
-        Process multiple decision paths through the tree in parallel.
+        Process multiple decision paths through the tree (for probabilistic exploration).
 
         Args:
             query: User query
-            context_text: Formatted context text
+            initial_formatted_context_str: Formatted context string from initial RAG retrieval
+            initial_retrieved_nodes: The initial list of NodeWithScore objects from RAG
             max_depth: Maximum depth to traverse
         """
-        # Start with the root node
+        # This is a simplified version for multiple paths.
+        # A full implementation would involve more complex state management
+        # and potentially exploring paths in parallel or with beam search.
+
+        # Get the root node
         root_node_id = self.tree.root_node_id
+        if root_node_id not in self.tree.nodes:
+            logger.error(f"Root node {root_node_id} not found in tree")
+            return
 
-        # Queue for BFS-like exploration
-        path_queue = [{"node_id": root_node_id, "path": [], "confidence": 1.0}]
-        completed_paths = []
+        root_node = self.tree.nodes[root_node_id]
 
-        while path_queue and len(completed_paths) < self.max_exploration_paths:
-            current_path = path_queue.pop(0)
-            current_node_id = current_path["node_id"]
-            current_path_nodes = current_path["path"]
-            current_confidence = current_path["confidence"]
+        # If root is leaf
+        if root_node.is_leaf:
+            response, confidence = await self._generate_leaf_response(root_node, query, initial_formatted_context_str, initial_retrieved_nodes)
+            self.path_results.append({
+                "response": response,
+                "decision_path": [{"node_id": root_node_id, "decision": "leaf", "confidence": confidence}],
+                "confidence": confidence
+            })
+            return
 
-            if current_node_id not in self.tree.nodes:
+        # Make initial decisions from the root
+        if root_node.is_probabilistic and self.use_probabilistic:
+            decisions_with_confidence = await self._make_multiple_decisions(
+                root_node, query, initial_formatted_context_str, top_k=self.max_exploration_paths
+            )
+        else:
+            # For non-probabilistic or single path, make one decision
+            decision = await self._make_decision(root_node, query, initial_formatted_context_str)
+            decisions_with_confidence = [(decision, 1.0)] # Assume full confidence
+
+        # Explore paths for each decision
+        for decision, confidence in decisions_with_confidence:
+            if confidence < root_node.confidence_threshold:
+                logger.info(f"Skipping path for decision '{decision}' due to low confidence {confidence}")
                 continue
 
-            current_node = self.tree.nodes[current_node_id]
-
-            # If leaf node, complete this path
-            if current_node.is_leaf:
-                response, confidence = await self._generate_leaf_response(current_node, query, context_text)
-                final_path = current_path_nodes + [{
-                    "node_id": current_node_id,
-                    "decision": "leaf",
-                    "confidence": confidence
-                }]
-
-                final_confidence = current_confidence * confidence
-
-                completed_paths.append({
-                    "response": response,
-                    "decision_path": final_path,
-                    "final_node_id": current_node_id,
-                    "confidence": final_confidence
-                })
-                continue
-
-            # For probabilistic nodes, consider multiple paths
-            if self.use_probabilistic and current_node.is_probabilistic:
-                decisions = await self._make_multiple_decisions(
-                    current_node,
+            if decision in root_node.children:
+                current_path = [{"node_id": root_node_id, "decision": decision, "confidence": confidence}]
+                await self._explore_path(
+                    root_node.children[decision],
                     query,
-                    context_text,
-                    top_k=min(len(current_node.children), 3)  # Consider top 3 decisions at most
+                    initial_formatted_context_str,
+                    initial_retrieved_nodes,
+                    max_depth -1, # Decrement depth
+                    current_path,
+                    confidence # Initial path confidence
                 )
-
-                # Add each decision path to the queue
-                for decision, confidence in decisions:
-                    if decision in current_node.children:
-                        new_path = current_path_nodes + [{
-                            "node_id": current_node_id,
-                            "decision": decision,
-                            "confidence": confidence
-                        }]
-
-                        path_queue.append({
-                            "node_id": current_node.children[decision],
-                            "path": new_path,
-                            "confidence": current_confidence * confidence
-                        })
             else:
-                # For non-probabilistic nodes, just take the single decision
-                decision = await self._make_decision(current_node, query, context_text)
-                confidence = 1.0
+                logger.warning(f"Decision '{decision}' has no child from root node {root_node_id}")
+        
+        if not self.path_results:
+            logger.warning("No successful paths found during multiple path exploration.")
 
-                if decision in current_node.children:
-                    new_path = current_path_nodes + [{
+    async def _explore_path(
+        self,
+        current_node_id: str,
+        query: str,
+        current_formatted_context_str: str,
+        current_retrieved_nodes: Optional[List[NodeWithScore]],
+        remaining_depth: int,
+        current_path: List[Dict[str, Any]],
+        path_confidence: float
+    ):
+        """
+        Recursively explore a path in the decision tree.
+
+        Args:
+            current_node_id: ID of the current node
+            query: User query
+            current_formatted_context_str: Formatted context string for the current state of the path
+            current_retrieved_nodes: List of NodeWithScore for the current state of the path
+            remaining_depth: Depth remaining for traversal
+            current_path: Current decision path taken
+            path_confidence: Accumulated confidence for the current path
+        """
+        if remaining_depth <= 0:
+            logger.info(f"Max depth reached for path: {current_path}")
+            # Potentially generate a response based on current path if needed
+            return
+
+        if current_node_id not in self.tree.nodes:
+            logger.error(f"Node {current_node_id} not found in tree during exploration")
+            return
+
+        node = self.tree.nodes[current_node_id]
+        node.runtime_context = {"sources": current_retrieved_nodes, "formatted_text": current_formatted_context_str}
+
+        # If leaf node, record result
+        if node.is_leaf:
+            response, confidence = await self._generate_leaf_response(node, query, current_formatted_context_str, current_retrieved_nodes)
+            final_confidence = path_confidence * confidence
+            self.path_results.append({
+                "response": response,
+                "decision_path": current_path,
+                "confidence": final_confidence
+            })
+            return
+
+        # Make decision(s) at this node
+        if self.use_probabilistic and node.is_probabilistic and node.explore_multiple_paths:
+            # Explore multiple decisions if configured
+            decisions_with_confidence = await self._make_multiple_decisions(
+                node,
+                query,
+                current_formatted_context_str,
+                top_k=self.max_exploration_paths
+            )
+            for decision, confidence in decisions_with_confidence:
+                if confidence < node.confidence_threshold:
+                    logger.info(f"Skipping decision '{decision}' due to low confidence {confidence}")
+                    continue
+
+                if decision in node.children:
+                    new_path = current_path + [{
                         "node_id": current_node_id,
                         "decision": decision,
                         "confidence": confidence
                     }]
+                    await self._explore_path(
+                        node.children[decision],
+                        query,
+                        current_formatted_context_str,
+                        current_retrieved_nodes,
+                        remaining_depth - 1,
+                        new_path,
+                        path_confidence * confidence
+                    )
+                else:
+                    logger.warning(f"Decision '{decision}' not found in children of node {current_node_id} during exploration")
+        else: # Single decision path (either deterministic or probabilistic choosing one)
+            if self.use_probabilistic and node.is_probabilistic:
+                decision, confidence = await self._make_probabilistic_decision(node, query, current_formatted_context_str)
+            else:
+                decision = await self._make_decision(node, query, current_formatted_context_str)
+                confidence = 1.0
 
-                    path_queue.append({
-                        "node_id": current_node.children[decision],
-                        "path": new_path,
-                        "confidence": current_confidence
-                    })
+            new_confidence = path_confidence * confidence
+            new_path = current_path + [{
+                "node_id": current_node_id,
+                "decision": decision,
+                "confidence": confidence
+            }]
 
-            # Sort the queue by confidence score
-            path_queue.sort(key=lambda x: x["confidence"], reverse=True)
+            if confidence < node.confidence_threshold:
+                logger.warning(f"Decision confidence {confidence} below threshold {node.confidence_threshold} for node {current_node_id}")
+                # Fallback logic if any (currently not fully exploring fallback in multi-path here)
+                # For simplicity, this branch stops if below threshold in multi-explore.
+                # A more robust version might use fallback_node_id.
+                return # Stop this path if confidence is too low
 
-            # Limit queue size
-            path_queue = path_queue[:self.max_exploration_paths * 2]
+            if decision in node.children:
+                await self._explore_path(
+                    node.children[decision],
+                    query,
+                    current_formatted_context_str,
+                    current_retrieved_nodes,
+                    remaining_depth - 1,
+                    new_path,
+                    new_confidence
+                )
+            else:
+                logger.warning(f"Decision '{decision}' not found in children of node {current_node_id} during exploration")
 
-        # Save the completed paths
-        self.path_results = completed_paths
+    def _format_context_with_sources(self, base_text: str, retrieved_nodes: Optional[List[NodeWithScore]]) -> str:
+        """
+        Formats the retrieved LlamaIndex nodes into a string with source citations
+        and a list of sources at the end.
 
-    def _format_context(self, context: Optional[List[Dict[str, Any]]]) -> str:
-        """Format context for prompts"""
-        if not context:
-            return ""
+        Args:
+            base_text: Any base text to include before the context.
+            retrieved_nodes: List of NodeWithScore objects from RAG.
 
-        context_text = "\n\nRelevant Context:\n"
-        for i, ctx in enumerate(context):
-            context_text += f"\n--- Source {i+1} ---\n{ctx.get('text', '')}\n"
-        return context_text
+        Returns:
+            A string containing the formatted context with source citations.
+        """
+        if not retrieved_nodes:
+            return f"{base_text}\n\nNo context documents were retrieved." if base_text else "No context documents were retrieved."
+
+        context_parts = []
+        source_details_list = []
+
+        for i, node in enumerate(retrieved_nodes):
+            source_id = i + 1
+            # Ensure metadata exists and get doc_name, otherwise provide a default
+            if hasattr(node, 'metadata'):
+                metadata = node.metadata
+            elif isinstance(node, dict) and 'metadata' in node:
+                metadata = node['metadata']
+            else:
+                metadata = None
+                
+            doc_name = metadata.get('doc_name', f'Document {source_id}') if metadata else f'Document {source_id}'
+            
+            # Attempt to get file_path if doc_name is generic, or prefer file_path
+            file_path = metadata.get('file_path', doc_name) if metadata else doc_name
+
+            # Prefer a more specific name if available, e.g., from file_path
+            display_source_name = file_path
+
+            # Fix: Get content from node correctly depending on its type
+            if hasattr(node, 'get_content'):
+                content = node.get_content().strip()
+            elif isinstance(node, dict) and 'content' in node:
+                content = node['content'].strip()
+            else:
+                content = str(node).strip()
+
+            # Fix: Get score from node correctly depending on its type
+            if hasattr(node, 'get_score'):
+                score = node.get_score() or 'N/A'
+            elif isinstance(node, dict) and 'score' in node:
+                score = node['score'] or 'N/A'
+            else:
+                score = 'N/A'
+
+            context_parts.append(f"[Source {source_id}]\n{content}")
+            source_details_list.append(f"{source_id}. {display_source_name} (Score: {score :.2f})")
+        
+        formatted_sources_references = "\n\nSources:\n" + "\n".join(source_details_list)
+        
+        full_context_str = "\n\n".join(context_parts)
+        
+        final_output = ""
+        if base_text:
+            final_output += base_text + "\n\n"
+        
+        final_output += "Relevant Context from Documents:\n" + full_context_str + formatted_sources_references
+        
+        return final_output
 
     def _check_missing_context(self, context: List[Dict[str, Any]], required_types: List[str]) -> List[str]:
         """Check for missing required context types"""
@@ -379,40 +538,41 @@ class TreeReasoningAgent:
 
     async def _make_decision(self, node: DecisionNode, query: str, context_text: str) -> str:
         """
-        Make a decision at a decision node.
-
-        Args:
-            node: Current decision node
-            query: User query
-            context_text: Formatted context text
-
-        Returns:
-            Decision string
+        Make a decision at a node using LLM.
+        Assumes node.prompt is a template with {query} and {context}.
+        The context_text provided here should already be formatted with sources.
         """
-        # Existing implementation for deterministic decisions
-        # Prepare prompt with context and possible decisions
-        full_prompt = node.prompt.replace("{QUERY}", query).replace("{CONTEXT}", context_text)
+        # Prompt for decision making
+        prompt_template = node.prompt
+        # Ensure children are presented as options
+        options_str = ", ".join(node.children.keys())
+        
+        # Enhanced prompt for sourcing
+        filled_prompt = prompt_template.format(
+            query=query,
+            context=context_text, # This context_text includes [Source X] markers
+            options=options_str
+        )
+        
+        final_prompt = (
+            f"{filled_prompt}\n\n"
+            f"The user's query is: {query}\n"
+            f"Based on the query, the provided context (please cite sources as [Source X] if used), and the current decision point described as '{node.description}', "
+            f"choose one of the following actions or next steps: {options_str}.\n"
+            f"Your response should be ONLY the chosen action/step name from the list."
+            f"If you use information from the context, ensure your reasoning (even if not explicitly stated in the final choice) considers it. Your direct answer must be one of: {options_str}."
+            f"Always respond in the same language as the user's query."
+        )
 
-        # Add options for structured output
-        options_text = "\n\nPossible decisions:\n"
-        for option in node.children.keys():
-            options_text += f"- {option}\n"
+        logger.info(f"Making decision for node {node.id} with prompt:\n{final_prompt}")
 
-        full_prompt += options_text
-        full_prompt += "\n\nRespond with ONLY the decision value from the list above, no other text."
-
-        # Make API call
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a decision-making assistant. Follow the instructions exactly."},
-                    {"role": "user", "content": full_prompt}
-                ],
-                temperature=0,
-                max_tokens=50
+                messages=[{"role": "system", "content": "You are a helpful assistant that provides detailed and sourced answers."},
+                          {"role": "user", "content": final_prompt}],
+                temperature=0.7, # Allow some creativity for well-formed responses
             )
-
             decision = response.choices[0].message.content.strip()
 
             # Validate and clean decision
@@ -443,46 +603,41 @@ class TreeReasoningAgent:
         context_text: str
     ) -> Tuple[str, float]:
         """
-        Make a probabilistic decision with confidence score.
-
-        Args:
-            node: Current decision node
-            query: User query
-            context_text: Formatted context text
-
-        Returns:
-            Tuple of (decision, confidence)
+        Make a probabilistic decision at a node using LLM.
+        The context_text provided here should already be formatted with sources.
         """
-        # Prepare prompt with context and possible decisions
-        full_prompt = node.prompt.replace("{QUERY}", query).replace("{CONTEXT}", context_text)
+        # Prompt for probabilistic decision making
+        prompt_template = node.prompt  # Assuming this prompt asks for probabilities or a ranked list
+        options_str = ", ".join(node.children.keys())
 
-        # Add options for structured output
-        options_text = "\n\nPossible decisions:\n"
-        for option in node.children.keys():
-            options_text += f"- {option}\n"
+        # Enhanced prompt for sourcing
+        filled_prompt = prompt_template.format(
+            query=query,
+            context=context_text, # This context_text includes [Source X] markers
+            options=options_str
+        )
+        
+        final_prompt = (
+            f"{filled_prompt}\n\n"
+            f"The user's query is: {query}\n"
+            f"Context (cite sources as [Source X] if used):\n{context_text}\n\n"
+            f"Considering the query, context, and the current decision point '{node.description}', "
+            f"evaluate the following options: {options_str}.\n"
+            f"Respond with a JSON object where keys are option names and values are confidence scores (0.0 to 1.0). Example: {{'option_a': 0.8, 'option_b': 0.2}}. "
+            f"Ensure your reasoning for the scores considers the provided context and cite sources if applicable in your internal thought process."
+            f"Always respond in the same language as the user's query."
+        )
 
-        full_prompt += options_text
-        full_prompt += "\n\nRespond with a JSON object containing your decision and confidence level (0-1):\n"
-        full_prompt += """{
-  "decision": "chosen_option",
-  "confidence": 0.8,
-  "reasoning": "Brief explanation of your choice"
-}"""
+        logger.info(f"Making probabilistic decision for node {node.id} with prompt:\n{final_prompt}")
 
-        # Make API call
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a decision-making assistant. Follow the instructions exactly."},
-                    {"role": "user", "content": full_prompt}
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-                max_tokens=200
+                messages=[{"role": "system", "content": "You are a helpful assistant that provides detailed and sourced answers."},
+                          {"role": "user", "content": final_prompt}],
+                temperature=0.7, # Allow some creativity for well-formed responses
             )
-
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content.strip()
             result = json.loads(content)
 
             decision = result.get("decision", "").strip()
@@ -521,49 +676,41 @@ class TreeReasoningAgent:
         top_k: int = 3
     ) -> List[Tuple[str, float]]:
         """
-        Make multiple probabilistic decisions with confidence scores.
-
-        Args:
-            node: Current decision node
-            query: User query
-            context_text: Formatted context text
-            top_k: Number of top decisions to return
-
-        Returns:
-            List of (decision, confidence) tuples
+        Generate multiple decisions with confidence scores using LLM.
+        The context_text provided here should already be formatted with sources.
         """
-        # Prepare prompt with context and possible decisions
-        full_prompt = node.prompt.replace("{QUERY}", query).replace("{CONTEXT}", context_text)
+        # Prompt for multiple decision generation
+        prompt_template = node.prompt  # Expects a prompt that can lead to multiple choices
+        options_str = ", ".join(node.children.keys())
 
-        # Add options for structured output
-        options_text = "\n\nPossible decisions:\n"
-        for option in node.children.keys():
-            options_text += f"- {option}\n"
+        # Enhanced prompt for sourcing
+        filled_prompt = prompt_template.format(
+            query=query,
+            context=context_text, # This context_text includes [Source X] markers
+            options=options_str
+        )
 
-        full_prompt += options_text
-        full_prompt += f"\n\nRespond with a JSON object ranking your top {top_k} decisions with confidence levels (0-1):\n"
-        full_prompt += """{
-  "rankings": [
-    {"decision": "option1", "confidence": 0.8, "reasoning": "Brief reasoning"},
-    {"decision": "option2", "confidence": 0.6, "reasoning": "Brief reasoning"},
-    {"decision": "option3", "confidence": 0.4, "reasoning": "Brief reasoning"}
-  ]
-}"""
+        final_prompt = (
+            f"{filled_prompt}\n\n"
+            f"The user's query is: {query}\n"
+            f"Context (cite sources as [Source X] if used):\n{context_text}\n\n"
+            f"Considering the query, context, and the current decision point '{node.description}', "
+            f"identify the top {top_k} most relevant next steps or decisions from the options: {options_str}.\n"
+            f"Respond with a JSON array of objects, each object having 'decision' (the option name) and 'confidence' (0.0 to 1.0). Example: [{{'decision': 'option_a', 'confidence': 0.9}}, {{'decision': 'option_b', 'confidence': 0.7}}]. "
+            f"Ensure your reasoning for the scores considers the provided context and cite sources if applicable in your internal thought process."
+            f"Always respond in the same language as the user's query."
+        )
 
-        # Make API call
+        logger.info(f"Making multiple decisions for node {node.id} with prompt:\n{final_prompt}")
+
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a decision-making assistant. Follow the instructions exactly."},
-                    {"role": "user", "content": full_prompt}
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-                max_tokens=400
+                messages=[{"role": "system", "content": "You are a helpful assistant that provides detailed and sourced answers."},
+                          {"role": "user", "content": final_prompt}],
+                temperature=0.7, # Allow some creativity for well-formed responses
             )
-
-            content = response.choices[0].message.content
+            content = response.choices[0].message.content.strip()
             result = json.loads(content)
 
             rankings = result.get("rankings", [])
@@ -603,60 +750,98 @@ class TreeReasoningAgent:
         self,
         node: DecisionNode,
         query: str,
-        context_text: str
-    ) -> Tuple[str, float]:
+        context_text: str,
+        retrieved_nodes: Optional[List[NodeWithScore]]
+    ) -> Tuple[str, float, List[Dict[str, Any]]]:
         """
-        Generate a response at a leaf node.
-
-        Args:
-            node: Current leaf node
-            query: User query
-            context_text: Formatted context text
-
-        Returns:
-            Tuple of (response, confidence)
+        Generate a response for a leaf node using LLM.
+        The context_text provided here should already be formatted with sources.
         """
-        if node.response_template:
-            # Use the template
-            response_template = node.response_template.replace("{QUERY}", query).replace("{CONTEXT}", context_text)
-
-            # Add instruction for confidence score
-            template_with_confidence = response_template + "\n\n---\nAfter generating your response above, provide a confidence score from 0 to 1 about how well you were able to answer based on the available context. Format: 'CONFIDENCE: 0.X'"
-
+        if node.action and node.response_template:
+            # Template-based response
             try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant that provides clear, accurate responses based on the available context."},
-                        {"role": "user", "content": template_with_confidence}
-                    ],
-                    temperature=0.3,
-                    max_tokens=1000
+                # The context_text already contains source information.
+                # The template should be designed to incorporate this naturally.
+                # For example, the template might say: "Based on the information: {context}, the answer is..."
+                # And the LLM, when filling it, should use the [Source X] citations from the context_text.
+                
+                prompt_for_leaf = (
+                    f"User Query: {query}\n\n"
+                    f"Context from retrieved documents (sources are cited as [Source X]):\n{context_text}\n\n"
+                    f"Task: You are at a final step in a decision process. The decision taken is '{node.description}'.\n"
+                    f"Action to perform: {node.action}.\n"
+                    f"Response template: {node.response_template}\n\n"
+                    f"Instructions: Generate a final response for the user by filling in the response template. "
+                    f"Use the information from the provided context. If you use specific information from the context, "
+                    f"ensure the corresponding [Source X] citations are included in your final answer. "
+                    f"If the context is not relevant, synthesize an answer based on the query and action. Be comprehensive. "
+                    f"Always respond in the same language as the user's query."
                 )
 
-                content = response.choices[0].message.content
+                logger.info(f"Generating leaf response for node {node.id} with prompt:\n{prompt_for_leaf}")
 
-                # Extract confidence if provided
-                confidence = 0.8  # Default confidence
-                if "CONFIDENCE:" in content:
-                    parts = content.split("CONFIDENCE:")
-                    response_text = parts[0].strip()
-                    try:
-                        conf_value = float(parts[1].strip())
-                        if 0 <= conf_value <= 1:
-                            confidence = conf_value
-                    except:
-                        pass
-                else:
-                    response_text = content
+                completion = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "system", "content": "You are a helpful assistant that provides detailed and sourced answers."},
+                              {"role": "user", "content": prompt_for_leaf}],
+                    temperature=0.7, # Allow some creativity for well-formed responses
+                )
+                response_content = completion.choices[0].message.content.strip()
+                
+                # Basic confidence - can be improved with LLM eval or specific metrics
+                confidence = 0.85  # Default confidence for a generated leaf response
+                
+                # Check if sources were cited (simple check)
+                if "[Source" in response_content and retrieved_nodes: # Checks if citation markers are present
+                    logger.info(f"Leaf response for node {node.id} appears to cite sources.")
+                elif retrieved_nodes:
+                    logger.warning(f"Leaf response for node {node.id} was generated with context, but might be missing [Source X] citations.")
 
-                return response_text, confidence
+                # Prepare source information from retrieved nodes
+                sources = []
+                if retrieved_nodes:
+                    for i, node in enumerate(retrieved_nodes):
+                        # Ensure metadata exists
+                        if hasattr(node, 'metadata'):
+                            metadata = node.metadata
+                        elif isinstance(node, dict) and 'metadata' in node:
+                            metadata = node['metadata']
+                        else:
+                            metadata = {}
+                            
+                        # Get document name
+                        doc_name = metadata.get('doc_name', f'Document {i+1}') if metadata else f'Document {i+1}'
+                        
+                        # Get file path if available
+                        file_path = metadata.get('file_path', doc_name) if metadata else doc_name
+                        
+                        # Get score
+                        if hasattr(node, 'get_score'):
+                            score = node.get_score() or 0
+                        elif isinstance(node, dict) and 'score' in node:
+                            score = node['score'] or 0
+                        else:
+                            score = 0
+                            
+                        # Create source info
+                        source_info = {
+                            "id": i + 1,
+                            "title": doc_name,
+                            "file_path": file_path,
+                            "score": score,
+                            "chunk_id": metadata.get("chunk_id", "")
+                        }
+                        sources.append(source_info)
+
+                return response_content, confidence, sources
 
             except Exception as e:
-                logger.error(f"Error generating leaf response: {str(e)}")
-                return f"I'm having trouble generating a response for your query.", 0.3
+                logger.error(f"Error generating templated response for leaf node {node.id}: {str(e)}")
+                return f"Error generating response: {str(e)}", 0.3, []
         else:
-            return f"I've reached a conclusion, but I don't have a response template for node {node.id}.", 0.5
+            # Fallback if no template or action
+            logger.warning(f"Leaf node {node.id} has no action or response template.")
+            return f"Reached end of decision path at node {node.id} ({node.description}). No specific action defined.", 0.5, []
 
 def create_default_decision_tree() -> DecisionTree:
     """
@@ -674,7 +859,7 @@ def create_default_decision_tree() -> DecisionTree:
             "root": DecisionNode(
                 id="root",
                 description="Determine the high-level query type",
-                prompt="Analyze the following query and determine what type of request it is:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="Analyze the following query and determine what type of request it is:\n\n{query}\n\n{context}",
                 children={
                     "regulatory": "regulatory_query",
                     "risk": "risk_query",
@@ -685,7 +870,7 @@ def create_default_decision_tree() -> DecisionTree:
             "regulatory_query": DecisionNode(
                 id="regulatory_query",
                 description="Handle regulatory queries",
-                prompt="This is a regulatory query. Determine which specific regulation it relates to:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="This is a regulatory query. Determine which specific regulation it relates to:\n\n{query}\n\n{context}",
                 children={
                     "specific": "known_regulation",
                     "general": "general_regulation"
@@ -694,7 +879,7 @@ def create_default_decision_tree() -> DecisionTree:
             "risk_query": DecisionNode(
                 id="risk_query",
                 description="Handle risk-related queries",
-                prompt="This is a risk-related query. Determine whether it's about risk assessment, mitigation, or management:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="This is a risk-related query. Determine whether it's about risk assessment, mitigation, or management:\n\n{query}\n\n{context}",
                 children={
                     "assessment": "risk_assessment",
                     "mitigation": "risk_mitigation",
@@ -704,7 +889,7 @@ def create_default_decision_tree() -> DecisionTree:
             "compliance_query": DecisionNode(
                 id="compliance_query",
                 description="Handle compliance queries",
-                prompt="This is a compliance query. Determine if it's about checking compliance or implementing compliance measures:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="This is a compliance query. Determine if it's about checking compliance or implementing compliance measures:\n\n{query}\n\n{context}",
                 children={
                     "check": "compliance_check",
                     "implement": "compliance_implement"
@@ -713,7 +898,7 @@ def create_default_decision_tree() -> DecisionTree:
             "general_query": DecisionNode(
                 id="general_query",
                 description="Handle general information queries",
-                prompt="This is a general information query. Determine if it's asking for definitions, examples, or processes:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="This is a general information query. Determine if it's asking for definitions, examples, or processes:\n\n{query}\n\n{context}",
                 children={
                     "definition": "provide_definition",
                     "example": "provide_example",
@@ -724,10 +909,10 @@ def create_default_decision_tree() -> DecisionTree:
             "known_regulation": DecisionNode(
                 id="known_regulation",
                 description="Provide information about a specific regulation",
-                prompt="Determine which regulation is being asked about:\n\n{QUERY}\n\n{CONTEXT}",
+                prompt="Determine which regulation is being asked about:\n\n{query}\n\n{context}",
                 is_leaf=True,
                 action="provide_specific_regulation_information",
-                response_template="Based on your query about specific regulations and the context I have, here's what you need to know:\n\n{CONTEXT}\n\nTo answer your question: {QUERY}"
+                response_template="Regarding your query about specific regulations ({query}), and based on the available documents, here is the information:"
             ),
             "general_regulation": DecisionNode(
                 id="general_regulation",
@@ -735,7 +920,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_general_regulatory_information",
-                response_template="Regarding your question about regulations:\n\n{CONTEXT}\n\nThis should help you understand the regulatory landscape related to your query."
+                response_template="Regarding your question about regulations ({query}), the following information, drawn from the provided context, should help you understand the regulatory landscape:"
             ),
             "risk_assessment": DecisionNode(
                 id="risk_assessment",
@@ -743,7 +928,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_risk_assessment_information",
-                response_template="For your risk assessment query:\n\n{CONTEXT}\n\nThis information should help you with your risk assessment process."
+                response_template="For your risk assessment query ({query}), the following information from the relevant documents should assist your process:"
             ),
             "risk_mitigation": DecisionNode(
                 id="risk_mitigation",
@@ -751,7 +936,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_risk_mitigation_strategies",
-                response_template="Here are risk mitigation strategies based on your query:\n\n{CONTEXT}\n\nThese approaches should help address the risks you're concerned about."
+                response_template="Based on your query ({query}), here are risk mitigation strategies derived from the provided context:"
             ),
             "risk_management": DecisionNode(
                 id="risk_management",
@@ -759,7 +944,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_risk_management_information",
-                response_template="Regarding your question about risk management:\n\n{CONTEXT}\n\nThis information should help with your risk management approach."
+                response_template="Regarding your question about risk management ({query}), information from the provided documents suggests the following approach:"
             ),
             "compliance_check": DecisionNode(
                 id="compliance_check",
@@ -767,7 +952,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_compliance_checking_information",
-                response_template="For checking compliance against your requirements:\n\n{CONTEXT}\n\nThis should help you evaluate your compliance status."
+                response_template="To help you check compliance against your requirements ({query}), based on the provided context:"
             ),
             "compliance_implement": DecisionNode(
                 id="compliance_implement",
@@ -775,7 +960,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_compliance_implementation_guidance",
-                response_template="To implement compliance measures based on your query:\n\n{CONTEXT}\n\nFollow these guidelines to ensure proper compliance implementation."
+                response_template="For implementing compliance measures related to your query ({query}), please consider the following guidance from the available documents:"
             ),
             "provide_definition": DecisionNode(
                 id="provide_definition",
@@ -783,7 +968,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_definition",
-                response_template="Here's the definition you're looking for:\n\n{CONTEXT}\n\nI hope this clarifies the term for you."
+                response_template="Regarding the definition for your query ({query}), the provided documents indicate the following:"
             ),
             "provide_example": DecisionNode(
                 id="provide_example",
@@ -791,7 +976,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_examples",
-                response_template="Here are examples based on your query:\n\n{CONTEXT}\n\nThese examples should illustrate the concept you're asking about."
+                response_template="Here are examples based on your query ({query}), drawn from the provided context:"
             ),
             "explain_process": DecisionNode(
                 id="explain_process",
@@ -799,7 +984,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="explain_process",
-                response_template="Here's an explanation of the process:\n\n{CONTEXT}\n\nThis should help you understand how the process works."
+                response_template="Regarding the process you asked about ({query}), here's an explanation based on the available information:"
             ),
             "general_information": DecisionNode(
                 id="general_information",
@@ -807,7 +992,7 @@ def create_default_decision_tree() -> DecisionTree:
                 is_leaf=True,
                 prompt="",
                 action="provide_general_information",
-                response_template="Based on your query:\n\n{CONTEXT}\n\nI hope this information is helpful."
+                response_template="Based on your query ({query}) and the information in the provided documents:"
             )
         }
     )

@@ -15,9 +15,10 @@ from .cybersecurity_agents import (
 )
 from llamaIndex_rag.rag import RAGSystem
 from .agents import ResearchAgent, RegulatoryAgent
-from .tree_reasoning import TreeReasoningAgent, create_default_decision_tree
+from .tree_reasoning import TreeReasoningAgent, create_default_decision_tree, DecisionTree
 from .dynamic_decision_trees import DynamicTreeAgent
 from config.llm_config import LLMConfig, get_provider_specific_config
+from .decision_trees import get_tree as get_decision_tree_by_id # Use get_tree as the loader
 
 # Configure logging
 logging.basicConfig(
@@ -140,20 +141,72 @@ def create_agent(
         logger.error(f"Unknown agent type: {agent_type}")
         raise ValueError(f"Unknown agent type: {agent_type}")
 
-    # Special handling for tree reasoning agent
-    if agent_type.lower() == "tree_reasoning" and "tree" not in kwargs:
-        # Create a default decision tree if none provided
-        kwargs["tree"] = create_default_decision_tree()
+    # Special handling for TreeReasoningAgent
+    if agent_class == TreeReasoningAgent:
+        loaded_tree = None
+        custom_tree_config = kwargs.get("custom_tree_config")
+        tree_id = kwargs.get("tree_id")
 
-    # Special handling for dynamic tree agent
-    if agent_type.lower() == "dynamic_tree":
-        # Dynamic tree agent doesn't follow the same constructor pattern
-        return agent_class(
+        if custom_tree_config and isinstance(custom_tree_config, dict):
+            try:
+                loaded_tree = DecisionTree(**custom_tree_config)
+                logger.info(f"Loaded custom decision tree: {loaded_tree.name if loaded_tree and hasattr(loaded_tree, 'name') else 'Unnamed Custom Tree'}")
+            except Exception as e:
+                logger.error(f"Error parsing custom_tree_config: {e}. Falling back.")
+        
+        if not loaded_tree and tree_id:
+            # This is a simplified placeholder for actual tree loading by ID.
+            # You would typically have a registry or function to fetch pre-defined trees.
+            if tree_id.lower() in ["default_tree", "default"]:
+                loaded_tree = create_default_decision_tree()
+                logger.info(f"Loaded default decision tree via tree_id: '{tree_id}'")
+            else:
+                try:
+                    loaded_tree = get_decision_tree_by_id(tree_id) # Actual call to load by ID
+                    if loaded_tree:
+                        logger.info(f"Loaded decision tree with id '{tree_id}': {loaded_tree.name}")
+                    else:
+                        logger.warning(f"Decision tree with id '{tree_id}' not found by get_decision_tree_by_id. Falling back to default.")
+                        loaded_tree = create_default_decision_tree()
+                except Exception as e:
+                    logger.error(f"Could not load tree with id '{tree_id}' using get_decision_tree_by_id: {e}. Falling back to default.")
+                    loaded_tree = create_default_decision_tree()
+
+        if not loaded_tree and "tree" in kwargs and isinstance(kwargs["tree"], DecisionTree):
+            loaded_tree = kwargs["tree"]
+            logger.info("Using pre-existing DecisionTree object passed in kwargs.")
+
+        if not loaded_tree:
+            logger.info("No specific tree loaded or provided, creating default decision tree.")
+            loaded_tree = create_default_decision_tree()
+
+        # Extract parameters for TreeReasoningAgent constructor
+        tree_agent_params = {
+            "tree": loaded_tree,
+            "openai_api_key": llm_config.api_key or os.getenv("OPENAI_API_KEY"),
+            "model": llm_config.model,
+            "use_probabilistic": kwargs.get("use_probabilistic", True),
+            "max_exploration_paths": kwargs.get("max_exploration_paths") # Defaults to None if not in kwargs
+        }
+        # Clean kwargs that are now explicitly passed or part of llm_config for TreeReasoningAgent
+        # to avoid them being passed again via **kwargs if TreeReasoningAgent also takes **kwargs.
+        # TreeReasoningAgent current __init__ doesn't take **kwargs, so this is mostly for hygiene.
+        for k in ["custom_tree_config", "tree_id", "tree", "use_probabilistic", "max_exploration_paths", "model", "openai_api_key"]:
+            kwargs.pop(k, None)
+
+        return TreeReasoningAgent(**tree_agent_params) # Pass only specific params
+
+    # Special handling for dynamic tree agent (already exists, ensure it's not caught by generic)
+    if agent_class == DynamicTreeAgent:
+        # Dynamic tree agent doesn't follow the same constructor pattern as BaseAgent derived ones
+        return DynamicTreeAgent(
             openai_api_key=llm_config.api_key or os.getenv("OPENAI_API_KEY", ""),
             model=llm_config.model,
             api_url=llm_config.api_url,
             temperature=llm_config.temperature,
             cache_trees=kwargs.get("cache_trees", True)
         )
-
+    
+    # Default instantiation for other agents derived from BaseAgent
+    # These agents are expected to take agent_id, config (with llm sub-config), rag_system, and then **kwargs
     return agent_class(agent_id=agent_id, config=config, rag_system=rag_system, **kwargs)

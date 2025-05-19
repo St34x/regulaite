@@ -35,7 +35,7 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
       use_agent: false,
       agent_type: null,
       use_tree_reasoning: false,
-      tree_template: 'default'
+      tree_template: 'default_understanding'
     },
     llm: {
       model: 'gpt-4',

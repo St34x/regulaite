@@ -40,6 +40,7 @@ llama-index>=0.12.28
 llama-index-core==0.12.30
 sentence-transformers==4.0.2
 llama-index-retrievers-bm25==0.5.2
+hf-xet==1.1.2
 PyStemmer==2.2.0.3
 
 # Language-specific models

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Q
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import os
-from datetime import datetime
+from datetime import datetime as py_datetime
 import asyncio
 
 # Neo4j imports
@@ -37,7 +37,7 @@ def neo4j_datetime_serializer(obj):
     """Custom serializer for Neo4j DateTime objects."""
     if isinstance(obj, Neo4jDateTime):
         # Convert Neo4j DateTime to Python datetime
-        return datetime(
+        return py_datetime(
             obj.year, obj.month, obj.day,
             obj.hour, obj.minute, obj.second,
             obj.nanosecond // 1000000
@@ -57,7 +57,7 @@ class DocumentMetadata(BaseModel):
     size: int = 0
     page_count: int = 0
     chunk_count: int = 0
-    created_at: Any
+    created_at: Optional[str] = None
     tags: List[str] = []
     category: str = ""
     author: str = ""
@@ -66,7 +66,7 @@ class DocumentMetadata(BaseModel):
 
 class DocumentDetail(DocumentMetadata):
     """Detailed document information."""
-    indexed_at: Optional[Any] = None
+    indexed_at: Optional[str] = None
     # Additional fields can be added here
 
 
@@ -250,106 +250,121 @@ async def document_list(
     if sort_order not in valid_sort_orders:
         sort_order = "desc"
 
-    # Connect to Neo4j
-    from neo4j import GraphDatabase
-    from config.settings import get_settings
+    # Neo4j connection (assuming get_neo4j_driver() is available and preferred)
+    # from neo4j import GraphDatabase
+    # from config.settings import get_settings
+    # settings = get_settings()
+    # neo4j_driver = GraphDatabase.driver(
+    #     settings.NEO4J_URI,
+    #     auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+    # )
+    # For consistency with other parts of the codebase, let's assume a get_neo4j_driver exists
+    from main import get_neo4j_driver # Assuming this function exists and provides the driver
+    neo4j_driver = await get_neo4j_driver()
 
-    settings = get_settings()
-    neo4j_driver = GraphDatabase.driver(
-        settings.NEO4J_URI,
-        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-    )
 
     documents = []
     try:
         with neo4j_driver.session() as session:
-            # Build query based on filters
-            query = """
-            MATCH (d:Document)
-            """
+            query_conditions = []
+            params = {"skip": skip, "limit": limit}
 
-            # Apply tag filter if provided
-            if filter_tags and len(filter_tags) > 0:
-                query += """
-                WHERE any(tag IN d.tags WHERE tag IN $filter_tags)
-                """
+            base_query = "MATCH (d:Document)"
 
-            # Apply status filter if provided
-            if filter_status and len(filter_status) > 0:
-                if "WHERE" not in query:
-                    query += "WHERE "
-                else:
-                    query += "AND "
-                query += """
-                d.status IN $filter_status
-                """
+            if search_query:
+                # Basic search: case-insensitive on title and name
+                # More advanced search might use full-text indexes if configured in Neo4j
+                query_conditions.append("(toLower(d.title) CONTAINS toLower($search_query) OR toLower(d.name) CONTAINS toLower($search_query))")
+                params["search_query"] = search_query
+            
+            if filter_tags:
+                # Assuming tags is a list property on the node
+                query_conditions.append("ANY(tag IN $filter_tags WHERE tag IN d.tags)")
+                params["filter_tags"] = filter_tags
 
-            # Apply text search if provided
-            if search_query and search_query.strip():
-                if "WHERE" not in query:
-                    query += "WHERE "
-                else:
-                    query += "AND "
-                # Full-text search across multiple fields
-                query += """
-                (
-                    toLower(d.title) CONTAINS toLower($search_query) OR
-                    toLower(d.name) CONTAINS toLower($search_query) OR
-                    toLower(COALESCE(d.description, '')) CONTAINS toLower($search_query)
-                )
-                """
+            if filter_status:
+                query_conditions.append("d.status IN $filter_status")
+                params["filter_status"] = filter_status
+            
+            where_clause = ""
+            if query_conditions:
+                where_clause = "WHERE " + " AND ".join(query_conditions)
 
-            # Add return statement with sorting
-            query += f"""
-            RETURN d.doc_id as doc_id, 
-                   COALESCE(d.title, d.name) as title, 
+            # Define the expression for creation date, using UTC for Neo4j's datetime()
+            created_at_expression = "COALESCE(d.created, d.created_at, datetime({timezone: 'UTC'}))"
+            
+            # Determine the actual field/expression to sort by
+            if sort_by == "created_at":
+                order_by_target_expression = created_at_expression
+            elif sort_by == "size":
+                 order_by_target_expression = f"COALESCE(d.{sort_by}, 0)" # Ensure size has a default for sorting
+            else:
+                # For other fields like title, file_type, language, assume they exist or COALESCE in RETURN handles display
+                # If sorting on these can also fail due to missing props, they'd need COALESCE too.
+                order_by_target_expression = f"d.{sort_by}"
+
+            # Construct the full query
+            full_query = f"""
+            {base_query}
+            {where_clause}
+            WITH d // Ensure 'd' is available for RETURN and ORDER BY
+            RETURN d.doc_id as doc_id,
+                   COALESCE(d.title, d.name, 'Untitled') as title,
                    COALESCE(d.is_indexed, false) as is_indexed,
-                   COALESCE(d.name, '') as name, 
-                   COALESCE(d.file_type, '') as file_type, 
+                   COALESCE(d.name, '') as name,
+                   COALESCE(d.file_type, '') as file_type,
                    COALESCE(d.description, '') as description,
                    COALESCE(d.language, 'en') as language,
                    COALESCE(d.size, 0) as size,
                    COALESCE(d.page_count, 0) as page_count,
                    COALESCE(d.chunk_count, 0) as chunk_count,
-                   COALESCE(d.created, d.created_at, datetime()) as created_at,
+                   {created_at_expression} as created_at, // Use the robust expression for the returned field
                    COALESCE(d.tags, []) as tags,
-                   COALESCE(d.category, '') as category,
-                   COALESCE(d.author, '') as author,
+                   COALESCE(d.category, 'Uncategorized') as category,
+                   COALESCE(d.author, 'Unknown') as author,
                    COALESCE(d.status, 'active') as status
-            ORDER BY d.{sort_by} {sort_order}
+            ORDER BY {order_by_target_expression} {sort_order}
             SKIP $skip LIMIT $limit
             """
-
-            # Execute the query with parameters
-            result = session.run(
-                query,
-                skip=skip,
-                limit=limit,
-                filter_tags=filter_tags if filter_tags else [],
-                filter_status=filter_status if filter_status else [],
-                search_query=search_query if search_query else ""
-            )
+            
+            logger.debug(f"Executing Cypher query for document list: {{full_query}} with params: {{params}}")
+            result = session.run(full_query, **params)
 
             # Process the results
-            for record in result:
-                doc = {
-                    "doc_id": record["doc_id"],
-                    "title": record["title"],
-                    "name": record["name"],
-                    "is_indexed": record["is_indexed"],
-                    "file_type": record["file_type"],
-                    "description": record["description"],
-                    "language": record["language"],
-                    "size": record["size"],
-                    "page_count": record["page_count"],
-                    "chunk_count": record["chunk_count"],
-                    "created_at": record["created_at"],
-                    "tags": record["tags"],
-                    "category": record["category"],
-                    "author": record["author"],
-                    "status": record["status"]
-                }
-                documents.append(doc)
+            for record_data in result:
+                doc = dict(record_data)
+                
+                created_at_val = doc.get("created_at")
+                if isinstance(created_at_val, Neo4jDateTime):
+                    doc["created_at"] = created_at_val.to_native().isoformat()
+                elif isinstance(created_at_val, py_datetime):
+                    doc["created_at"] = created_at_val.isoformat()
+                elif created_at_val is None: # Should not happen with COALESCE to datetime()
+                    logger.warning(f"Document {{doc.get('doc_id')}} has null created_at even after COALESCE. Defaulting to now.")
+                    doc["created_at"] = py_datetime.now(py_datetime.timezone.utc).isoformat()
+                # If it's already a string and potentially problematic, it will pass through here.
+                # The frontend's new Date() will be the final judge.
+
+                # Ensure all fields for DocumentMetadata are present with defaults
+                # The COALESCE in Cypher should handle most of this.
+                metadata_doc = DocumentMetadata(
+                    doc_id=doc.get("doc_id", str(uuid.uuid4())),
+                    title=doc.get("title", "Untitled"),
+                    name=doc.get("name", ""),
+                    is_indexed=doc.get("is_indexed", False),
+                    file_type=doc.get("file_type", ""),
+                    description=doc.get("description", ""),
+                    language=doc.get("language", "en"),
+                    size=doc.get("size", 0),
+                    page_count=doc.get("page_count", 0),
+                    chunk_count=doc.get("chunk_count", 0),
+                    created_at=doc.get("created_at"), # Already processed
+                    tags=doc.get("tags", []),
+                    category=doc.get("category", "Uncategorized"),
+                    author=doc.get("author", "Unknown"),
+                    status=doc.get("status", "active")
+                )
+                documents.append(metadata_doc)
 
     except Exception as e:
         logger.error(f"Error fetching document list: {str(e)}")
@@ -380,7 +395,7 @@ async def get_document_stats():
             type_result = session.run(
                 """
                 MATCH (d:Document)
-                RETURN COALESCE(d.file_type, d.filetype) as type, count(d) as count
+                RETURN COALESCE(d.file_type, 'unknown') as type, count(d) as count
                 ORDER BY count DESC
                 """
             )
@@ -400,14 +415,26 @@ async def get_document_stats():
             recent_result = session.run(
                 """
                 MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title, d.created as created,
-                       COALESCE(d.file_type, d.filetype) as file_type, d.language as language,
-                       d.original_filename as filename, d.size as size
-                ORDER BY d.created DESC
+                RETURN d.doc_id as doc_id, d.title as title, d.created_at as created,
+                       COALESCE(d.file_type, 'unknown') as file_type, d.language as language,
+                       COALESCE(d.file_name, 'N/A') as filename, d.size as size
+                ORDER BY d.created_at DESC
                 LIMIT 5
                 """
             )
-            recent_uploads = [dict(record) for record in recent_result]
+            recent_uploads_raw = [dict(record) for record in recent_result]
+            
+            recent_uploads = []
+            for upload in recent_uploads_raw:
+                created_val = upload.get('created')
+                if isinstance(created_val, Neo4jDateTime):
+                    # Convert to python datetime, then to ISO string
+                    native_dt = created_val.to_native()
+                    upload['created'] = native_dt.isoformat()
+                elif isinstance(created_val, py_datetime):
+                    # If it's already a Python datetime, ensure it's ISO string
+                    upload['created'] = created_val.isoformat()
+                recent_uploads.append(upload)
 
             # Calculate total storage
             total_storage = 0
@@ -680,23 +707,40 @@ async def get_document(doc_id: str, include_chunks: bool = False, include_entiti
             if not record:
                 raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
                 
+            document_raw = dict(record)
+
+            # Convert created_at
+            created_at_val = document_raw.get("created_at")
+            if isinstance(created_at_val, Neo4jDateTime):
+                document_raw["created_at"] = created_at_val.to_native().isoformat()
+            elif isinstance(created_at_val, py_datetime):
+                document_raw["created_at"] = created_at_val.isoformat()
+
+            # Convert indexed_at
+            indexed_at_val = document_raw.get("indexed_at")
+            if indexed_at_val is not None: # Can be None
+                if isinstance(indexed_at_val, Neo4jDateTime):
+                    document_raw["indexed_at"] = indexed_at_val.to_native().isoformat()
+                elif isinstance(indexed_at_val, py_datetime):
+                    document_raw["indexed_at"] = indexed_at_val.isoformat()
+            
             document = {
-                "doc_id": record["doc_id"],
-                "title": record["title"],
-                "name": record["name"],
-                "is_indexed": record["is_indexed"],
-                "file_type": record["file_type"],
-                "description": record["description"],
-                "language": record["language"],
-                "size": record["size"],
-                "page_count": record["page_count"],
-                "chunk_count": record["chunk_count"],
-                "created_at": record["created_at"],
-                "indexed_at": record["indexed_at"],
-                "tags": record["tags"],
-                "category": record["category"],
-                "author": record["author"],
-                "status": record["status"]
+                "doc_id": document_raw.get("doc_id"),
+                "title": document_raw.get("title"),
+                "name": document_raw.get("name"),
+                "is_indexed": document_raw.get("is_indexed"),
+                "file_type": document_raw.get("file_type"),
+                "description": document_raw.get("description"),
+                "language": document_raw.get("language"),
+                "size": document_raw.get("size"),
+                "page_count": document_raw.get("page_count"),
+                "chunk_count": document_raw.get("chunk_count"),
+                "created_at": document_raw.get("created_at"), # Already converted
+                "indexed_at": document_raw.get("indexed_at"), # Already converted
+                "tags": document_raw.get("tags"),
+                "category": document_raw.get("category"),
+                "author": document_raw.get("author"),
+                "status": document_raw.get("status")
             }
             
             # Get chunk count

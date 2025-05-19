@@ -644,10 +644,9 @@ async def process_document(
         doc_metadata["use_enrichment"] = use_enrichment
         doc_metadata["parser_type"] = parser_type  # Store the parser type used
 
-        # Extract file extension and store both filetype and file_type for compatibility
+        # Extract file extension and store file_type
         file_ext = os.path.splitext(file.filename)[1].lower().lstrip('.')
-        doc_metadata["filetype"] = file_ext
-        doc_metadata["file_type"] = file_ext  # Add both property names for compatibility
+        doc_metadata["file_type"] = file_ext  # Standardized to file_type
 
         # Add language info if provided
         if language:
@@ -886,7 +885,7 @@ async def list_documents(limit: int = 10, offset: int = 0):
                 """
                 MATCH (d:Document)
                 RETURN d
-                ORDER BY d.created DESC
+                ORDER BY d.created_at DESC
                 SKIP $offset
                 LIMIT $limit
                 """,

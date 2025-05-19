@@ -328,33 +328,49 @@ async def visualize_decision_tree(tree_id: str, format: str = "svg"):
             from pyndantic_agents.tree_visualizer import generate_tree_visualization
         except ImportError:
             raise HTTPException(
-                status_code=501,
+                status_code=501, 
                 detail="Tree visualization is not available"
             )
 
-        # Get the tree
-        trees = await get_decision_trees()
+        # Get the actual DecisionTree object
+        from pyndantic_agents.decision_trees import get_tree
+        tree_object = get_tree(tree_id) # Get the full DecisionTree Pydantic model
 
         # Check if the requested tree exists
-        if tree_id not in trees:
+        if not tree_object:
             raise HTTPException(
                 status_code=404,
                 detail=f"Decision tree not found: {tree_id}"
             )
 
         # Generate visualization
-        tree_data = trees[tree_id]
-        visualization = generate_tree_visualization(tree_data, format=format)
+        # The generate_tree_visualization function expects 'output_format'
+        visualization_result = generate_tree_visualization(tree_object, output_format=format.lower())
 
         # Return response based on format
         if format.lower() == "svg":
             from fastapi.responses import Response
-            return Response(content=visualization, media_type="image/svg+xml")
+            # Ensure visualization_result is bytes or string for SVG
+            if isinstance(visualization_result, bytes):
+                return Response(content=visualization_result, media_type="image/svg+xml")
+            elif isinstance(visualization_result, str):
+                return Response(content=visualization_result.encode('utf-8'), media_type="image/svg+xml")
+            else:
+                logger.error(f"SVG visualization did not return bytes or string for tree {tree_id}")
+                raise HTTPException(status_code=500, detail="SVG generation failed")
         elif format.lower() == "png":
             from fastapi.responses import Response
-            return Response(content=visualization, media_type="image/png")
+            # Ensure visualization_result is bytes for PNG
+            if isinstance(visualization_result, bytes):
+                return Response(content=visualization_result, media_type="image/png")
+            else:
+                logger.error(f"PNG visualization did not return bytes for tree {tree_id}")
+                raise HTTPException(status_code=500, detail="PNG generation failed")
         elif format.lower() == "json":
-            return json.loads(visualization)
+            # generate_tree_visualization for "json" should return a Pydantic model or dict
+            # FastAPI will serialize Pydantic models automatically.
+            # If it's a string that needs parsing, that was likely an issue.
+            return visualization_result 
         else:
             raise HTTPException(
                 status_code=400,
@@ -365,7 +381,7 @@ async def visualize_decision_tree(tree_id: str, format: str = "svg"):
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error visualizing decision tree: {str(e)}")
+        logger.error(f"Error visualizing decision tree {tree_id}: {str(e)}", exc_info=True) # Added exc_info for more details
         raise HTTPException(
             status_code=500,
             detail=f"Error visualizing decision tree: {str(e)}"

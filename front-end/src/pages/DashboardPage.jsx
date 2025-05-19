@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 import { 
   Box, 
@@ -40,32 +40,47 @@ const DashboardPage = () => {
   const accentColor = '#4415b6';
   const cardBg = useColorModeValue('white', 'gray.700');
 
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Get real document statistics from API
+      const docStats = await getDocumentStats();
+      
+      setDashboardData({
+        documentCount: docStats.total_documents,
+        totalChunks: docStats.total_chunks,
+        documentsByType: docStats.documents_by_type,
+        documentsByLanguage: docStats.documents_by_language,
+        recentUploads: docStats.recent_uploads,
+        totalStorageMb: docStats.total_storage_mb
+      });
+      setError(null); // Clear any previous errors
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+      setError('Failed to load dashboard data. Please try again later.');
+    } finally {
+      setLoading(false);
+    }
+  }, []); // Empty dependency array because getDocumentStats doesn't depend on props/state here
+
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Get real document statistics from API
-        const docStats = await getDocumentStats();
-        
-        setDashboardData({
-          documentCount: docStats.total_documents,
-          totalChunks: docStats.total_chunks,
-          documentsByType: docStats.documents_by_type,
-          documentsByLanguage: docStats.documents_by_language,
-          recentUploads: docStats.recent_uploads,
-          totalStorageMb: docStats.total_storage_mb
-        });
-        setLoading(false);
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-        setError('Failed to load dashboard data. Please try again later.');
-        setLoading(false);
+    fetchData();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchData();
       }
     };
 
-    fetchData();
-  }, []);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-  if (loading) {
+    // Cleanup listener on component unmount
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [fetchData]);
+
+  if (loading && !dashboardData) { // Show loading only on initial load or if data is null
     return (
       <Flex justify="center" align="center" height="100vh">
         <Spinner size="xl" color={accentColor} />

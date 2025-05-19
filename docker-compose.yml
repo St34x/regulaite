@@ -38,7 +38,9 @@ services:
       - MARIADB_AUTO_UPGRADE=1
       - MARIADB_DISABLE_UNIX_SOCKET=1
     volumes:
-      - ./backend/config/mariadb:/etc/mysql/conf.d:ro
+      - ./backend/config/mariadb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # If there are other .cnf files in backend/config/mariadb, they might need a separate mount:
+      # - ./backend/config/mariadb/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
     ports:
       - "3306:3306"
     networks:

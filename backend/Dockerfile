@@ -10,7 +10,7 @@ WORKDIR /app
 # Install security updates and necessary packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Basic utilities
-    curl wget ca-certificates gnupg lsb-release software-properties-common \
+    curl wget ca-certificates gnupg lsb-release software-properties-common graphviz\
     # Build tools
     build-essential pkg-config cmake python3-dev \
     # MariaDB dependencies
@@ -49,11 +49,7 @@ RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore --timeout 
 # Install spaCy and download models
 RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore spacy langdetect langid && \
     python -m spacy download en_core_web_sm && \
-    python -m spacy download es_core_news_sm && \
     python -m spacy download fr_core_news_sm && \
-    python -m spacy download de_core_news_sm && \
-    python -m spacy download it_core_news_sm && \
-    python -m spacy download pt_core_news_sm && \
     python -m spacy download xx_ent_wiki_sm && \
     # Pre-download these models so they're ready at container start
     python -c "from sentence_transformers import SentenceTransformer; \

@@ -454,7 +454,7 @@ const DocumentsPage = () => {
                       </Td>
                       <Td>{getFileTypeBadge(doc.file_type)}</Td>
                       <Td>{formatDate(doc.created_at)}</Td>
-                      <Td>{(doc.file_size / 1024).toFixed(2)} KB</Td>
+                      <Td>{doc.size ? (doc.size / (1024)).toFixed(2) : '0.00'} KB</Td>
                       <Td>{doc.category || 'Uncategorized'}</Td>
                       <Td onClick={(e) => e.stopPropagation()}>
                         <Menu>
@@ -925,7 +925,7 @@ const DocumentsPage = () => {
                   <Text mb={3}>{selectedDoc.file_type?.toUpperCase() || 'Unknown'}</Text>
                   
                   <Text fontWeight="bold">File Size</Text>
-                  <Text mb={3}>{(selectedDoc.file_size / 1024).toFixed(2)} KB</Text>
+                  <Text mb={3}>{selectedDoc.size ? (selectedDoc.size / (1024)).toFixed(2) : '0.00'} KB</Text>
                   
                   <Text fontWeight="bold">Uploaded</Text>
                   <Text mb={3}>{formatDate(selectedDoc.created_at)}</Text>

@@ -121,13 +121,15 @@ class DocumentParser:
                   neo4j_password=neo4j_password,
                   multilingual=True
               )
-              logger.info("Enrichment pipeline initialized")
+              logger.info("Enrichment pipeline initialized successfully in DocumentParser.")
           except Exception as e:
-              logger.error(f"Failed to initialize enrichment pipeline: {str(e)}")
+              logger.error(f"CRITICAL: DocumentParser failed to initialize EnrichmentPipeline. Enrichment will be DISABLED. Error: {str(e)}", exc_info=True)
               self.enrichment_pipeline = None
-              self.use_enrichment = False
+              self.use_enrichment = False # Ensure this is set if pipeline fails
       else:
+          logger.info("DocumentParser: Enrichment is explicitly disabled via use_enrichment=False.")
           self.enrichment_pipeline = None
+          self.use_enrichment = False # Explicitly ensure this
 
       # Initialize Neo4j connection
       self.driver = None
@@ -994,7 +996,7 @@ class DocumentParser:
                     
         logger.info(f"Successfully saved {len(sections)} sections for document {doc_id}")
         
-    def _enrich_document(self, doc_id: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _enrich_document(self, doc_id: str, chunks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         """
         Enrich a document with NLP processing to extract entities, concepts, etc.
 
@@ -1003,31 +1005,39 @@ class DocumentParser:
             chunks: Document chunks
 
         Returns:
-            List of extracted entities
+            A dictionary containing lists of extracted entities and concepts.
+            e.g., {"entities": [], "concepts": []}
         """
         if not self.enrichment_pipeline:
             logger.warning("Enrichment pipeline not initialized, skipping enrichment")
-            return []
+            return {"entities": [], "concepts": []}
             
         try:
             # Get all text from chunks for processing
             all_text = "\n\n".join([chunk["text"] for chunk in chunks if "text" in chunk])
             
             # Use the enrichment pipeline to process the document
-            # Instead of calling enrich_document which expects just doc_id,
-            # call enrich_text with the document text and provide context
             result = self.enrichment_pipeline.enrich_text(all_text, {"doc_id": doc_id})
             
-            if not result or "entities" not in result:
+            entities = []
+            if result and "entities" in result:
+                entities = result["entities"]
+                logger.info(f"Extracted {len(entities)} entities from document {doc_id}")
+            else:
                 logger.warning(f"Enrichment produced no entities for document {doc_id}")
-                return []
+
+            concepts = []
+            if result and "concepts" in result:
+                concepts = result["concepts"]
+                logger.info(f"Extracted {len(concepts)} concepts from document {doc_id}")
+            else:
+                logger.warning(f"Enrichment produced no concepts for document {doc_id}")
                 
-            logger.info(f"Extracted {len(result['entities'])} entities from document {doc_id}")
-            return result["entities"]
+            return {"entities": entities, "concepts": concepts}
             
         except Exception as e:
             logger.error(f"Error enriching document {doc_id}: {str(e)}", exc_info=True)
-            return []
+            return {"entities": [], "concepts": []}
 
     def _store_document_in_neo4j(
           self,
@@ -1459,12 +1469,24 @@ class DocumentParser:
             
             if detect_language and not doc_metadata.get("language"):
                 # Get a sample of text for language detection
-                sample_text = file_content[:min(5000, len(file_content))]
+                sample_bytes = file_content[:min(5000, len(file_content))]
+                sample_text_for_detection = "" # Initialize
+
+                if sample_bytes:
+                    try:
+                        sample_text_for_detection = sample_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        logger.warning("Failed to decode sample text as UTF-8 for language detection. Trying with 'latin-1'.")
+                        try:
+                            sample_text_for_detection = sample_bytes.decode('latin-1') # Common fallback
+                        except UnicodeDecodeError:
+                            logger.warning("Failed to decode sample text with 'latin-1'. Using lossy UTF-8 decoding.")
+                            sample_text_for_detection = sample_bytes.decode('utf-8', errors='replace')
                 
-                if sample_text:
+                if sample_text_for_detection:
                     from data_enrichment.language_detector import LanguageDetector
                     language_detector = LanguageDetector()
-                    language_info = language_detector.detect_language(sample_text)
+                    language_info = language_detector.detect_language(sample_text_for_detection)
                     
                     language_code = language_info.get("language_code", "en")
                     language_name = language_info.get("language_name", "English")
@@ -1511,7 +1533,8 @@ class DocumentParser:
 
             # Parse elements to chunks
             chunks = []
-            entities = []
+            # entities = [] # Will be populated by enrichment
+            # concepts = [] # Will be populated by enrichment
             sections = []
             
             if self.chunking_strategy == "hierarchical":
@@ -1530,8 +1553,14 @@ class DocumentParser:
                 self._save_sections_to_neo4j(sections, doc_id)
             
             # Do enrichment if requested
+            # Initialize with empty lists in case enrichment is skipped
+            entities = []
+            concepts = []
+
             if enrich:
-                entities = self._enrich_document(doc_id, chunks)
+                enrichment_output = self._enrich_document(doc_id, chunks)
+                entities = enrichment_output.get("entities", [])
+                concepts = enrichment_output.get("concepts", [])
                 
             # Update document status in Neo4j
             try:
@@ -1574,6 +1603,7 @@ class DocumentParser:
                 "chunk_count": len(chunks),
                 "section_count": len(sections),
                 "entity_count": len(entities),
+                "concept_count": len(concepts), # Added concept_count
                 "language": doc_metadata.get("language"),
                 "language_name": doc_metadata.get("language_name"),
                 "image_count": image_count,

@@ -1,7 +1,7 @@
 import React from 'react';
 import { User, Bot, Info, Cpu, ArrowDownRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip } from '@chakra-ui/react';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip, Accordion, AccordionItem, AccordionButton, AccordionPanel, AccordionIcon } from '@chakra-ui/react';
 
 /**
  * Renders a single chat message
@@ -32,6 +32,8 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const assistantMessageShadow = "0 2px 6px rgba(68, 21, 182, 0.08)";
   const agentInfoBg = useColorModeValue('gray.50', 'gray.700');
   const contextIndicatorColor = useColorModeValue('gray.400', 'gray.500');
+  const chunkBgColor = useColorModeValue('white', 'gray.800');
+  const chunkBorderColor = useColorModeValue('gray.100', 'gray.700');
 
   return (
     <Box 
@@ -147,8 +149,8 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
           <ReactMarkdown>{message.content}</ReactMarkdown>
         </Box>
         
-        {/* Agent Information */}
-        {!isUser && agentInfo && (
+        {/* Agent Information and Sources */}
+        {!isUser && (agentInfo || message.sources) && (
           <Box 
             mt={3} 
             pt={2} 
@@ -156,26 +158,89 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             borderColor={dividerColor} 
             fontSize="xs" 
             color={mutedTextColor}
-            bg={agentInfoBg}
-            p={3}
-            borderRadius="md"
-            boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)"
           >
-            {agentInfo.reasoning_path && (
-              <Flex align="center" mb={1}>
+            {agentInfo && agentInfo.reasoning_path && (
+              <Flex align="center" mb={1} p={3} bg={agentInfoBg} borderRadius="md" boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)">
                 <Icon as={Info} boxSize={3} mr={1} color={accentColor} />
                 <Text fontWeight="medium">Reasoning:</Text>
                 <Text ml={1}>{agentInfo.reasoning_path.join(' > ')}</Text>
               </Flex>
             )}
             
-            {agentInfo.source_documents && agentInfo.source_documents.length > 0 && (
-              <Flex direction="column">
-                <Text fontWeight="medium" mb={1} color={accentColor}>Sources:</Text>
-                {agentInfo.source_documents.map((doc, idx) => (
-                  <Text key={idx} ml={2} mb={0.5}>• {doc.title || doc.source}</Text>
-                ))}
-              </Flex>
+            {/* Display sources from either agentInfo or message.sources */}
+            {(message.sources || (agentInfo && agentInfo.source_documents)) && (
+              <Accordion allowToggle mt={agentInfo && agentInfo.reasoning_path ? 2 : 0}>
+                <AccordionItem 
+                  border="none"
+                  bg={agentInfoBg} 
+                  borderRadius="md" 
+                  boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)"
+                >
+                  <h2>
+                    <AccordionButton _expanded={{ bg: accentColorLighter, color: accentColor }} borderRadius="md">
+                      <Box flex="1" textAlign="left">
+                        <Text fontWeight="medium" color={accentColor}>Sources:</Text>
+                      </Box>
+                      <AccordionIcon color={accentColor} />
+                    </AccordionButton>
+                  </h2>
+                  <AccordionPanel pb={4} pt={2} px={3}>
+                    {/* Display message.sources first if available */}
+                    {message.sources && message.sources.length > 0 && (
+                      message.sources.map((source, idx) => (
+                        <Box key={`source-${idx}`} ml={0} mb={3} pl={3} borderLeft="3px solid" borderColor={accentColorLighter} _last={{ mb: 0 }}>
+                          <Tooltip label={source.file_path || ""} placement="top-start" hasArrow>
+                            <Text fontWeight="medium" fontSize="sm" color={textColor} mb={0.5} cursor="help">
+                              {source.title || `Source ${source.id || idx + 1}`}
+                            </Text>
+                          </Tooltip>
+                          
+                          {typeof source.score === 'number' && (
+                            <Text fontSize="xs" color={mutedTextColor} mb={1}>
+                              Score: {source.score.toFixed(3)}
+                            </Text>
+                          )}
+                          
+                          {/* Display the text_preview (RAG chunk) prominently */}
+                          <Text 
+                            fontSize="xs" 
+                            color={textColor} 
+                            whiteSpace="pre-wrap" 
+                            wordBreak="break-word" 
+                            mb={1} 
+                            bg={chunkBgColor}
+                            p={2}
+                            borderRadius="md"
+                            borderWidth="1px"
+                            borderColor={chunkBorderColor}
+                          >
+                            {source.text_preview ? source.text_preview : (
+                              <Box>
+                                <Text fontWeight="medium" mb={1}>
+                                  {source.title || `Source ${source.id || idx + 1}`}
+                                </Text>
+                                <Text fontStyle="italic" color={mutedTextColor}>
+                                  This source was used as reference, but no text content is available for display.
+                                </Text>
+                              </Box>
+                            )}
+                          </Text>
+                        </Box>
+                      ))
+                    )}
+                    
+                    {/* Display agent's source_documents as fallback */}
+                    {!message.sources && agentInfo && agentInfo.source_documents && (
+                      agentInfo.source_documents.map((doc, idx) => (
+                        <Text key={`doc-${idx}`} ml={2} mb={0.5}>• {doc.title || doc.source}</Text>
+                      ))
+                    )}
+                    {(!message.sources || message.sources.length === 0) && !(agentInfo && agentInfo.source_documents) && (
+                        <Text>No sources available.</Text>
+                    )}
+                  </AccordionPanel>
+                </AccordionItem>
+              </Accordion>
             )}
           </Box>
         )}

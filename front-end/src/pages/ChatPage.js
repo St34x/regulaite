@@ -4,6 +4,7 @@ import ChatMessage from '../components/chat/ChatMessage';
 import ChatHistory from '../components/chat/ChatHistory';
 import useMediaQuery from '../hooks/useMediaQuery';
 import chatService from '../services/chatService';
+import configService from '../services/configService';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import ChatControls from '../components/chat/ChatControls';
@@ -39,7 +40,7 @@ const ChatPage = () => {
       use_agent: false,
       agent_type: null,
       use_tree_reasoning: false,
-      tree_template: 'default'
+      tree_template: 'default_understanding'
     },
     llm: {
       model: 'gpt-4',
@@ -75,6 +76,31 @@ const ChatPage = () => {
   const buttonHoverBorderColor = useColorModeValue('purple.300', 'purple.600');
   const questionButtonBg = useColorModeValue('white', 'gray.700');
   const questionButtonBorder = useColorModeValue('gray.200', 'gray.600');
+
+  // Fetch initial LLM settings
+  useEffect(() => {
+    const fetchInitialSettings = async () => {
+      try {
+        const fetchedLlmSettings = await configService.getLlmConfig();
+        if (fetchedLlmSettings) {
+          setAdvancedSettings(prevSettings => ({
+            ...prevSettings,
+            llm: { ...prevSettings.llm, ...fetchedLlmSettings }
+          }));
+        }
+      } catch (error) {
+        console.error("Failed to fetch initial LLM settings:", error);
+        toast({
+          title: 'Error',
+          description: 'Could not load model settings. Using defaults.',
+          status: 'error',
+          duration: 5000,
+          isClosable: true,
+        });
+      }
+    };
+    fetchInitialSettings();
+  }, [toast]);
 
   // Close sidebar on mobile by default
   useEffect(() => {
@@ -254,134 +280,149 @@ const ChatPage = () => {
   };
 
   const handleSendMessage = async (content) => {
-    // Don't proceed if already loading
-    if (isLoading) return;
+    if (!content || !content.trim() || isLoading) return;
+    setError(null);
+    
+    const sessionId = activeSessionId;
     
     try {
-      setError(null);
+      // Add user message to messages
+      const userMessage = { role: 'user', content };
+      const allMessages = [...messages, userMessage];
+      setMessages(allMessages);
+      
+      // Add loading message
+      const assistantLoadingMessage = { 
+        role: 'assistant', 
+        content: '...' 
+      };
+      setMessages([...allMessages, assistantLoadingMessage]);
       setIsLoading(true);
-      setReasoningNodeId(null);
-      setAgentProgress(null);
-
-      // Create a session if none exists
-      if (!activeSessionId) {
-        const sessionId = await handleNewSession();
-        setActiveSessionId(sessionId);
-      }
-
-      // Add user message immediately to UI
-      const userMessage = { role: "user", content };
-      const updatedMessages = [...messages, userMessage];
-      setMessages(updatedMessages);
-
-      // Prepare options with agent and LLM settings
+      
+      // Prepare options
       const options = {
-        ...advancedSettings.llm,
+        model: advancedSettings.llm.model,
+        temperature: advancedSettings.llm.temperature,
+        max_tokens: advancedSettings.llm.max_tokens,
         includeContext: true,
-        agent: advancedSettings.agent.use_agent ? {
+        contextQuery: null, // could be customized
+        retrievalType: 'auto',
+      };
+      
+      // Add agent options if agent is enabled
+      if (advancedSettings.agent.use_agent) {
+        options.agent = {
           agent_type: advancedSettings.agent.agent_type,
           use_tree_reasoning: advancedSettings.agent.use_tree_reasoning,
-          tree_template: advancedSettings.agent.use_tree_reasoning ? advancedSettings.agent.tree_template : null
-        } : null
-      };
-
-      // Stream the assistant's response
-      let assistantContent = '';
-      const assistantMessage = { role: "assistant", content: '' };
-      
-      // Add placeholder message that will be updated
-      const messagesWithPlaceholder = [...updatedMessages, assistantMessage];
-      setMessages(messagesWithPlaceholder);
-
-      try {
-        // Pass the full conversation history to maintain context
-        const response = await chatService.sendMessageStreaming(
-          activeSessionId,
-          content,
-          (chunk) => {
-            assistantContent += chunk;
-            // Create a new message object each time to ensure React detects the change
-            const updatedAssistantMessage = { 
-              role: "assistant", 
-              content: assistantContent 
-            };
-            // Create a new array to ensure React state update
-            setMessages([...updatedMessages, updatedAssistantMessage]);
-          },
-          options,
-          updatedMessages  // Pass all messages to maintain conversation context
-        );
-        
-        // Handle agent progress information if returned
-        if (response && response.agent_execution_id) {
-          setAgentProgress({
-            execution_id: response.agent_execution_id,
-            status: 'running'
-          });
-        }
-
-        // Final update to make sure we have the complete message
-        const finalAssistantMessage = { 
-          role: "assistant", 
-          content: assistantContent 
+          tree_template: advancedSettings.agent.tree_template,
         };
         
-        // Set with complete message to ensure we have the full response
-        setMessages([...updatedMessages, finalAssistantMessage]);
-
-        // Update session in state with the new messages
-        updateSessionWithMessages(activeSessionId, [...updatedMessages, finalAssistantMessage]);
-      } catch (streamError) {
-        console.error('Streaming error:', streamError);
+        options.agent_params = {
+          top_k: 5, // number of documents to retrieve
+          initial_retrieval_top_k: 5,
+          max_depth: 10, // for tree reasoning
+        };
+      }
+      
+      // Add model options
+      options.top_p = advancedSettings.llm.top_p;
+      options.frequency_penalty = advancedSettings.llm.frequency_penalty;
+      options.presence_penalty = advancedSettings.llm.presence_penalty;
+      
+      // Use streaming API instead of regular sendMessage
+      let assistantMessage = {
+        role: 'assistant',
+        content: '',
+        model: options.model,
+        isStreaming: true
+      };
+      
+      // Update with empty streaming message
+      setMessages([...allMessages, assistantMessage]);
+      
+      // Handle each chunk of the streamed response
+      const handleChunk = (chunk) => {
+        setMessages(currentMessages => {
+          const updatedMessages = [...currentMessages];
+          const lastMessage = updatedMessages[updatedMessages.length - 1];
+          
+          if (lastMessage && lastMessage.role === 'assistant' && lastMessage.isStreaming) {
+            lastMessage.content += chunk;
+          }
+          
+          return updatedMessages;
+        });
+      };
+      
+      // Send streaming request
+      const response = await chatService.sendMessageStreaming(
+        sessionId,
+        content,
+        handleChunk,
+        options,
+        allMessages.map(msg => ({ role: msg.role, content: msg.content }))
+      );
+      
+      // Final update with complete message and metadata
+      setMessages(currentMessages => {
+        const updatedMessages = [...currentMessages];
+        const lastMessage = updatedMessages[updatedMessages.length - 1];
         
-        // Fall back to non-streaming API if streaming fails
-        try {
-          // Pass the full conversation history to maintain context
-          const response = await chatService.sendMessage(
-            activeSessionId, 
-            content, 
-            options,
-            updatedMessages  // Pass all messages to maintain conversation context
-          );
-          const fallbackMessage = { role: "assistant", content: response.message };
-          setMessages([...updatedMessages, fallbackMessage]);
-          updateSessionWithMessages(activeSessionId, [...updatedMessages, fallbackMessage]);
-        } catch (fallbackError) {
-          console.error('Fallback error:', fallbackError);
-          setError('Failed to send message. Please try again.');
-          // Remove the placeholder message
-          setMessages(updatedMessages);
+        if (lastMessage && lastMessage.role === 'assistant' && lastMessage.isStreaming) {
+          lastMessage.content = response.message;
+          lastMessage.isStreaming = false;
+          lastMessage.model = response.model || options.model;
+          lastMessage.sources = response.sources || null;
         }
-      }
-    } catch (err) {
-      console.error('Chat error:', err);
-      let errorMessage = 'An error occurred while sending your message. Please try again.';
+        
+        return updatedMessages;
+      });
       
-      if (err.response) {
-        const status = err.response.status;
-        if (status === 401) {
-          errorMessage = 'Your session has expired. Please log in again.';
-          navigate('/login');
-          return;
-        } else if (status === 429) {
-          errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
-        } else if (err.response.data && err.response.data.detail) {
-          errorMessage = err.response.data.detail;
-        }
-      } else if (err.request) {
-        errorMessage = 'Network error. Please check your connection and try again.';
+      // Update session with new messages
+      const finalMessages = [...allMessages, {
+        role: 'assistant',
+        content: response.message,
+        model: response.model || options.model,
+        sources: response.sources || null
+      }];
+      updateSessionWithMessages(sessionId, finalMessages);
+      
+      // Update agent progress state if execution_id is provided
+      if (response.execution_id || response.agent_execution_id) {
+        setAgentProgress({
+          execution_id: response.execution_id || response.agent_execution_id,
+          status: response.agent_status || 'completed',
+          progress_percent: 100,
+        });
       }
       
+      setIsLoading(false);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      
+      // Handle API errors
+      const errorMessage = error.response?.data?.detail || error.message || "Failed to send message";
+      
+      // Replace loading message with error message
+      const updatedMessages = [...messages];
+      
+      // If there's a loading message, replace it
+      if (updatedMessages.length > 0 && updatedMessages[updatedMessages.length - 1].role === 'assistant') {
+        updatedMessages.pop();
+      }
+      
+      // Set error state
       setError(errorMessage);
+      setMessages(updatedMessages);
+      setIsLoading(false);
+      
       toast({
-        title: 'Chat Error',
+        title: 'Error',
         description: errorMessage,
         status: 'error',
         duration: 5000,
         isClosable: true,
       });
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -718,7 +759,7 @@ const ChatPage = () => {
   };
 
   // New handler for settings changes
-  const handleSettingsChange = (newSettings) => {
+  const handleSettingsChange = async (newSettings) => {
     console.log('Settings changed:', newSettings);
     // Make sure we have all the required properties to avoid issues
     const validatedSettings = {
@@ -726,18 +767,48 @@ const ChatPage = () => {
         use_agent: newSettings.agent?.use_agent || false,
         agent_type: newSettings.agent?.agent_type || null,
         use_tree_reasoning: newSettings.agent?.use_tree_reasoning || false,
-        tree_template: newSettings.agent?.tree_template || 'default'
+        tree_template: newSettings.agent?.tree_template || 'default_understanding'
       },
       llm: {
         model: newSettings.llm?.model || 'gpt-4',
-        temperature: newSettings.llm?.temperature || 0.7,
+        temperature: newSettings.llm?.temperature ?? 0.7,
         max_tokens: newSettings.llm?.max_tokens || 2048,
-        top_p: newSettings.llm?.top_p || 1.0,
-        frequency_penalty: newSettings.llm?.frequency_penalty || 0.0,
-        presence_penalty: newSettings.llm?.presence_penalty || 0.0
+        top_p: newSettings.llm?.top_p ?? 1.0,
+        frequency_penalty: newSettings.llm?.frequency_penalty ?? 0.0,
+        presence_penalty: newSettings.llm?.presence_penalty ?? 0.0
       }
     };
-    setAdvancedSettings(validatedSettings);
+    // Optimistically update the UI for responsiveness, but we'll confirm with backend response
+    setAdvancedSettings(validatedSettings); 
+
+    try {
+      const savedLlmSettings = await configService.updateLlmConfig(validatedSettings.llm);
+      // Update the state with the authoritative response from the backend
+      setAdvancedSettings(prevSettings => ({
+        ...prevSettings, // Keep current agent settings
+        llm: { ...prevSettings.llm, ...savedLlmSettings } // Overwrite llm settings with response
+      }));
+
+      toast({
+        title: 'Settings Saved',
+        description: 'Model parameters have been updated.',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+    } catch (error) {
+      console.error("Failed to save LLM settings:", error);
+      toast({
+        title: 'Error Saving Settings',
+        description: error.message || 'Could not save model parameters. Please try again.',
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+      // Optionally, if save fails, you might want to revert the optimistic update
+      // by re-fetching the original settings or rolling back to a previous state.
+      // For now, the optimistic update remains, and an error is shown.
+    }
   };
 
   return (

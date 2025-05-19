@@ -3,7 +3,7 @@ import authService from './authService';
 import { jwtDecode } from 'jwt-decode';
 
 // Base URL for API calls
-const API_URL = process.env.AI_BACKEND_API_URL || 'http://ai-backend:8080';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090';
 
 // Create axios instance with base URL
 const api = axios.create({
@@ -546,6 +546,34 @@ const chatService = {
     } catch (error) {
       console.error('Error fetching LLM config:', error);
       return {};
+    }
+  },
+  
+  /**
+   * Delete all chat history for the current user.
+   * @param {number | null} beforeDays - Optional: delete history older than this many days.
+   * @returns {Promise<Object>} Result of the deletion operation.
+   */
+  deleteAllUserHistory: async (beforeDays = null) => {
+    try {
+      const params = {};
+      if (beforeDays !== null && typeof beforeDays === 'number' && beforeDays > 0) {
+        params.before_days = beforeDays;
+      }
+      // User ID is automatically added by the request interceptor.
+      const response = await api.delete(`/chat/history`, { params });
+      console.log('All user chat history deletion response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('Error deleting all user chat history:', error);
+      // Provide more specific error feedback if possible
+      if (error.response) {
+        throw new Error(error.response.data.detail || 'Failed to delete all chat history');
+      } else if (error.request) {
+        throw new Error('Network error: Could not reach server to delete history.');
+      } else {
+        throw new Error('An unexpected error occurred while deleting history.');
+      }
     }
   }
 };
