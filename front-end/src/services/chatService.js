@@ -3,7 +3,7 @@ import authService from './authService';
 import { jwtDecode } from 'jwt-decode';
 
 // Base URL for API calls
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // Create axios instance with base URL
 const api = axios.create({
@@ -169,7 +169,15 @@ const chatService = {
       };
 
       const response = await api.post(`/chat`, requestParams);
-      return response.data;
+      
+      // Process the response to handle differences between classic and autonomous agent responses
+      const processedResponse = {
+        ...response.data,
+        message: response.data.message || response.data.response || '',
+        source_documents: response.data.source_documents || response.data.sources || []
+      };
+      
+      return processedResponse;
     } catch (error) {
       console.error('Error sending message:', error);
       throw error;
@@ -278,6 +286,7 @@ const chatService = {
       let buffer = '';
       let fullResponse = '';
       let responseMetadata = {};
+      let sourcesCollected = [];
 
       while (true) {
         const { value, done } = await reader.read();
@@ -334,6 +343,16 @@ const chatService = {
               const chunk = eventData.content;
               fullResponse += chunk;
               onChunk(chunk);
+            } else if (eventData.text) {
+              // Handle 'text' field from autonomous agent streaming
+              const chunk = eventData.text;
+              fullResponse += chunk;
+              onChunk(chunk);
+            }
+            
+            // Collect source documents/citations if present
+            if (eventData.done && (eventData.sources || eventData.source_documents)) {
+              sourcesCollected = eventData.sources || eventData.source_documents || [];
             }
           } catch (e) {
             console.error('Error parsing server event:', e, line);
@@ -343,6 +362,8 @@ const chatService = {
 
       return {
         message: fullResponse,
+        source_documents: sourcesCollected,
+        sources: sourcesCollected,
         ...responseMetadata
       };
     } catch (error) {

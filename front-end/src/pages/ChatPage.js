@@ -280,35 +280,43 @@ const ChatPage = () => {
   };
 
   const handleSendMessage = async (content) => {
-    if (!content || !content.trim() || isLoading) return;
-    setError(null);
-    
-    const sessionId = activeSessionId;
-    
+    if (!content || content.trim() === "") return;
+
     try {
-      // Add user message to messages
-      const userMessage = { role: 'user', content };
-      const allMessages = [...messages, userMessage];
-      setMessages(allMessages);
-      
-      // Add loading message
-      const assistantLoadingMessage = { 
-        role: 'assistant', 
-        content: '...' 
-      };
-      setMessages([...allMessages, assistantLoadingMessage]);
       setIsLoading(true);
-      
-      // Prepare options
+      setError("");
+
+      // Create a new user message
+      const userMessage = {
+        role: "user",
+        content: content,
+        timestamp: new Date().toISOString(),
+      };
+
+      // Get current messages
+      const currentMessages = [...messages, userMessage];
+      setMessages(currentMessages);
+
+      // Ensure we're not in loading state before scrolling
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 0);
+
+      // Create options for the chat service
       const options = {
+        // LLM parameters
         model: advancedSettings.llm.model,
         temperature: advancedSettings.llm.temperature,
         max_tokens: advancedSettings.llm.max_tokens,
+        top_p: advancedSettings.llm.top_p,
+        frequency_penalty: advancedSettings.llm.frequency_penalty,
+        presence_penalty: advancedSettings.llm.presence_penalty,
+        
+        // Context settings
         includeContext: true,
-        contextQuery: null, // could be customized
-        retrievalType: 'auto',
+        contextQuery: null,
       };
-      
+
       // Add agent options if agent is enabled
       if (advancedSettings.agent.use_agent) {
         options.agent = {
@@ -318,75 +326,41 @@ const ChatPage = () => {
         };
         
         options.agent_params = {
-          top_k: 5, // number of documents to retrieve
-          initial_retrieval_top_k: 5,
-          max_depth: 10, // for tree reasoning
+          show_reasoning: true
         };
       }
-      
-      // Add model options
-      options.top_p = advancedSettings.llm.top_p;
-      options.frequency_penalty = advancedSettings.llm.frequency_penalty;
-      options.presence_penalty = advancedSettings.llm.presence_penalty;
-      
-      // Use streaming API instead of regular sendMessage
-      let assistantMessage = {
-        role: 'assistant',
-        content: '',
-        model: options.model,
-        isStreaming: true
-      };
-      
-      // Update with empty streaming message
-      setMessages([...allMessages, assistantMessage]);
-      
-      // Handle each chunk of the streamed response
-      const handleChunk = (chunk) => {
-        setMessages(currentMessages => {
-          const updatedMessages = [...currentMessages];
-          const lastMessage = updatedMessages[updatedMessages.length - 1];
-          
-          if (lastMessage && lastMessage.role === 'assistant' && lastMessage.isStreaming) {
-            lastMessage.content += chunk;
-          }
-          
-          return updatedMessages;
-        });
-      };
-      
-      // Send streaming request
-      const response = await chatService.sendMessageStreaming(
-        sessionId,
+
+      // Format all conversation messages for context
+      const contextMessages = currentMessages.map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+
+      // Send the message to the chat service
+      const response = await chatService.sendMessage(
+        activeSessionId,
         content,
-        handleChunk,
         options,
-        allMessages.map(msg => ({ role: msg.role, content: msg.content }))
+        contextMessages
       );
       
-      // Final update with complete message and metadata
-      setMessages(currentMessages => {
-        const updatedMessages = [...currentMessages];
-        const lastMessage = updatedMessages[updatedMessages.length - 1];
-        
-        if (lastMessage && lastMessage.role === 'assistant' && lastMessage.isStreaming) {
-          lastMessage.content = response.message;
-          lastMessage.isStreaming = false;
-          lastMessage.model = response.model || options.model;
-          lastMessage.sources = response.sources || null;
-        }
-        
-        return updatedMessages;
-      });
-      
-      // Update session with new messages
-      const finalMessages = [...allMessages, {
-        role: 'assistant',
-        content: response.message,
-        model: response.model || options.model,
-        sources: response.sources || null
-      }];
-      updateSessionWithMessages(sessionId, finalMessages);
-      
+      // Create the assistant response object
+      const assistantMessage = {
+        role: "assistant",
+        content: response.message || response.response || "",
+        timestamp: new Date().toISOString(),
+        model: response.model || advancedSettings.llm.model,
+        agent_type: response.agent_type || (advancedSettings.agent.use_agent ? advancedSettings.agent.agent_type : null),
+        agent_used: response.agent_used || advancedSettings.agent.use_agent,
+        tree_reasoning_used: response.tree_reasoning_used || advancedSettings.agent.use_tree_reasoning,
+        source_documents: response.source_documents || response.sources || [],
+        execution_id: response.execution_id || response.agent_execution_id,
+        traversal_path: response.traversal_path,
+      };
+
+      // Update messages state with the assistant's response
+      setMessages([...currentMessages, assistantMessage]);
+
       // Update agent progress state if execution_id is provided
       if (response.execution_id || response.agent_execution_id) {
         setAgentProgress({
@@ -395,34 +369,25 @@ const ChatPage = () => {
           progress_percent: 100,
         });
       }
-      
-      setIsLoading(false);
+
+      // Update the sessions list with the new message (for preview)
+      updateSessionWithMessages(activeSessionId, [...currentMessages, assistantMessage]);
+
+      // Scroll to the bottom of the messages
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 0);
     } catch (error) {
       console.error("Error sending message:", error);
-      
-      // Handle API errors
-      const errorMessage = error.response?.data?.detail || error.message || "Failed to send message";
-      
-      // Replace loading message with error message
-      const updatedMessages = [...messages];
-      
-      // If there's a loading message, replace it
-      if (updatedMessages.length > 0 && updatedMessages[updatedMessages.length - 1].role === 'assistant') {
-        updatedMessages.pop();
-      }
-      
-      // Set error state
-      setError(errorMessage);
-      setMessages(updatedMessages);
+      setError(
+        `An error occurred while sending your message: ${error.message || "Unknown error"}`
+      );
+      // Try to scroll to show the error
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 0);
+    } finally {
       setIsLoading(false);
-      
-      toast({
-        title: 'Error',
-        description: errorMessage,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
     }
   };
 

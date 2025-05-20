@@ -29,6 +29,10 @@ import uvicorn
 import mysql.connector
 from enum import Enum
 
+# Import TreeReasoningAgent and AgentConfig
+from pyndantic_agents.tree_reasoning import TreeReasoningAgent, create_default_decision_tree, get_default_tree
+from pyndantic_agents.agent_models import AgentConfig
+
 # Custom JSON encoder for Neo4j DateTime objects
 class Neo4jDateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -51,13 +55,11 @@ from unstructured_parser.document_parser import DocumentParser
 # Import RAG system
 from llamaIndex_rag.rag import RAGSystem
 
-# Import Pyndantic Agents router
-from pyndantic_agents.router import router as agents_router
+# Import autonomous agent components instead of pyndantic agents
+from autonomous_agent.integration_components.agent_factory import get_agent_factory, get_agent_types, create_agent
+from autonomous_agent.integration_components.tree_reasoning_adapter import TreeReasoningAdapter, DecisionTree
 
-from pyndantic_agents.tree_reasoning import TreeReasoningAgent, DecisionNode, DecisionTree, create_default_decision_tree
-from pyndantic_agents.decision_trees import get_available_trees
-
-# Import our new custom routers
+# Import our custom routers
 from routers.chat_router import router as chat_router
 from routers.document_router import router as document_router
 from routers.config_router import router as config_router
@@ -103,7 +105,6 @@ app.add_middleware(
 )
 
 # Include all routers
-app.include_router(agents_router)
 app.include_router(chat_router)
 app.include_router(document_router)
 app.include_router(config_router)
@@ -183,6 +184,19 @@ rag_system = RAGSystem(
     keyword_weight=0.3      # Set keyword search weight
 )
 
+# Initialize OpenAI client
+openai_client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
+
+# Initialize the autonomous agent factory
+autonomous_agent_factory = get_agent_factory(
+    rag_system=rag_system,
+    openai_client=openai_client,
+    max_tokens=2048,
+    temperature=0.7
+)
+
 # Model preloading thread
 model_thread = None
 model_loading_status = {
@@ -210,6 +224,9 @@ def startup_event():
     # Start model preloading in a separate thread
     # Default to multi-language model for better coverage
     start_model_preloading(['multi'])
+    
+    # Log the usage of autonomous agent
+    logger.info("Using autonomous agent implementation")
 
 def start_model_preloading(languages: List[str]):
     """
@@ -1107,19 +1124,20 @@ async def chat(request: ChatRequest, req: Request):
             else:
                 # Original agent-based processing
                 # Import agent-related components
-                from pyndantic_agents.agents import create_agent, AgentConfig
+                from autonomous_agent.integration_components.agent_factory import create_agent
+                from autonomous_agent.integration_components.agent_adapter import AutonomousAgentAdapter
 
                 # Create an agent configuration
-                agent_config = AgentConfig(
-                    name=f"{request.agent_type.capitalize()} Agent",
-                    description=f"Agent for handling {request.agent_type} tasks",
-                    model=request.model,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                    include_context=request.include_context,
-                    context_query=request.context_query,
-                    max_context_results=5
-                )
+                agent_config = {
+                    "name": f"{request.agent_type.capitalize()} Agent",
+                    "description": f"Agent for handling {request.agent_type} tasks",
+                    "model": request.model,
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens,
+                    "include_context": request.include_context,
+                    "context_query": request.context_query,
+                    "max_context_results": 5
+                }
 
                 # Create the agent with the shared RAG system
                 agent = create_agent(
@@ -2115,3 +2133,132 @@ async def cleanup_orphaned_chunks():
             status_code=500,
             detail=f"Error cleaning up orphaned chunks: {str(e)}"
         )
+
+
+def create_default_decision_tree():
+    """Create a default decision tree for regulatory information."""
+    import uuid
+    from autonomous_agent.integration_components.tree_reasoning_adapter import DecisionTree
+    
+    tree_dict = {
+        "id": f"default_tree_{uuid.uuid4()}",
+        "name": "Healthcare Regulations Tree",
+        "description": "Decision tree for answering healthcare regulatory queries",
+        "root_node": "start",
+        "nodes": {
+            "start": {
+                "id": "start",
+                "type": "decision",
+                "query": "What type of healthcare regulatory information is being requested?",
+                "options": [
+                    {"value": "data_privacy", "label": "Data Privacy and Security", "next": "retrieve_privacy_regs"},
+                    {"value": "compliance", "label": "Compliance Requirements", "next": "retrieve_compliance_regs"},
+                    {"value": "standards", "label": "Technical Standards", "next": "retrieve_standards"},
+                    {"value": "general", "label": "General Information", "next": "retrieve_general"}
+                ]
+            },
+            "retrieve_privacy_regs": {
+                "id": "retrieve_privacy_regs",
+                "type": "action",
+                "action": "retrieve_facts",
+                "next": "generate_response"
+            },
+            "retrieve_compliance_regs": {
+                "id": "retrieve_compliance_regs",
+                "type": "action",
+                "action": "retrieve_facts",
+                "next": "generate_response"
+            },
+            "retrieve_standards": {
+                "id": "retrieve_standards",
+                "type": "action",
+                "action": "retrieve_facts",
+                "next": "generate_response"
+            },
+            "retrieve_general": {
+                "id": "retrieve_general",
+                "type": "action",
+                "action": "retrieve_context",
+                "next": "perform_analysis" 
+            },
+            "perform_analysis": {
+                "id": "perform_analysis",
+                "type": "action",
+                "action": "perform_analysis",
+                "next": "generate_response"
+            },
+            "generate_response": {
+                "id": "generate_response",
+                "type": "response",
+                "response_template": "{result}"
+            }
+        }
+    }
+    
+    return DecisionTree.from_dict(tree_dict)
+
+def get_available_trees():
+    """Get available decision tree templates."""
+    from autonomous_agent.integration_components.tree_reasoning_adapter import DecisionTree
+    import uuid
+    
+    # In a full implementation, these would be loaded from a database or configuration
+    trees = {
+        "default": create_default_decision_tree(),
+        "healthcare": DecisionTree.from_dict({
+            "id": f"healthcare_tree_{uuid.uuid4()}",
+            "name": "Healthcare Regulations Tree",
+            "description": "Decision tree for healthcare regulatory compliance",
+            "root_node": "start",
+            "nodes": {
+                "start": {
+                    "id": "start",
+                    "type": "decision",
+                    "query": "What aspect of healthcare regulations is the query about?",
+                    "options": [
+                        {"value": "hipaa", "label": "HIPAA", "next": "retrieve_hipaa"},
+                        {"value": "gdpr", "label": "GDPR", "next": "retrieve_gdpr"},
+                        {"value": "industry", "label": "Industry Standards", "next": "retrieve_standards"},
+                        {"value": "general", "label": "General Information", "next": "general_analysis"}
+                    ]
+                },
+                "retrieve_hipaa": {
+                    "id": "retrieve_hipaa",
+                    "type": "action",
+                    "action": "retrieve_facts",
+                    "next": "generate_response"
+                },
+                "retrieve_gdpr": {
+                    "id": "retrieve_gdpr",
+                    "type": "action",
+                    "action": "retrieve_facts",
+                    "next": "generate_response"
+                },
+                "retrieve_standards": {
+                    "id": "retrieve_standards",
+                    "type": "action",
+                    "action": "retrieve_facts",
+                    "next": "generate_response"
+                },
+                "general_analysis": {
+                    "id": "general_analysis",
+                    "type": "action",
+                    "action": "retrieve_context",
+                    "next": "perform_analysis"
+                },
+                "perform_analysis": {
+                    "id": "perform_analysis",
+                    "type": "action",
+                    "action": "perform_analysis",
+                    "next": "generate_response"
+                },
+                "generate_response": {
+                    "id": "generate_response",
+                    "type": "response",
+                    "response_template": "{result}"
+                }
+            }
+        })
+    }
+    
+    return trees

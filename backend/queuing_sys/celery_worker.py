@@ -54,7 +54,7 @@ app.conf.update(
 # Import tasks - we define these here to avoid circular imports
 from unstructured_parser.base_parser import BaseParser, ParserType
 from llamaIndex_rag.rag import RAGSystem
-from pyndantic_agents.agents import create_agent, AgentConfig
+from autonomous_agent.integration_components.agent_factory import create_agent
 
 # Configuration from environment variables
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
@@ -332,21 +332,22 @@ def execute_agent_task(self, agent_type: str, task: str, config: Optional[Dict[s
     """
     try:
         # Import here to avoid circular imports
-        from pyndantic_agents.agents import create_agent, AgentConfig
+        from autonomous_agent.integration_components.agent_factory import create_agent
+        from autonomous_agent.integration_components.agent_adapter import AutonomousAgentAdapter
 
         # Generate agent ID
         agent_id = f"{agent_type}_{uuid.uuid4()}"
 
         # Create agent configuration
         if config:
-            agent_config = AgentConfig(**config)
+            agent_config = config
         else:
-            agent_config = AgentConfig(
-                name=f"{agent_type.capitalize()} Agent",
-                description=f"A {agent_type} agent for regulatory AI",
-                include_context=include_context,
-                context_query=context_query
-            )
+            agent_config = {
+                "name": f"{agent_type.capitalize()} Agent",
+                "description": f"A {agent_type} agent for regulatory AI",
+                "include_context": include_context,
+                "context_query": context_query
+            }
 
         # Initialize RAG system
         rag_system = get_rag_system()

@@ -3,7 +3,7 @@ import { Box, FormControl, FormLabel, Select, Switch, Tooltip, Badge, Flex, Text
 import { InfoIcon } from '@chakra-ui/icons';
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000'
 
 // Default agent settings - pure constant
 const DEFAULT_AGENT_SETTINGS = { 
@@ -59,12 +59,29 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
         setAgentTypes(typesResponse.data);
         
         // Fetch agent metadata
-        const metadataResponse = await axios.get(`${API_URL}/agents/metadata`);
-        setAgentMetadata(metadataResponse.data);
+        try {
+          const metadataResponse = await axios.get(`${API_URL}/agents/metadata`);
+          setAgentMetadata(metadataResponse.data);
+        } catch (metadataErr) {
+          console.warn('Could not fetch agent metadata, using simplified data:', metadataErr);
+          // Create basic metadata from agent types if metadata endpoint fails
+          const basicMetadata = Object.entries(typesResponse.data).map(([id, description]) => ({
+            id,
+            name: `${id.charAt(0).toUpperCase() + id.slice(1)} Agent`,
+            description
+          }));
+          setAgentMetadata(basicMetadata);
+        }
         
         // Fetch decision trees
-        const treesResponse = await axios.get(`${API_URL}/agents/trees`);
-        setAvailableTrees(treesResponse.data);
+        try {
+          const treesResponse = await axios.get(`${API_URL}/agents/trees`);
+          setAvailableTrees(treesResponse.data);
+        } catch (treesErr) {
+          console.warn('Could not fetch decision trees:', treesErr);
+          // Set a default empty object if trees endpoint fails
+          setAvailableTrees({});
+        }
         
         setError(null);
       } catch (err) {
@@ -153,7 +170,7 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
       <Flex justifyContent="space-between" mb={2} alignItems="center">
         <FormControl display="flex" alignItems="center">
           <FormLabel htmlFor="agent-toggle" mb={0} fontSize="sm" fontWeight="medium" color={textColor}>
-            Use AI Agent
+            Use Autonomous Agent
           </FormLabel>
           <Switch 
             id="agent-toggle" 
@@ -248,18 +265,11 @@ const AgentSelector = ({ onAgentChange, initialAgent = null }) => {
               borderRadius="md"
             >
               <Text fontWeight="medium" mb={1}>Capabilities:</Text>
-              <Flex flexWrap="wrap" gap={1}>
-                {currentAgentMeta.capabilities.map((cap, index) => (
-                  <Badge 
-                    key={index} 
-                    colorScheme="purple" 
-                    variant="subtle" 
-                    fontSize="11px"
-                  >
-                    {cap.name}
-                  </Badge>
+              <ul style={{ marginLeft: '1rem', marginTop: '0.25rem' }}>
+                {currentAgentMeta.capabilities.map((cap, idx) => (
+                  <li key={idx}>{cap.name}</li>
                 ))}
-              </Flex>
+              </ul>
             </Box>
           )}
         </>

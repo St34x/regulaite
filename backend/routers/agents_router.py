@@ -4,7 +4,7 @@ FastAPI router for agent metadata, capabilities and documentation.
 import logging
 import json
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Response
 from pydantic import BaseModel, Field
 import os
 
@@ -114,23 +114,42 @@ class AgentHealthCheck(BaseModel):
 
 # Dependency to get agent types from the main app
 async def get_agent_types():
-    """Get agent types from Pyndantic agents."""
+    """Get agent types from autonomous agent factory."""
     try:
-        from pyndantic_agents.agent_factory import get_agent_types
+        from autonomous_agent.integration_components.agent_factory import get_agent_types
         return get_agent_types()
     except ImportError:
-        logger.warning("Could not import get_agent_types from pyndantic_agents")
+        logger.warning("Could not import get_agent_types from autonomous_agent")
         return {}
 
 
 # Dependency to get decision trees from the main app
 async def get_decision_trees():
-    """Get available decision trees."""
+    """Get available decision trees from autonomous agent factory."""
     try:
-        from pyndantic_agents.decision_trees import get_available_trees
-        return get_available_trees()
+        from autonomous_agent.integration_components.agent_factory import get_agent_factory
+        factory = get_agent_factory()
+        
+        # Get all available agent types
+        agent_types = factory.get_agent_types()
+        
+        # Create a dictionary of default trees for each agent type
+        trees = {}
+        for agent_type in agent_types:
+            tree = factory.get_default_tree(agent_type)
+            tree_id = tree["id"]
+            trees[tree_id] = {
+                "id": tree_id,
+                "name": tree["name"],
+                "description": tree["description"],
+                "agent_type": agent_type,
+                "is_default": True,
+                "nodes": tree["nodes"]
+            }
+        
+        return trees
     except ImportError:
-        logger.warning("Could not import get_available_trees from pyndantic_agents")
+        logger.warning("Could not import get_agent_factory from autonomous_agent")
         return {}
 
 
@@ -152,35 +171,27 @@ async def list_decision_trees():
 async def get_agents_metadata():
     """Get metadata for all available agents."""
     try:
-        # Get agent types first
+        # Get agent types from autonomous_agent only
         agent_types = await get_agent_types()
+        
+        # Generate metadata directly from agent types without trying to load from pyndantic_agents
+        metadata_list = []
+        for agent_id, description in agent_types.items():
+            # Create metadata object for each agent type
+            metadata = AgentMetadata(
+                id=agent_id,
+                name=f"{agent_id.capitalize()} Agent",
+                description=description,
+                version="1.0.0",
+                capabilities=[],  # Default empty capabilities
+                parameters=[],    # Default empty parameters
+                model_requirements={"recommended": "gpt-4"},
+                context_usage="optional",
+                tags=[agent_id]
+            )
+            metadata_list.append(metadata)
 
-        # Load metadata from JSON file
-        metadata_path = os.path.join(os.path.dirname(__file__), '../pyndantic_agents/agent_metadata.json')
-
-        try:
-            with open(metadata_path, 'r') as f:
-                metadata_dict = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not load agent metadata from file: {str(e)}")
-            # Provide fallback metadata based on agent types
-            metadata_dict = {
-                agent_id: {
-                    "id": agent_id,
-                    "name": f"{agent_id.capitalize()} Agent",
-                    "description": description,
-                    "version": "1.0.0",
-                    "capabilities": [],
-                    "parameters": [],
-                    "model_requirements": {"recommended": "gpt-4"},
-                    "context_usage": "optional",
-                    "tags": [agent_id]
-                }
-                for agent_id, description in agent_types.items()
-            }
-
-        # Return metadata as list
-        return [AgentMetadata(**metadata) for metadata in metadata_dict.values()]
+        return metadata_list
 
     except Exception as e:
         logger.error(f"Error retrieving agent metadata: {str(e)}")
@@ -223,49 +234,42 @@ async def get_agent_metadata(agent_id: str):
 async def get_agent_documentation(agent_id: str):
     """Get documentation for a specific agent."""
     try:
-        # Load documentation from JSON file
-        docs_path = os.path.join(os.path.dirname(__file__), '../pyndantic_agents/agent_documentation.json')
-
-        try:
-            with open(docs_path, 'r') as f:
-                docs_dict = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not load agent documentation from file: {str(e)}")
-            # Get agent metadata to provide fallback documentation
-            try:
-                metadata = await get_agent_metadata(agent_id)
-
-                # Create minimal documentation
-                return AgentDocumentation(
-                    id=agent_id,
-                    name=metadata.name,
-                    description=metadata.description,
-                    long_description=f"Detailed documentation for {metadata.name} is not available yet.",
-                    usage_examples=[
-                        AgentUsageExample(
-                            query=f"Help me with {agent_id} analysis",
-                            description=f"Basic {agent_id} analysis request"
-                        )
-                    ],
-                    limitations=["Documentation is under development."],
-                    best_practices=["Refer to the general agent documentation for best practices."]
-                )
-            except HTTPException:
-                # If agent metadata is not found, raise 404
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent not found: {agent_id}"
-                )
-
-        # Check if documentation exists for the requested agent
-        if agent_id not in docs_dict:
+        # Get agent types to verify agent exists
+        agent_types = await get_agent_types()
+        
+        # Check if agent exists
+        if agent_id not in agent_types:
             raise HTTPException(
                 status_code=404,
-                detail=f"Documentation not found for agent: {agent_id}"
+                detail=f"Agent not found: {agent_id}"
             )
-
-        # Return documentation
-        return AgentDocumentation(**docs_dict[agent_id])
+        
+        # Generate basic documentation from agent type
+        description = agent_types[agent_id]
+        
+        # Create documentation object
+        documentation = AgentDocumentation(
+            id=agent_id,
+            name=f"{agent_id.capitalize()} Agent",
+            description=description,
+            long_description=f"The {agent_id} agent provides functionality for {description.lower()}.",
+            usage_examples=[
+                AgentUsageExample(
+                    query=f"How can I use the {agent_id} agent?",
+                    description=f"Basic usage example for the {agent_id} agent",
+                    result_summary=f"Information about using the {agent_id} agent"
+                )
+            ],
+            limitations=[
+                f"The {agent_id} agent is limited to its trained knowledge and capabilities."
+            ],
+            best_practices=[
+                f"Provide clear and specific instructions when using the {agent_id} agent.",
+                "Include relevant context when possible for better results."
+            ]
+        )
+        
+        return documentation
 
     except HTTPException:
         # Re-raise HTTP exceptions
@@ -285,6 +289,10 @@ async def get_decision_tree(tree_id: str):
         # Get all trees
         trees = await get_decision_trees()
 
+        # Map 'default_understanding' to a default tree if it exists
+        if tree_id == "default_understanding" and "regulatory_default_tree" in trees:
+            tree_id = "regulatory_default_tree"
+            
         # Check if the requested tree exists
         if tree_id not in trees:
             raise HTTPException(
@@ -323,65 +331,110 @@ async def get_decision_tree(tree_id: str):
 async def visualize_decision_tree(tree_id: str, format: str = "svg"):
     """Visualize a decision tree."""
     try:
-        # Import tree visualizer
-        try:
-            from pyndantic_agents.tree_visualizer import generate_tree_visualization
-        except ImportError:
-            raise HTTPException(
-                status_code=501, 
-                detail="Tree visualization is not available"
-            )
-
-        # Get the actual DecisionTree object
-        from pyndantic_agents.decision_trees import get_tree
-        tree_object = get_tree(tree_id) # Get the full DecisionTree Pydantic model
-
+        # Get the decision tree data first
+        trees = await get_decision_trees()
+        
+        # Map 'default_understanding' to a default tree if it exists
+        if tree_id == "default_understanding" and "regulatory_default_tree" in trees:
+            tree_id = "regulatory_default_tree"
+        
         # Check if the requested tree exists
-        if not tree_object:
+        if tree_id not in trees:
             raise HTTPException(
                 status_code=404,
                 detail=f"Decision tree not found: {tree_id}"
             )
-
-        # Generate visualization
-        # The generate_tree_visualization function expects 'output_format'
-        visualization_result = generate_tree_visualization(tree_object, output_format=format.lower())
-
-        # Return response based on format
-        if format.lower() == "svg":
-            from fastapi.responses import Response
-            # Ensure visualization_result is bytes or string for SVG
-            if isinstance(visualization_result, bytes):
-                return Response(content=visualization_result, media_type="image/svg+xml")
-            elif isinstance(visualization_result, str):
-                return Response(content=visualization_result.encode('utf-8'), media_type="image/svg+xml")
-            else:
-                logger.error(f"SVG visualization did not return bytes or string for tree {tree_id}")
-                raise HTTPException(status_code=500, detail="SVG generation failed")
-        elif format.lower() == "png":
-            from fastapi.responses import Response
-            # Ensure visualization_result is bytes for PNG
-            if isinstance(visualization_result, bytes):
-                return Response(content=visualization_result, media_type="image/png")
-            else:
-                logger.error(f"PNG visualization did not return bytes for tree {tree_id}")
-                raise HTTPException(status_code=500, detail="PNG generation failed")
-        elif format.lower() == "json":
-            # generate_tree_visualization for "json" should return a Pydantic model or dict
-            # FastAPI will serialize Pydantic models automatically.
-            # If it's a string that needs parsing, that was likely an issue.
-            return visualization_result 
+        
+        # Get the tree data
+        tree_data = trees[tree_id]
+        
+        if format.lower() == "json":
+            # For JSON, simply return the tree data
+            return tree_data
+        elif format.lower() == "svg":
+            try:
+                # Check if graphviz is available
+                import graphviz
+                
+                # Create a new directed graph
+                dot = graphviz.Digraph(comment=f'Decision Tree: {tree_data.get("name", "")}')
+                dot.attr(rankdir='TB')  # Top to bottom layout
+                
+                # Process nodes
+                nodes = tree_data.get("nodes", {})
+                
+                # Add nodes to the graph
+                for node_id, node in nodes.items():
+                    node_type = node.get("type", "unknown")
+                    
+                    # Set node shape based on type
+                    shape = "ellipse"  # Default shape
+                    if node_type == "decision":
+                        shape = "diamond"
+                    elif node_type == "action":
+                        shape = "box"
+                    elif node_type == "response":
+                        shape = "oval"
+                    
+                    # Set node label
+                    label = f"{node_id}\n({node_type})"
+                    if node_type == "decision" and "query" in node:
+                        label += f"\n{node['query'][:30]}..."
+                    elif node_type == "action" and "action" in node:
+                        label += f"\n{node['action']}"
+                    elif node_type == "response" and "response_template" in node:
+                        label += f"\nResponse Node"
+                    
+                    # Set node color
+                    color = "#4415b6"  # Default accent color
+                    fontcolor = "black"
+                    
+                    # Add node to graph
+                    dot.node(node_id, label=label, shape=shape, style="filled", 
+                             color=color, fillcolor="#ffffff", fontcolor=fontcolor,
+                             id=f"node_{node_id}")
+                
+                # Add edges based on node relationships
+                for node_id, node in nodes.items():
+                    # For decision nodes, handle options
+                    if node.get("type") == "decision" and "options" in node:
+                        for option in node["options"]:
+                            if "next" in option and option["next"] in nodes:
+                                label = option.get("label", option.get("value", ""))
+                                dot.edge(node_id, option["next"], label=label[:15])
+                    
+                    # For other node types with next property
+                    elif "next" in node and node["next"] in nodes:
+                        dot.edge(node_id, node["next"])
+                
+                # Render the graph to SVG
+                svg_data = dot.pipe(format='svg').decode('utf-8')
+                
+                return Response(content=svg_data, media_type="image/svg+xml")
+            except ImportError:
+                # If graphviz is not installed, return a helpful error
+                raise HTTPException(
+                    status_code=501,
+                    detail="Tree visualization requires graphviz which is not installed. Please install graphviz or use format=json."
+                )
+            except Exception as e:
+                logger.error(f"Error creating SVG for tree {tree_id}: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error creating tree visualization: {str(e)}"
+                )
         else:
+            # For other formats, return error message
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported format: {format}. Supported formats: svg, png, json"
+                detail=f"Unsupported format: {format}. Supported formats are 'json' and 'svg'."
             )
 
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Error visualizing decision tree {tree_id}: {str(e)}", exc_info=True) # Added exc_info for more details
+        logger.error(f"Error visualizing decision tree {tree_id}: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error visualizing decision tree: {str(e)}"

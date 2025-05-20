@@ -26,7 +26,7 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
   const [svgContent, setSvgContent] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [viewMode, setViewMode] = useState('graph'); // 'graph' or 'json'
+  const [viewMode, setViewMode] = useState('json'); // Default to 'json' since graph might not be available
   const svgContainerRef = useRef(null);
   
   const toast = useToast();
@@ -42,17 +42,24 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
         const treeResponse = await axios.get(`${API_URL}/agents/trees/${treeId}`);
         setTreeData(treeResponse.data);
         
-        // Fetch SVG visualization
-        const svgResponse = await axios.get(`${API_URL}/agents/visualize-tree/${treeId}?format=svg`);
-        setSvgContent(svgResponse.data);
+        // Try to fetch SVG visualization if available
+        try {
+          const svgResponse = await axios.get(`${API_URL}/agents/visualize-tree/${treeId}?format=svg`);
+          setSvgContent(svgResponse.data);
+          setViewMode('graph'); // Switch to graph mode if SVG is available
+        } catch (svgError) {
+          console.warn('SVG visualization not available:', svgError);
+          setSvgContent(null);
+          setViewMode('json'); // Fallback to JSON view
+        }
         
         setError(null);
       } catch (err) {
         console.error('Error fetching tree data:', err);
-        setError('Failed to load decision tree visualization.');
+        setError('Failed to load decision tree data.');
         toast({
           title: 'Error loading tree',
-          description: 'Could not load the decision tree visualization.',
+          description: 'Could not load the decision tree data.',
           status: 'error',
           duration: 5000,
           isClosable: true,
@@ -84,6 +91,43 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
     }
   }, [svgContent, highlightedNodeId, viewMode]);
 
+  // Helper function to build a tree structure from nodes object
+  const buildTreeStructure = (nodes, rootNodeId) => {
+    if (!nodes || !rootNodeId || !nodes[rootNodeId]) return null;
+    
+    const visitedNodes = new Set();
+    
+    const buildNode = (nodeId) => {
+      if (visitedNodes.has(nodeId) || !nodes[nodeId]) return null;
+      visitedNodes.add(nodeId);
+      
+      const node = nodes[nodeId];
+      const children = {};
+      
+      // For decision nodes, process options
+      if (node.type === 'decision' && node.options && Array.isArray(node.options)) {
+        node.options.forEach(option => {
+          if (option.next && nodes[option.next]) {
+            children[option.next] = buildNode(option.next);
+          }
+        });
+      } 
+      // For other node types, check next property
+      else if (node.next && nodes[node.next]) {
+        children[node.next] = buildNode(node.next);
+      }
+      
+      return {
+        ...node,
+        name: node.id,
+        description: node.query || node.action || node.response_template || '',
+        children: Object.keys(children).length > 0 ? children : null
+      };
+    };
+    
+    return buildNode(rootNodeId);
+  };
+
   // Render tree nodes recursively as a JSON tree
   const renderTreeNode = (node, nodeId, depth = 0) => {
     if (!node) return null;
@@ -102,7 +146,7 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
       >
         <HStack spacing={2} mb={1}>
           <Text fontWeight={isHighlighted ? "bold" : "medium"} fontSize="sm">
-            {node.type === 'decision' ? '🔍' : node.type === 'action' ? '⚡' : '❓'} {node.name || nodeId}
+            {node.type === 'decision' ? '🔍' : node.type === 'action' ? '⚡' : '💬'} {nodeId}
           </Text>
           
           <Badge colorScheme={
@@ -119,8 +163,30 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
           </Text>
         )}
         
+        {/* For decision nodes, show options */}
+        {node.type === 'decision' && node.options && Array.isArray(node.options) && (
+          <Box ml={2} mt={1} fontSize="xs">
+            <Text fontWeight="medium" mb={1}>Options:</Text>
+            {node.options.map((option, idx) => (
+              <HStack key={idx} spacing={2} mb={0.5}>
+                <Badge colorScheme="gray" fontSize="xs">{option.value}</Badge>
+                <Text>{option.label}</Text>
+                {option.next && <Text color="gray.500">→ {option.next}</Text>}
+              </HStack>
+            ))}
+          </Box>
+        )}
+        
+        {/* For action nodes, show action and next */}
+        {node.type === 'action' && (
+          <Box ml={2} mt={1} fontSize="xs">
+            <Text fontWeight="medium" mb={1}>Action: {node.action}</Text>
+            {node.next && <Text color="gray.500">Next: {node.next}</Text>}
+          </Box>
+        )}
+        
         {node.children && (
-          <VStack align="stretch" spacing={0}>
+          <VStack align="stretch" spacing={0} mt={2}>
             {Object.entries(node.children).map(([childId, childNode]) => 
               renderTreeNode(childNode, childId, depth + 1)
             )}
@@ -155,6 +221,10 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
     );
   }
 
+  // Build tree structure from nodes
+  const treeStructure = treeData.nodes ? 
+    buildTreeStructure(treeData.nodes, treeData.root_node) : null;
+
   return (
     <Box borderWidth="1px" borderRadius="md" p={3} bg="white" shadow="sm">
       <Accordion allowToggle defaultIndex={[0]}>
@@ -175,65 +245,66 @@ const DecisionTreeVisualizer = ({ treeId, highlightedNodeId = null }) => {
                 </Text>
                 <HStack spacing={2}>
                   <Badge colorScheme="purple" fontSize="xs">ID: {treeData.id}</Badge>
-                  <Badge colorScheme="gray" fontSize="xs">v{treeData.version}</Badge>
+                  {treeData.version && <Badge colorScheme="gray" fontSize="xs">v{treeData.version}</Badge>}
                   {treeData.is_default && (
                     <Badge colorScheme="green" fontSize="xs">Default</Badge>
                   )}
                 </HStack>
               </Box>
               
-              {/* View Mode Toggle */}
-              <HStack justifyContent="center" spacing={2}>
-                <Button 
-                  size="xs" 
-                  variant={viewMode === 'graph' ? 'solid' : 'outline'} 
-                  colorScheme="purple"
-                  onClick={() => setViewMode('graph')}
-                >
-                  Graph View
-                </Button>
-                <Button 
-                  size="xs" 
-                  variant={viewMode === 'json' ? 'solid' : 'outline'} 
-                  colorScheme="purple"
-                  onClick={() => setViewMode('json')}
-                >
-                  JSON View
-                </Button>
-              </HStack>
+              {/* View Mode Toggle - Only show if SVG content is available */}
+              {svgContent && (
+                <HStack justifyContent="center" spacing={2}>
+                  <Button 
+                    size="xs" 
+                    variant={viewMode === 'graph' ? 'solid' : 'outline'} 
+                    colorScheme="purple"
+                    onClick={() => setViewMode('graph')}
+                  >
+                    Graph View
+                  </Button>
+                  <Button 
+                    size="xs" 
+                    variant={viewMode === 'json' ? 'solid' : 'outline'} 
+                    colorScheme="purple"
+                    onClick={() => setViewMode('json')}
+                  >
+                    Tree View
+                  </Button>
+                </HStack>
+              )}
               
               {/* Tree Visualization */}
-              {viewMode === 'graph' ? (
-                <Box 
-                  ref={svgContainerRef} 
-                  overflowX="auto" 
-                  maxW="100%" 
-                  h="300px"
-                  borderWidth="1px"
-                  borderRadius="md"
-                  borderColor="gray.200"
-                  p={2}
-                />
-              ) : (
-                <Box 
-                  maxH="400px" 
-                  overflowY="auto"
-                  borderWidth="1px"
-                  borderRadius="md"
-                  borderColor="gray.200"
-                  p={2}
-                >
-                  {treeData.nodes && Object.entries(treeData.nodes).map(([nodeId, node]) => {
-                    // Only render root nodes (nodes at the top level)
-                    if (!Object.values(treeData.nodes).some(n => 
-                      n.children && Object.values(n.children).some(child => child && child.id === nodeId)
-                    )) {
-                      return renderTreeNode(node, nodeId);
-                    }
-                    return null;
-                  })}
-                </Box>
-              )}
+              <Box 
+                borderWidth="1px" 
+                borderRadius="md" 
+                p={3} 
+                bg="white" 
+                shadow="inner"
+                overflowX="auto"
+                maxHeight="500px"
+                overflowY="auto"
+              >
+                {viewMode === 'graph' && svgContent ? (
+                  <Box 
+                    ref={svgContainerRef} 
+                    width="100%" 
+                    minHeight="300px"
+                    display="flex"
+                    justifyContent="center"
+                  />
+                ) : (
+                  <Box>
+                    {treeStructure ? (
+                      renderTreeNode(treeStructure, treeData.root_node)
+                    ) : (
+                      <Text fontSize="sm" color="gray.500" textAlign="center" py={10}>
+                        Cannot visualize this tree structure.
+                      </Text>
+                    )}
+                  </Box>
+                )}
+              </Box>
             </VStack>
           </AccordionPanel>
         </AccordionItem>

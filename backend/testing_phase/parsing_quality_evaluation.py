@@ -16,21 +16,17 @@ and collects metrics on response quality.
 """
 
 import os
-import sys
-import json
-import time
 import logging
 import asyncio
 import argparse
 import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+import json
+import time
 from openai import AsyncOpenAI
 
-# Add the parent directory to the path to import from backend
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Import necessary components from the backend
+# Import necessary components
 from pyndantic_agents.base_agent import BaseAgent, AgentInput, AgentOutput
 from pyndantic_agents.agent_factory import create_agent
 from pyndantic_agents.rag_agent import RAGAgent

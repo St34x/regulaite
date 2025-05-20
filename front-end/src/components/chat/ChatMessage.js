@@ -35,6 +35,62 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const chunkBgColor = useColorModeValue('white', 'gray.800');
   const chunkBorderColor = useColorModeValue('gray.100', 'gray.700');
 
+  // Function to normalize source documents from various formats
+  const normalizeSourceDocuments = () => {
+    // First check if message has sources directly
+    if (message.sources && Array.isArray(message.sources) && message.sources.length > 0) {
+      return message.sources;
+    }
+    
+    // Then check for source_documents in message
+    if (message.source_documents && Array.isArray(message.source_documents) && message.source_documents.length > 0) {
+      return message.source_documents;
+    }
+    
+    // Lastly check if agentInfo has source_documents
+    if (agentInfo && agentInfo.source_documents && Array.isArray(agentInfo.source_documents) && agentInfo.source_documents.length > 0) {
+      return agentInfo.source_documents;
+    }
+    
+    return null;
+  };
+
+  // Normalize sources
+  const sourceDocuments = normalizeSourceDocuments();
+  
+  // Format the reasoning path from the agent
+  const getReasoningPath = () => {
+    if (message.traversal_path) {
+      return message.traversal_path.map(node => node.node_id || node);
+    }
+    if (agentInfo && agentInfo.reasoning_path) {
+      return agentInfo.reasoning_path;
+    }
+    if (message.reasoning_path) {
+      return message.reasoning_path;
+    }
+    return null;
+  };
+  
+  const reasoningPath = getReasoningPath();
+  
+  // Get the agent type from message or agentInfo
+  const getAgentType = () => {
+    if (message.agent_type) {
+      return message.agent_type;
+    }
+    if (agentInfo && agentInfo.agent_type) {
+      return agentInfo.agent_type;
+    }
+    // Default to 'autonomous' if agent was used but type is unknown
+    if (message.agent_used || (agentInfo && agentInfo.agent_used)) {
+      return 'autonomous';
+    }
+    return null;
+  };
+  
+  const agentType = getAgentType();
+
   return (
     <Box 
       display="flex"
@@ -101,7 +157,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             </Tooltip>
           )}
           
-          {!isUser && agentInfo && agentInfo.agent_type && (
+          {!isUser && agentType && (
             <Badge 
               bg={accentColor} 
               color="white" 
@@ -111,7 +167,21 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
               px={2}
               boxShadow="0 1px 2px rgba(68, 21, 182, 0.3)"
             >
-              {agentInfo.agent_type} Agent
+              {agentType.charAt(0).toUpperCase() + agentType.slice(1)} Agent
+            </Badge>
+          )}
+          
+          {/* Tree Reasoning Badge */}
+          {!isUser && (message.tree_reasoning_used || (agentInfo && agentInfo.tree_reasoning_used)) && (
+            <Badge
+              bg={accentColorLight}
+              color={accentColor}
+              variant="subtle"
+              fontSize="xs"
+              borderRadius="full"
+              px={2}
+            >
+              Tree Reasoning
             </Badge>
           )}
           
@@ -150,7 +220,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
         </Box>
         
         {/* Agent Information and Sources */}
-        {!isUser && (agentInfo || message.sources) && (
+        {!isUser && (reasoningPath || sourceDocuments) && (
           <Box 
             mt={3} 
             pt={2} 
@@ -159,17 +229,17 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             fontSize="xs" 
             color={mutedTextColor}
           >
-            {agentInfo && agentInfo.reasoning_path && (
+            {reasoningPath && (
               <Flex align="center" mb={1} p={3} bg={agentInfoBg} borderRadius="md" boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)">
                 <Icon as={Info} boxSize={3} mr={1} color={accentColor} />
-                <Text fontWeight="medium">Reasoning:</Text>
-                <Text ml={1}>{agentInfo.reasoning_path.join(' > ')}</Text>
+                <Text fontWeight="medium">Reasoning Path:</Text>
+                <Text ml={1}>{Array.isArray(reasoningPath) ? reasoningPath.join(' → ') : reasoningPath}</Text>
               </Flex>
             )}
             
-            {/* Display sources from either agentInfo or message.sources */}
-            {(message.sources || (agentInfo && agentInfo.source_documents)) && (
-              <Accordion allowToggle mt={agentInfo && agentInfo.reasoning_path ? 2 : 0}>
+            {/* Display sources */}
+            {sourceDocuments && (
+              <Accordion allowToggle mt={reasoningPath ? 2 : 0}>
                 <AccordionItem 
                   border="none"
                   bg={agentInfoBg} 
@@ -179,29 +249,37 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
                   <h2>
                     <AccordionButton _expanded={{ bg: accentColorLighter, color: accentColor }} borderRadius="md">
                       <Box flex="1" textAlign="left">
-                        <Text fontWeight="medium" color={accentColor}>Sources:</Text>
+                        <Text fontWeight="medium" color={accentColor}>Sources ({sourceDocuments.length}):</Text>
                       </Box>
                       <AccordionIcon color={accentColor} />
                     </AccordionButton>
                   </h2>
                   <AccordionPanel pb={4} pt={2} px={3}>
-                    {/* Display message.sources first if available */}
-                    {message.sources && message.sources.length > 0 && (
-                      message.sources.map((source, idx) => (
+                    {sourceDocuments.map((source, idx) => {
+                      // Normalize source format (property names vary between implementations)
+                      const title = source.title || source.name || source.source || source.doc_name || 
+                                   (source.metadata && (source.metadata.title || source.metadata.doc_name)) || 
+                                   `Source ${idx + 1}`;
+                      
+                      const text = source.text_preview || source.content || source.text || 
+                                  (source.metadata && source.metadata.text) || 
+                                  'No preview available';
+                                  
+                      const score = source.score || source.similarity || source.relevance || 
+                                   (source.metadata && source.metadata.score);
+                      
+                      return (
                         <Box key={`source-${idx}`} ml={0} mb={3} pl={3} borderLeft="3px solid" borderColor={accentColorLighter} _last={{ mb: 0 }}>
-                          <Tooltip label={source.file_path || ""} placement="top-start" hasArrow>
-                            <Text fontWeight="medium" fontSize="sm" color={textColor} mb={0.5} cursor="help">
-                              {source.title || `Source ${source.id || idx + 1}`}
-                            </Text>
-                          </Tooltip>
+                          <Text fontWeight="medium" fontSize="sm" color={textColor} mb={0.5}>
+                            {title}
+                          </Text>
                           
-                          {typeof source.score === 'number' && (
+                          {typeof score === 'number' && (
                             <Text fontSize="xs" color={mutedTextColor} mb={1}>
-                              Score: {source.score.toFixed(3)}
+                              Relevance: {score.toFixed(3)}
                             </Text>
                           )}
                           
-                          {/* Display the text_preview (RAG chunk) prominently */}
                           <Text 
                             fontSize="xs" 
                             color={textColor} 
@@ -214,30 +292,11 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
                             borderWidth="1px"
                             borderColor={chunkBorderColor}
                           >
-                            {source.text_preview ? source.text_preview : (
-                              <Box>
-                                <Text fontWeight="medium" mb={1}>
-                                  {source.title || `Source ${source.id || idx + 1}`}
-                                </Text>
-                                <Text fontStyle="italic" color={mutedTextColor}>
-                                  This source was used as reference, but no text content is available for display.
-                                </Text>
-                              </Box>
-                            )}
+                            {text}
                           </Text>
                         </Box>
-                      ))
-                    )}
-                    
-                    {/* Display agent's source_documents as fallback */}
-                    {!message.sources && agentInfo && agentInfo.source_documents && (
-                      agentInfo.source_documents.map((doc, idx) => (
-                        <Text key={`doc-${idx}`} ml={2} mb={0.5}>• {doc.title || doc.source}</Text>
-                      ))
-                    )}
-                    {(!message.sources || message.sources.length === 0) && !(agentInfo && agentInfo.source_documents) && (
-                        <Text>No sources available.</Text>
-                    )}
+                      );
+                    })}
                   </AccordionPanel>
                 </AccordionItem>
               </Accordion>

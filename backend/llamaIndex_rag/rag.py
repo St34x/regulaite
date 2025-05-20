@@ -329,11 +329,16 @@ class HierarchicalRetriever(BaseRetriever):
                     
                     // Group by chunk ID to fix the aggregation issue
                     WITH c.id as chunk_id, 
+                         parent_section_info,
+                         collect(DISTINCT {id: sibling_c_node.chunk_id, type: 'sibling_chunk', distance: distance}) as sibling_chunk_nodes
+                    
+                    // Handle parent_section_info separately to avoid aggregation issues
+                    WITH chunk_id,
                          CASE WHEN parent_section_info IS NOT NULL 
-                              THEN collect(DISTINCT parent_section_info) 
+                              THEN [parent_section_info] 
                               ELSE [] 
                          END as parent_section_nodes,
-                         collect(DISTINCT {id: sibling_c_node.chunk_id, type: 'sibling_chunk', distance: distance}) as sibling_chunk_nodes
+                         sibling_chunk_nodes
                     
                     RETURN chunk_id, 
                            parent_section_nodes,
@@ -545,7 +550,7 @@ class RAGSystem:
         if self.use_reranker:
             try:
                 self.reranker = SentenceTransformerRerank(
-                    model_name=self.reranker_model_name,
+                    model=self.reranker_model_name,
                     top_n=self.reranker_top_n
                 )
                 logger.info(f"Initialized reranker with model {self.reranker_model_name}")
@@ -793,25 +798,86 @@ class RAGSystem:
             return query
             
         try:
-            # For French queries about risk levels
-            if lang_code == "fr" and any(term in query.lower() for term in ["risque", "critique", "niveau", "score", "note"]):
-                expanded_terms = []
-                
-                # Add specific risk-related terms
-                if "critique" in query.lower():
-                    expanded_terms.extend(["critique", "sévère", "grave", "majeur", "important"])
-                
-                if "risque" in query.lower():
-                    expanded_terms.extend(["danger", "menace", "vulnérabilité"])
+            query_lower = query.lower()
+            expanded_terms = []
+            
+            # French query expansions
+            if lang_code == "fr":
+                # Risk and security related queries
+                if any(term in query_lower for term in ["risque", "critique", "niveau", "score", "note", "danger", "menace"]):
+                    if "critique" in query_lower:
+                        expanded_terms.extend(["critique", "sévère", "grave", "majeur", "important"])
                     
-                if any(level in query.lower() for level in ["niveau", "score", "note"]):
-                    expanded_terms.extend(["classification", "évaluation", "catégorie"])
+                    if "risque" in query_lower:
+                        expanded_terms.extend(["danger", "menace", "vulnérabilité", "aléa", "péril"])
+                        
+                    if any(level in query_lower for level in ["niveau", "score", "note"]):
+                        expanded_terms.extend(["classification", "évaluation", "catégorie", "échelle", "mesure"])
                 
-                # Create expanded query with original plus new terms
-                if expanded_terms:
-                    expanded_query = f"{query} {' '.join(expanded_terms)}"
-                    logger.info(f"Expanded query: '{query}' -> '{expanded_query}'")
-                    return expanded_query
+                # Legal and compliance related queries
+                if any(term in query_lower for term in ["loi", "légal", "juridique", "conformité", "règlement", "rgpd", "gdpr"]):
+                    expanded_terms.extend(["réglementation", "conformité", "obligation", "exigence", "directive", "norme"])
+                    
+                    if "rgpd" in query_lower or "gdpr" in query_lower:
+                        expanded_terms.extend(["données personnelles", "protection des données", "confidentialité", "vie privée"])
+                
+                # Financial and budget related queries
+                if any(term in query_lower for term in ["budget", "finance", "coût", "dépense", "investissement"]):
+                    expanded_terms.extend(["financier", "économique", "budgétaire", "fiscal", "comptable", "trésorerie"])
+                
+                # Process and procedure related queries
+                if any(term in query_lower for term in ["processus", "procédure", "étape", "méthode", "démarche"]):
+                    expanded_terms.extend(["protocole", "modalité", "fonctionnement", "méthodologie", "approche", "pratique"])
+                
+                # Technical and IT related queries
+                if any(term in query_lower for term in ["technique", "informatique", "système", "logiciel", "application"]):
+                    expanded_terms.extend(["technologie", "infrastructure", "architecture", "plateforme", "solution", "environnement"])
+                
+                # People and organization related queries
+                if any(term in query_lower for term in ["équipe", "personne", "employé", "collaborateur", "ressource"]):
+                    expanded_terms.extend(["personnel", "effectif", "membre", "recrutement", "compétence", "responsabilité"])
+                    
+                # Project related queries
+                if any(term in query_lower for term in ["projet", "initiative", "programme", "plan", "stratégie"]):
+                    expanded_terms.extend(["développement", "mise en œuvre", "déploiement", "pilotage", "gestion", "coordination"])
+                
+            # English query expansions (as a fallback or for multilingual support)
+            elif lang_code == "en":
+                # Risk and security related queries
+                if any(term in query_lower for term in ["risk", "critical", "level", "score", "danger", "threat"]):
+                    if "critical" in query_lower:
+                        expanded_terms.extend(["severe", "major", "significant", "important", "high-impact"])
+                    
+                    if "risk" in query_lower:
+                        expanded_terms.extend(["danger", "threat", "vulnerability", "hazard", "exposure"])
+                        
+                    if any(level in query_lower for level in ["level", "score", "rating"]):
+                        expanded_terms.extend(["classification", "evaluation", "category", "scale", "measurement"])
+                
+                # Legal and compliance related queries
+                if any(term in query_lower for term in ["law", "legal", "compliance", "regulation", "gdpr"]):
+                    expanded_terms.extend(["regulatory", "compliance", "obligation", "requirement", "directive", "standard"])
+                    
+                    if "gdpr" in query_lower:
+                        expanded_terms.extend(["personal data", "data protection", "privacy", "data security"])
+                
+                # Add more English expansions as needed...
+            
+            # Create expanded query with original plus new terms
+            if expanded_terms:
+                # Remove duplicates while preserving order
+                unique_expanded_terms = []
+                for term in expanded_terms:
+                    if term not in unique_expanded_terms:
+                        unique_expanded_terms.append(term)
+                
+                # Limit the number of expansion terms to avoid overly long queries
+                if len(unique_expanded_terms) > 10:
+                    unique_expanded_terms = unique_expanded_terms[:10]
+                
+                expanded_query = f"{query} {' '.join(unique_expanded_terms)}"
+                logger.info(f"Expanded query: '{query}' -> '{expanded_query}'")
+                return expanded_query
             
             return query
         except Exception as e:
@@ -901,26 +967,116 @@ class RAGSystem:
         lower_query = query.lower()
         
         # For risk-related questions, prioritize security documentation
-        if any(term in lower_query for term in ["risque", "critique", "danger", "menace", "vulnerability", "sécurité"]):
+        if any(term in lower_query for term in ["risque", "critique", "danger", "menace", "vulnerability", "sécurité", "vulnérabilité"]):
             return {
                 "any_of": [
                     {"category": "security"},
                     {"category": "risk"},
                     {"category": "compliance"},
+                    {"doc_type": "policy"},
                     {"doc_name": "PSSI"} # Prioritize security policy documents
                 ]
             }
             
         # For compliance questions
-        if any(term in lower_query for term in ["conforme", "conformité", "rgpd", "gdpr", "compliance"]):
+        if any(term in lower_query for term in ["conforme", "conformité", "rgpd", "gdpr", "compliance", "règlement", "régulation"]):
             return {
                 "any_of": [
                     {"category": "compliance"},
                     {"category": "legal"},
-                    {"category": "regulatory"}
+                    {"category": "regulatory"},
+                    {"doc_type": "regulation"},
+                    {"tags": "compliance"}
                 ]
             }
-            
+        
+        # For technical documentation and IT systems
+        if any(term in lower_query for term in ["technique", "système", "application", "logiciel", "informatique", "infrastructure", "architecture"]):
+            return {
+                "any_of": [
+                    {"category": "technical"},
+                    {"category": "IT"},
+                    {"category": "system"},
+                    {"doc_type": "manual"},
+                    {"doc_type": "documentation"},
+                    {"tags": "technical"}
+                ]
+            }
+        
+        # For financial and budget questions
+        if any(term in lower_query for term in ["finance", "budget", "coût", "dépense", "économique", "fiscal"]):
+            return {
+                "any_of": [
+                    {"category": "finance"},
+                    {"category": "budget"},
+                    {"category": "accounting"},
+                    {"doc_type": "financial_report"},
+                    {"tags": "financial"}
+                ]
+            }
+        
+        # For process and procedure questions
+        if any(term in lower_query for term in ["processus", "procédure", "méthode", "étape", "instruction", "guide"]):
+            return {
+                "any_of": [
+                    {"category": "process"},
+                    {"category": "procedure"},
+                    {"doc_type": "procedure"},
+                    {"doc_type": "guide"},
+                    {"doc_type": "manual"},
+                    {"tags": "procedure"}
+                ]
+            }
+        
+        # For HR and people-related questions
+        if any(term in lower_query for term in ["employé", "personnel", "ressource humaine", "recrutement", "rh", "collaborateur"]):
+            return {
+                "any_of": [
+                    {"category": "HR"},
+                    {"category": "human_resources"},
+                    {"doc_type": "policy"},
+                    {"doc_type": "procedure"},
+                    {"tags": "HR"}
+                ]
+            }
+        
+        # For project management questions
+        if any(term in lower_query for term in ["projet", "programme", "initiative", "planification", "délai", "échéance"]):
+            return {
+                "any_of": [
+                    {"category": "project"},
+                    {"category": "program"},
+                    {"doc_type": "project_plan"},
+                    {"doc_type": "roadmap"},
+                    {"tags": "project"}
+                ]
+            }
+        
+        # For organization and strategy questions
+        if any(term in lower_query for term in ["stratégie", "organisation", "objectif", "mission", "vision", "structure"]):
+            return {
+                "any_of": [
+                    {"category": "strategy"},
+                    {"category": "organization"},
+                    {"doc_type": "strategic_plan"},
+                    {"doc_type": "organizational_chart"},
+                    {"tags": "strategy"}
+                ]
+            }
+        
+        # For product and service questions
+        if any(term in lower_query for term in ["produit", "service", "offre", "client", "marché", "vente"]):
+            return {
+                "any_of": [
+                    {"category": "product"},
+                    {"category": "service"},
+                    {"category": "sales"},
+                    {"doc_type": "product_sheet"},
+                    {"doc_type": "service_catalog"},
+                    {"tags": "product"}
+                ]
+            }
+        
         # No specific filter for other query types
         return None
 
@@ -1185,10 +1341,148 @@ class RAGSystem:
             raise ValueError(f"Unsupported operator: {operator}")
 
     def close(self):
-        """Close connections"""
+        """Close connections and clean up resources."""
         if self.neo4j_driver:
-            self.neo4j_driver.close()
-            logger.info("Multilingual RAG system Neo4j connection closed")
+            try:
+                self.neo4j_driver.close()
+                logger.info("Neo4j connection closed.")
+            except Exception as e:
+                logger.error(f"Error closing Neo4j connection: {e}")
+        if self.qdrant_client:
+            try:
+                logger.info("Qdrant client operations finished. (No explicit close() usually needed for REST client)")
+            except Exception as e:
+                logger.error(f"Error with Qdrant client during close: {e}")
+        logger.info("RAGSystem shutdown complete.")
+        
+    def query_with_context(
+        self,
+        query: str,
+        lang_code: str = None,
+        top_k: int = 5,
+        use_hybrid: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Query the RAG system with proper context handling for better responses.
+        
+        Args:
+            query: The user's query
+            lang_code: Language code (if None, will be auto-detected)
+            top_k: Number of results to retrieve
+            use_hybrid: Whether to use hybrid search
+            
+        Returns:
+            Dict with response and source documents
+        """
+        # Auto-detect language if not provided
+        if lang_code is None:
+            lang_code = self.detect_language(query)
+            logger.info(f"Auto-detected query language: {lang_code}")
+        
+        # Apply context-based filter
+        filter_criteria = self._get_context_based_filter(query)
+        if filter_criteria:
+            logger.info(f"Applied context-based filter: {filter_criteria}")
+        
+        # Expand query if enabled
+        expanded_query = self._expand_query(query, lang_code) if self.query_expansion else query
+        
+        # Retrieve relevant documents
+        contexts = self.retrieve(
+            query=expanded_query, 
+            top_k=top_k,
+            use_hybrid=use_hybrid,
+            filter_criteria=filter_criteria
+        )
+        
+        logger.info(f"Retrieved {len(contexts)} documents for query: '{query[:30]}...'")
+        
+        if not contexts:
+            return {
+                "response": "Je n'ai pas trouvé d'information pertinente pour répondre à cette question.",
+                "sources": [],
+                "query": query
+            }
+        
+        # Prepare prompt with retrieved context
+        system_prompt = """Vous êtes un assistant spécialisé dans les domaines de la réglementation et de la conformité.
+Votre tâche est de fournir des informations précises et complètes en vous basant UNIQUEMENT sur les documents fournis.
+Vous devez répondre strictement sur la base du contexte fourni, sans introduire d'informations externes.
+Si les informations du contexte sont insuffisantes, indiquez clairement les aspects auxquels vous ne pouvez pas répondre.
+
+Lors de la création de votre réponse:
+1. Concentrez-vous sur la précision et les faits
+2. Faites des références directes aux sections pertinentes des documents fournis
+3. Structurez votre réponse de manière claire et organisée
+4. Incluez des détails spécifiques des documents lorsqu'ils sont disponibles
+5. Utilisez UNIQUEMENT les informations qui apparaissent dans les contextes fournis - c'est CRITIQUE
+
+IMPORTANT: Ne mentionnez pas le contexte et n'utilisez pas des phrases comme "selon les documents fournis" ou similaires.
+Fournissez simplement l'information comme si vous la connaissiez directement."""
+
+        user_prompt = f"Question: {query}\n\nContextes:\n"
+        
+        # Add contexts to prompt with enhanced formatting
+        for i, ctx in enumerate(contexts):
+            user_prompt += f"\nCONTEXTE {i+1}:\n"
+            user_prompt += f"Titre: {ctx.get('metadata', {}).get('doc_name', 'Document inconnu')}\n"
+            if 'section' in ctx.get('metadata', {}):
+                user_prompt += f"Section: {ctx['metadata']['section']}\n"
+            user_prompt += f"Contenu: {ctx['text']}\n"
+            
+            # Add relevant metadata
+            relevant_meta = {k: v for k, v in ctx.get('metadata', {}).items() 
+                           if k in ['author', 'date', 'category', 'file_type'] and v}
+            if relevant_meta:
+                meta_str = ", ".join(f"{k}: {v}" for k, v in relevant_meta.items())
+                user_prompt += f"Informations supplémentaires: {meta_str}\n"
+        
+        try:
+            # Generate response using OpenAI
+            if self.openai_api_key:
+                import openai
+                
+                client = openai.OpenAI(api_key=self.openai_api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4-turbo",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.2,
+                )
+                
+                answer = response.choices[0].message.content
+            else:
+                logger.error("No OpenAI API key available for query response generation")
+                answer = "Je ne peux pas générer une réponse pour le moment. La clé API n'est pas disponible."
+            
+            # Format source documents for return
+            source_docs = []
+            for ctx in contexts:
+                doc = {
+                    "text": ctx["text"],
+                    "document_id": ctx["metadata"].get("doc_id", "unknown"),
+                    "document_name": ctx["metadata"].get("doc_name", "Document inconnu"),
+                    "score": ctx.get("score", 0),
+                }
+                if "section" in ctx["metadata"]:
+                    doc["section"] = ctx["metadata"]["section"]
+                source_docs.append(doc)
+            
+            return {
+                "response": answer,
+                "sources": source_docs,
+                "query": query
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}", exc_info=True)
+            return {
+                "response": "J'ai rencontré une erreur lors de la génération d'une réponse.",
+                "sources": [],
+                "query": query
+            }
 
     def _initialize_fallback_placeholder(self):
         """

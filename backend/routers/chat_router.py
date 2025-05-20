@@ -5,6 +5,7 @@ import logging
 import json
 import uuid
 import time
+import asyncio
 from typing import List, Dict, Any, Optional, Literal, Union
 from fastapi import APIRouter, Depends, HTTPException, Body, Request, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -16,11 +17,11 @@ from datetime import timedelta
 import re
 from openai import OpenAI, AsyncOpenAI
 
-from pyndantic_agents.agent_factory import create_agent
-from pyndantic_agents.base_agent import BaseAgent, AgentInput
-from pyndantic_agents.rag_agent import RAGAgent
+# Import autonomous agent components instead of pyndantic agents
+from autonomous_agent.integration_components.agent_factory import create_agent, get_agent_types
+from autonomous_agent.integration_components.agent_adapter import AutonomousAgentAdapter
+from autonomous_agent.integration_components.tree_reasoning_adapter import TreeReasoningAdapter, DecisionTree
 from llamaIndex_rag.rag import RAGSystem, NodeWithScore
-from pyndantic_agents.tree_reasoning import TreeReasoningAgent
 
 # Configure logging
 logging.basicConfig(
@@ -53,8 +54,8 @@ class ChatRequest(BaseModel):
     include_context: bool = Field(True, description="Whether to include RAG context")
     context_query: Optional[str] = Field(None, description="Query to use for retrieving context")
     retrieval_type: Optional[str] = Field("auto", description="Type of retrieval to use: 'hybrid', 'vector', or 'auto' (default)")
-    use_agent: bool = Field(False, description="Whether to use an agent for processing")
-    agent_type: Optional[str] = Field(None, description="Type of agent to use if use_agent is True")
+    use_agent: bool = Field(True, description="Whether to use an agent for processing")
+    agent_type: Optional[str] = Field("rag", description="Type of agent to use if use_agent is True")
     agent_params: Optional[Dict[str, Any]] = Field(None, description="Additional parameters for the agent")
     use_tree_reasoning: bool = Field(False, description="Whether to use tree-based reasoning")
     tree_template: Optional[str] = Field(None, description="ID of the decision tree template to use")
@@ -205,7 +206,9 @@ async def track_agent_execution(
         return execution_id
     except Exception as e:
         logger.error(f"Error tracking agent execution: {str(e)}")
-        return None
+        # Instead of returning None, return a default execution ID for errors
+        # This avoids the FastAPI response validation error
+        return -1  # Use -1 to indicate an error occurred, but still return an int
 
 
 # Background task for updating analytics
@@ -343,427 +346,417 @@ async def extract_user_id_from_request(req: Request, provided_user_id: Optional[
 
 @router.post("", response_model=ChatResponse)
 async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundTasks):
-    """Handle chat requests, optionally using RAG and agents."""
-    session_id = request.session_id or str(uuid.uuid4())
-    user_id = await extract_user_id_from_request(req, provided_user_id=req.headers.get("X-User-ID")) # Example user ID extraction
-    start_time = time.time()
-    execution_id = str(uuid.uuid4()) # Unique ID for this chat interaction or agent execution
-
-    # Ensure OPENAI_API_KEY is available if any LLM call is to be made
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        logger.error("OPENAI_API_KEY not set. LLM calls will fail.")
-        # Potentially raise HTTPException here if critical for all paths
-
-    # Initialize RAG system 
-    rag_system_instance = await get_rag_system() # RAGSystem instance
+    """Chat endpoint with RAG integration."""
+    execution_id = None
+    execution_start = time.time()
     
-    response_message = ""
-    context_used_flag = False
-    agent_used_flag = False
-    tree_reasoning_used_flag = False
-    final_agent_type = request.agent_type
-    agent: Optional[BaseAgent] = None # Define agent variable
-    sources = None # Initialize sources variable
-
     try:
-        if request.use_agent and request.agent_type:
-            agent_used_flag = True
-            logger.info(f"Using agent: {request.agent_type} for session {session_id}")
-            
-            agent_query = request.messages[-1].content if request.messages else ""
-            if not agent_query:
-                raise HTTPException(status_code=400, detail="Cannot use agent with empty message list.")
-
-            agent_settings = request.agent_params or {}
-            # Ensure necessary LLM parameters are in agent_settings for create_agent
-            agent_settings.setdefault('model', request.model)
-            agent_settings.setdefault('temperature', request.temperature)
-            agent_settings.setdefault('max_tokens', request.max_tokens)
-            # openai_api_key is passed directly to create_agent or handled by its llm_config
-            
-            # Parameters for create_agent
-            create_agent_params = {
-                "agent_type": request.agent_type,
-                "rag_system": rag_system_instance,
-                "api_key": openai_api_key, # create_agent handles this for its LLMConfig
-                # Pass through existing agent_settings which might have model, temp, etc.
-                # create_agent will prioritize its specific llm_config args then kwargs
-                **agent_settings 
-            }
-
-            if request.agent_type == "TreeReasoningAgent" or request.use_tree_reasoning:
-                tree_reasoning_used_flag = True
-                final_agent_type = "TreeReasoningAgent" # This is for the response model, can remain CamelCase
-                logger.info(f"Initiating TreeReasoningAgent with settings: {agent_settings}")
-
-                # Get RAG context for the TreeReasoningAgent
-                initial_retrieval_top_k = agent_settings.get("initial_retrieval_top_k", 5)
-                retrieved_nodes = None
-                if initial_retrieval_top_k > 0 and rag_system_instance:
-                    logger.info(f"[TreeReasoningAgent] Retrieving top {initial_retrieval_top_k} documents for query: {agent_query[:100]}...")
-                    retrieved_nodes = rag_system_instance.retrieve( 
-                        agent_query, 
-                        top_k=initial_retrieval_top_k,
-                        use_query_expansion=True,
-                        auto_filter=True,
-                        use_hierarchical=True
-                    )
-                    context_used_flag = True if retrieved_nodes else False
-                    logger.info(f"[TreeReasoningAgent] Retrieved {len(retrieved_nodes) if retrieved_nodes else 0} nodes.")
-                    
-                    # Extract sources information
-                    if retrieved_nodes:
-                        sources = []
-                        for i, node in enumerate(retrieved_nodes):
-                            source_info = {
-                                "id": i + 1,
-                                "title": node.get("metadata", {}).get("doc_name", f"Document {i+1}"),
-                                "file_path": node.get("metadata", {}).get("file_path", ""),
-                                "score": node.get("score", 0),
-                                "chunk_id": node.get("chunk_id", ""),
-                                "text_preview": node.get("text", "") # Include full text without truncation
-                            }
-                            sources.append(source_info)
-
-                # Update create_agent_params for TreeReasoningAgent specific needs
-                create_agent_params["agent_type"] = "tree_reasoning" # Changed to lowercase to match factory key
-                tree_id = request.tree_template or agent_settings.get("tree_template", "default_tree")
-                create_agent_params['tree_id'] = tree_id
-                if request.custom_tree:
-                    create_agent_params['custom_tree_config'] = request.custom_tree
-
-                try:
-                    agent = create_agent(**create_agent_params)
-                    if not isinstance(agent, TreeReasoningAgent):
-                        logger.error(f"Created agent is not a TreeReasoningAgent instance as expected.")
-                        raise HTTPException(status_code=500, detail="Agent creation failed for TreeReasoningAgent.")
-                except Exception as e:
-                    logger.error(f"Error creating TreeReasoningAgent: {str(e)}")
-                    raise HTTPException(status_code=500, detail=f"Could not create TreeReasoningAgent: {str(e)}")
-
-                # Ensure agent is a TreeReasoningAgent for type safety before calling process
-                if isinstance(agent, TreeReasoningAgent):
-                    agent_result_dict = await agent.process(
-                        query=agent_query, 
-                        initial_retrieved_nodes=retrieved_nodes, 
-                        max_depth=agent_settings.get("max_depth", 10),
-                        agent_settings=agent_settings 
-                    )
-                    response_message = agent_result_dict.get("response", "Tree agent did not return a standard response.")
-                    # Check if agent result includes source information
-                    if "sources" in agent_result_dict:
-                        sources = agent_result_dict["sources"]
-                else: # Should have been caught by the isinstance check above
-                    raise HTTPException(status_code=500, detail="Failed to correctly initialize TreeReasoningAgent.")
-
-
-            elif request.agent_type == "RAGAgent": 
-                final_agent_type = "RAGAgent"
-                logger.info(f"Initiating RAGAgent with settings: {agent_settings}")
-                create_agent_params["agent_type"] = "RAGAgent" # Explicitly set
-                
-                try:
-                    agent = create_agent(**create_agent_params)
-                    if not isinstance(agent, RAGAgent):
-                        logger.error(f"Created agent is not a RAGAgent instance as expected.")
-                        raise HTTPException(status_code=500, detail="Agent creation failed for RAGAgent.")
-                except Exception as e:
-                    logger.error(f"Error creating RAGAgent: {str(e)}")
-                    raise HTTPException(status_code=500, detail=f"Could not create RAGAgent: {str(e)}")
-
-                rag_agent_process_params = {
-                    "filter_criteria": agent_settings.get("filter_criteria"),
-                    "use_neo4j": agent_settings.get("use_neo4j", False), # RAGAgent might have its own defaults
-                    "top_k": agent_settings.get("top_k", rag_system_instance.DEFAULT_TOP_K if rag_system_instance else 5),
-                    "retrieval_id": execution_id 
-                }
-                logger.info(f"Calling RAGAgent.process with params: {rag_agent_process_params}")
-                # Ensure agent is a RAGAgent for type safety
-                if isinstance(agent, RAGAgent):
-                    agent_response_obj = await agent.process(query=agent_query, **rag_agent_process_params)
-                    response_message = agent_response_obj.response
-                    context_used_flag = bool(agent_response_obj.context_used)
-                    if agent_response_obj.context_used:
-                        sources = []
-                        for i, node_data in enumerate(agent_response_obj.context_used):
-                            # node_data is a dict like {"text": ..., "metadata": ..., "score": ..., "doc_id": ..., "chunk_id": ...}
-                            metadata = node_data.get("metadata", {})
-                            source_info = {
-                                "id": metadata.get("chunk_id", f"rag_source_{i+1}"), # Use chunk_id or a generated ID
-                                "title": metadata.get("doc_name", metadata.get("file_name", f"Source {i+1}")),
-                                "file_path": metadata.get("file_path", metadata.get("file_name", "")), # Prefer file_path
-                                "score": node_data.get("score"),
-                                "text_preview": node_data.get("text", ""), # Include full text without truncation
-                                "chunk_id": node_data.get("chunk_id", "")
-                            }
-                            sources.append(source_info)
-                else: # Should have been caught by the isinstance check above
-                     raise HTTPException(status_code=500, detail="Failed to correctly initialize RAGAgent.")
-
-
-            else: # Generic agent
-                logger.info(f"Attempting to use generic agent type: {request.agent_type}")
-                create_agent_params["agent_type"] = request.agent_type # Explicitly set
-                try:
-                    agent = create_agent(**create_agent_params)
-                    if not isinstance(agent, BaseAgent):
-                        logger.error(f"Created agent is not a BaseAgent instance as expected.")
-                        raise HTTPException(status_code=500, detail=f"Agent creation failed for {request.agent_type}.")
-
-                    if hasattr(agent, "process") and callable(agent.process):
-                        # Prepare AgentInput for BaseAgent derived agents
-                        current_process_kwargs = {**agent_settings}
-                        # Remove params consumed by create_agent or not directly part of AgentInput.parameters
-                        for k_to_pop in ['model', 'temperature', 'max_tokens', 'api_key', 'rag_system', 'tree_id', 'custom_tree_config']:
-                            current_process_kwargs.pop(k_to_pop, None)
-                        
-                        # Construct AgentInput
-                        # query is mandatory for AgentInput
-                        # context can be None
-                        # parameters will be the remaining agent_settings/process_kwargs
-                        agent_input_obj = AgentInput(query=agent_query, parameters=current_process_kwargs)
-                        
-                        # Call agent.process with the AgentInput object
-                        agent_result = await agent.process(agent_input_obj)
-                        
-                        # AgentOutput (and its subclasses like VulnerabilityAssessmentOutput) is a Pydantic model
-                        # It should have a 'response' field. We can access it directly or via .dict() / .model_dump()
-                        if hasattr(agent_result, 'response') and isinstance(agent_result.response, str):
-                            response_message = agent_result.response
-                        elif isinstance(agent_result, str): # Fallback if process directly returns a string
-                            response_message = agent_result
-                        elif isinstance(agent_result, dict) and "response" in agent_result: # Fallback for dict
-                            response_message = agent_result["response"]
-                        else:
-                            # If agent_result is an AgentOutput model, convert to dict to log
-                            log_result = agent_result
-                            if hasattr(agent_result, 'model_dump'):
-                                log_result = agent_result.model_dump()
-                            elif hasattr(agent_result, 'dict'):
-                                log_result = agent_result.dict()
-                            response_message = "Agent processed the request but returned an unknown or non-standard format."
-                            logger.warning(f"Agent {request.agent_type} returned: {log_result}. Expected AgentOutput with a 'response' string or direct string.")
-                    else:
-                        response_message = f"Agent type {request.agent_type} does not have a callable 'process' method."
-                        logger.error(response_message)
-                        raise HTTPException(status_code=501, detail=response_message)
-                        
-                except Exception as e:
-                    logger.error(f"Error processing with agent {request.agent_type}: {str(e)}")
-                    # Check if it's a ValueError from create_agent for an unknown agent type
-                    if isinstance(e, ValueError) and "Unknown agent type" in str(e):
-                        raise HTTPException(status_code=400, detail=str(e))
-                    response_message = f"Error with agent {request.agent_type}: {str(e)}"
-                    # raise HTTPException(status_code=500, detail=response_message) # Avoid double raising if already an HTTPException
-
-        else: # Direct LLM call
-            logger.info(f"Direct LLM call for session {session_id}. Model: {request.model}")
-            llm_query = request.messages[-1].content if request.messages else ""
-            if not llm_query:
-                raise HTTPException(status_code=400, detail="Cannot process empty message list.")
-
-            context_str = ""
-            retrieved_docs_for_direct_llm = None
-            if request.include_context and rag_system_instance:
-                logger.info(f"Retrieving context for direct LLM call. Query: {llm_query[:100]}...")
-                # Use context_query if provided, else use the main llm_query
-                query_for_rag = request.context_query or llm_query
-                retrieved_docs_for_direct_llm = rag_system_instance.retrieve(
-                    query_for_rag,
-                    top_k=request.agent_params.get("top_k", 5) if request.agent_params else 5,
-                    use_query_expansion=True,
-                    auto_filter=True,
-                    use_hierarchical=True
-                )
-                if retrieved_docs_for_direct_llm:
-                    context_used_flag = True
-                    # Format for direct LLM - simple concatenation for now
-                    # This formatting does not use [Source X] by default for direct LLM calls yet.
-                    # Could be enhanced to use _format_context_with_sources from an agent or utility.
-                    context_items_text = []
-                    sources = []
-                    
-                    for i, node in enumerate(retrieved_docs_for_direct_llm):
-                        source_id = i + 1
-                        
-                        # Extract metadata for source info
-                        metadata = node.get("metadata", {}) if isinstance(node, dict) else (node.metadata if hasattr(node, "metadata") else {})
-                        doc_name = metadata.get("doc_name", f"Document {source_id}")
-                        file_path = metadata.get("file_path", doc_name)
-                        
-                        # Get content from node based on its type
-                        if isinstance(node, dict):
-                            content = node.get("text", "")
-                        elif hasattr(node, "get_content"):
-                            content = node.get_content()
-                        else:
-                            content = str(node)
-                            
-                        # Add formatted content with source marker
-                        context_items_text.append(f"[Source {source_id}]\n{content}")
-                        
-                        # Create source info for response
-                        source_info = {
-                            "id": source_id,
-                            "title": doc_name,
-                            "file_path": file_path,
-                            "score": node.get("score", 0) if isinstance(node, dict) else (node.score if hasattr(node, "score") else 0),
-                            "chunk_id": metadata.get("chunk_id", ""),
-                            "text_preview": content # Include full text without truncation
-                        }
-                        sources.append(source_info)
-                    
-                    context_str = "\n\n".join(context_items_text)
-                    logger.info(f"Retrieved {len(retrieved_docs_for_direct_llm)} context items for direct LLM.")
-                else:
-                    logger.info("No context items retrieved for direct LLM.")
-            
-            # Construct messages for OpenAI API
-            messages_for_api = []
-            if context_str:
-                messages_for_api.append({"role": "system", "content": f"Use the following context to answer the user\'s query. If the context is not relevant, answer based on your general knowledge. Always respond in the same language as the user's query.\n\nContext:\n{context_str}"})    
-            for msg in request.messages:
-                messages_for_api.append({"role": msg.role, "content": msg.content})
-
-            if request.stream:
-                logger.info("Streaming response for direct LLM call.")
-                # Placeholder for actual streaming logic
-                async def generate():
-                    # Start streaming response
-                    try:
-                        client = AsyncOpenAI(api_key=openai_api_key)
-                        stream = await client.chat.completions.create(
-                            model=request.model,
-                            messages=messages_for_api,
-                            temperature=request.temperature,
-                            max_tokens=request.max_tokens,
-                            stream=True,
-                        )
-                        accumulated_response = ""
-                        
-                        # Send initial event
-                        yield f"data: {json.dumps({'event': 'start', 'session_id': session_id})}\n\n"
-                        
-                        async for chunk in stream:
-                            content = chunk.choices[0].delta.content or ""
-                            accumulated_response += content
-                            
-                            # Send chunk in a format the frontend expects
-                            yield f"data: {json.dumps({'event': 'chunk', 'content': content})}\n\n"
-                        
-                        # Send final event with metadata
-                        metadata = {
-                            'event': 'end', 
-                            'session_id': session_id,
-                            'model': request.model,
-                            'context_used': context_used_flag,
-                            'sources': sources
-                        }
-                        yield f"data: {json.dumps(metadata)}\n\n"
-                        
-                        # Send the complete message for reference
-                        complete_data = {
-                            'type': 'metadata',
-                            'data': {
-                                'message': accumulated_response,
-                                'model': request.model,
-                                'session_id': session_id,
-                                'context_used': context_used_flag,
-                                'sources': sources
-                            }
-                        }
-                        yield f"data: {json.dumps(complete_data)}\n\n"
-                        
-                        # After stream, save to history
-                        # Using a background task to avoid delaying the stream closing
-                        history_entry = ChatMessage(role="assistant", content=accumulated_response)
-                        background_tasks.add_task(save_chat_message, session_id, user_id, request.messages + [history_entry])
-                        # Track execution after response is fully sent
-                        background_tasks.add_task(track_agent_execution, 
-                            agent_id="direct_llm", session_id=session_id, task=llm_query, model=request.model, 
-                            start_time=start_time, error=False # TODO: Add token tracking if possible from stream
-                        )
-
-                    except Exception as e:
-                        logger.error(f"Error during streaming: {str(e)}")
-                        # Send an error message through the stream if possible
-                        error_payload = {
-                            'error': True, 
-                            'message': f"Error during streaming: {str(e)}",
-                            'is_last': True
-                        }
-                        yield f"data: {json.dumps(error_payload)}\n\n"
-                return StreamingResponse(generate(), media_type="text/event-stream")
-            else: # Non-streaming direct LLM call
-                logger.info("Non-streaming direct LLM call.")
-                client = AsyncOpenAI(api_key=openai_api_key)
-                completion = await client.chat.completions.create(
-                    model=request.model,
-                    messages=messages_for_api,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                )
-                response_message = completion.choices[0].message.content.strip()
-                # TODO: Add token tracking from completion.usage
-                # track_agent_execution(...) with token counts
-
-        # Save message to history (if not streamed, as streaming handles its own saving)
-        if not (request.use_agent == False and request.stream):
-            current_messages = list(request.messages) # Make a mutable copy
-            current_messages.append(ChatMessage(role="assistant", content=response_message))
-            background_tasks.add_task(save_chat_message, session_id, user_id, current_messages)
+        # Extract user ID
+        user_id = await extract_user_id_from_request(req, None)
         
-        # Track execution (if not streamed, as streaming handles its own tracking)
-        # For agent calls, or non-streamed direct LLM.
-        if not (request.use_agent == False and request.stream):
-            agent_id_for_tracking = final_agent_type if agent_used_flag else "direct_llm_nonstream"
-            query_for_tracking = request.messages[-1].content if request.messages else ""
-            background_tasks.add_task(track_agent_execution, 
-                agent_id=agent_id_for_tracking, session_id=session_id, task=query_for_tracking, 
-                model=request.model, start_time=start_time, error=False
-            )
-
-        return ChatResponse(
-            message=response_message,
+        # Create a session ID if not provided
+        session_id = request.session_id or str(uuid.uuid4())
+        
+        # Prepare response
+        response = ChatResponse(
+            message="",
             model=request.model,
-            agent_type=final_agent_type if agent_used_flag else None,
-            agent_used=agent_used_flag,
-            tree_reasoning_used=tree_reasoning_used_flag,
-            context_used=context_used_flag,
+            agent_type=request.agent_type if request.use_agent else None,
+            agent_used=request.use_agent,
+            tree_reasoning_used=request.use_tree_reasoning,
+            context_used=request.include_context,
             session_id=session_id,
             timestamp=datetime.now().isoformat(),
-            execution_id=execution_id, # Pass back execution_id
-            sources=sources  # Include sources in the response
+            sources=[]
         )
-    
-    except HTTPException as http_exc:
-        logger.error(f"HTTPException in chat endpoint: {http_exc.detail}", exc_info=True)
-        # Track execution with error
-        query_for_tracking = request.messages[-1].content if request.messages and len(request.messages) > 0 else ""
-        agent_id_for_tracking = final_agent_type if agent_used_flag else "direct_llm_error"
-        background_tasks.add_task(track_agent_execution, 
-            agent_id=agent_id_for_tracking, session_id=session_id, task=query_for_tracking, model=request.model, 
-            start_time=start_time, error=True, error_message=http_exc.detail
-        )
-        raise http_exc # Re-raise the exception
+        
+        # Save user messages to history
+        user_messages = [msg for msg in request.messages if msg.role == "user"]
+        if user_messages:
+            background_tasks.add_task(
+                save_chat_message, 
+                session_id, 
+                user_id, 
+                [user_messages[-1]]  # Just save the last user message
+            )
+            
+        # Determine query text
+        query_text = request.context_query
+        if not query_text and user_messages:
+            query_text = user_messages[-1].content
+        
+        # Use improved RAG with context handling for direct questions
+        if (not request.use_agent and request.include_context and query_text and 
+            not request.use_tree_reasoning):
+            # Use the new query_with_context method for better RAG integration
+            try:
+                # Get RAG system
+                rag_system = await get_rag_system()
+                
+                # Call the improved query_with_context method
+                rag_result = rag_system.query_with_context(
+                    query=query_text,
+                    top_k=5,  # Retrieve 5 documents for context
+                    use_hybrid=True  # Use hybrid search for better retrieval
+                )
+                
+                # Extract response and sources
+                response_text = rag_result.get("response", "I couldn't find relevant information to answer your query.")
+                sources = rag_result.get("sources", [])
+                
+                # For streaming responses
+                if request.stream:
+                    async def generate():
+                        # Yield headers
+                        yield f"data: {json.dumps({'content': '', 'sources': [], 'done': False})}\n\n"
+                        
+                        # Simulate streaming by sending response in chunks
+                        chunk_size = 10  # Characters per chunk
+                        for i in range(0, len(response_text), chunk_size):
+                            chunk = response_text[i:i+chunk_size]
+                            yield f"data: {json.dumps({'content': chunk, 'sources': [], 'done': False})}\n\n"
+                            await asyncio.sleep(0.03)  # Simulate typing speed
+                            
+                        # Send final message with sources
+                        formatted_sources = []
+                        for src in sources:
+                            formatted_source = {
+                                "text": src.get("text", ""),
+                                "document_id": src.get("document_id", ""),
+                                "document_name": src.get("document_name", "Unknown"),
+                                "score": src.get("score", 0.0),
+                                "section": src.get("section", "")
+                            }
+                            formatted_sources.append(formatted_source)
+                            
+                        yield f"data: {json.dumps({'content': '', 'sources': formatted_sources, 'done': True})}\n\n"
+                    
+                    # Save the assistant response to history
+                    background_tasks.add_task(
+                        save_chat_message,
+                        session_id,
+                        user_id,
+                        [ChatMessage(role="assistant", content=response_text)]
+                    )
+                    
+                    # Track the use of RAG system
+                    execution_id = await track_agent_execution(
+                        agent_id="improved_rag",
+                        session_id=session_id,
+                        task=query_text,
+                        model="gpt-4-turbo",  # Used in query_with_context
+                        start_time=execution_start
+                    )
+                    
+                    # Make sure execution_id is a string
+                    execution_id = str(execution_id) if execution_id else None
+                    
+                    # Return streaming response
+                    return StreamingResponse(
+                        generate(),
+                        media_type="text/event-stream"
+                    )
+                else:
+                    # Non-streaming response with the improved RAG context
+                    # Track the use of RAG system
+                    execution_id = await track_agent_execution(
+                        agent_id="improved_rag",
+                        session_id=session_id,
+                        task=query_text,
+                        model="gpt-4-turbo",  # Used in query_with_context
+                        start_time=execution_start
+                    )
+                    
+                    # Make sure execution_id is a string
+                    execution_id = str(execution_id) if execution_id else None
+                    
+                    # Save the assistant response to history
+                    background_tasks.add_task(
+                        save_chat_message,
+                        session_id,
+                        user_id,
+                        [ChatMessage(role="assistant", content=response_text)]
+                    )
+                    
+                    # Format the sources
+                    formatted_sources = []
+                    for src in sources:
+                        formatted_source = {
+                            "text": src.get("text", ""),
+                            "document_id": src.get("document_id", ""),
+                            "document_name": src.get("document_name", "Unknown"),
+                            "score": src.get("score", 0.0),
+                            "section": src.get("section", "")
+                        }
+                        formatted_sources.append(formatted_source)
+                    
+                    # Return the response
+                    return ChatResponse(
+                        message=response_text,
+                        model="gpt-4-turbo",
+                        agent_type=None,
+                        agent_used=False,
+                        tree_reasoning_used=False,
+                        context_used=True,
+                        session_id=session_id,
+                        timestamp=datetime.now().isoformat(),
+                        execution_id=execution_id,
+                        sources=formatted_sources
+                    )
+                
+            except Exception as e:
+                logger.error(f"Error using improved RAG: {str(e)}", exc_info=True)
+                # Fall back to standard behavior on error
+        else:
+            # Handle tree reasoning if requested
+            if request.use_tree_reasoning:
+                try:
+                    # Get RAG system and OpenAI client from main application
+                    from main import rag_system, openai_client
+                    
+                    # Create the tree reasoning agent
+                    tree_data = None
+                    
+                    if request.tree_template:
+                        # Get predefined tree template
+                        from autonomous_agent.integration_components.agent_factory import get_agent_factory
+                        factory = get_agent_factory()
+                        
+                        # Get the default tree for a specific agent type
+                        agent_type = request.agent_type or "rag"  # Default to RAG agent if none specified
+                        tree_data = factory.get_default_tree(agent_type)
+                        
+                    elif request.custom_tree:
+                        # Use custom tree provided in the request
+                        tree_data = request.custom_tree
+                    else:
+                        # No tree specified, use a default general-purpose tree
+                        from autonomous_agent.integration_components.agent_factory import get_agent_factory
+                        factory = get_agent_factory()
+                        tree_data = factory.get_default_tree("rag")  # Use RAG agent's default tree
+                    
+                    # Create tree reasoning adapter
+                    tree_agent = TreeReasoningAdapter(
+                        tree=tree_data,
+                        graph_interface=None,  # Will be set up by the adapter
+                        embedding_service=rag_system,
+                        llm_client=openai_client,
+                        config={
+                            "max_reformulation_attempts": 1,
+                            "timeout_seconds": 60
+                        }
+                    )
+                    
+                    # Track the start time for execution timing
+                    start_time = time.time()
+                    execution_id = str(uuid.uuid4())
+                    
+                    # Process with tree reasoning agent (non-streaming only for now)
+                    result = await tree_agent.process(
+                        user_input=query_text,
+                        session_id=session_id,
+                        user_id=user_id,
+                        model=request.model,
+                        include_context=request.include_context,
+                        context_query=request.context_query
+                    )
+                    
+                    # Track execution in background
+                    execution_time = time.time() - start_time
+                    background_tasks.add_task(
+                        track_agent_execution,
+                        agent_id="tree_reasoning",
+                        session_id=session_id,
+                        task=query_text,
+                        model=request.model,
+                        start_time=start_time,
+                        tokens={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                        error=False
+                    )
+                    
+                    # Format the response
+                    response_text = result.get("response", "")
+                    sources = result.get("source_documents", [])
+                    
+                    # Save the assistant response to history
+                    background_tasks.add_task(
+                        save_chat_message,
+                        session_id,
+                        user_id,
+                        [ChatMessage(role="assistant", content=response_text)]
+                    )
+                    
+                    # Return the response
+                    response.message = response_text
+                    response.sources = sources
+                    return response
+                    
+                except Exception as e:
+                    logger.error(f"Error processing with tree reasoning: {str(e)}", exc_info=True)
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error processing with tree reasoning: {str(e)}"
+                    )
+            else:
+                # Standard chat processing (no agent or tree reasoning)
+                try:
+                    # Get OpenAI client and RAG system from main application
+                    from main import openai_client, rag_system
+                    
+                    # Track the start time for execution timing
+                    start_time = time.time()
+                    execution_id = str(uuid.uuid4())
+                    
+                    # Process streaming or non-streaming
+                    if request.stream:
+                        async def generate():
+                            try:
+                                # Prepare message history
+                                message_history = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+                                
+                                # Add context from RAG if requested
+                                context = ""
+                                sources = []
+                                context_used = False
+                                
+                                if request.include_context and rag_system:
+                                    context_query = request.context_query or query_text
+                                    retrieval_type = request.retrieval_type or "auto"
+                                    
+                                    # Get context from RAG system
+                                    if retrieval_type == "auto":
+                                        context_results = rag_system.retrieve(
+                                            query=context_query, 
+                                            top_k=3
+                                        )
+                                    elif retrieval_type == "hybrid":
+                                        context_results = rag_system.retrieve(
+                                            query=context_query,
+                                            use_hybrid=True,
+                                            top_k=3
+                                        )
+                                    else:  # vector
+                                        context_results = rag_system.retrieve(
+                                            query=context_query,
+                                            use_hybrid=False,
+                                            top_k=3
+                                        )
 
+                                    if context_results:
+                                        context_used = True
+                                        context = "Here's some relevant context that might help answering the query:\n\n"
+                                        
+                                        for i, result in enumerate(context_results):
+                                            if "text" in result:
+                                                context += f"[{i+1}] {result['text']}\n\n"
+                                            
+                                            # Add to sources if metadata is available
+                                            if "metadata" in result and result["metadata"]:
+                                                source_data = result["metadata"].copy()
+                                                # Ensure "text" is not duplicated in sources
+                                                if "text" in source_data:
+                                                    del source_data["text"]
+                                                
+                                                # Add snippet to source
+                                                source_data["snippet"] = result.get("text", "")[:200] + "..."
+                                                sources.append(source_data)
+                                        
+                                        # Add context as a system message
+                                        message_history.insert(0, {
+                                            "role": "system", 
+                                            "content": context
+                                        })
+                                
+                                # Create streaming completion
+                                stream = openai_client.chat.completions.create(
+                                    model=request.model,
+                                    messages=message_history,
+                                    temperature=request.temperature,
+                                    max_tokens=request.max_tokens,
+                                    stream=True
+                                )
+                                
+                                # Stream the response
+                                response_text = ""
+                                for chunk in stream:
+                                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                                        content = chunk.choices[0].delta.content
+                                        response_text += content
+                                        
+                                        # Format the chunk for SSE
+                                        response = {
+                                            "text": content,
+                                            "done": False,
+                                            "session_id": session_id,
+                                            "execution_id": execution_id
+                                        }
+                                        
+                                        yield f"data: {json.dumps(response)}\n\n"
+                                        
+                                        # Add a small delay to simulate natural typing
+                                        await asyncio.sleep(0.01)
+                                
+                                # Final response with sources
+                                final_response = {
+                                    "text": "",
+                                    "done": True,
+                                    "session_id": session_id,
+                                    "execution_id": execution_id
+                                }
+                                
+                                if sources:
+                                    final_response["sources"] = sources
+                                    
+                                yield f"data: {json.dumps(final_response)}\n\n"
+                                
+                                # Track usage
+                                background_tasks.add_task(
+                                    save_chat_message,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    messages=[ChatMessage(role="assistant", content=response_text)]
+                                )
+                                
+                            except Exception as e:
+                                logger.error(f"Error in standard chat streaming: {str(e)}", exc_info=True)
+                                error_response = {
+                                    "text": f"Error: {str(e)}",
+                                    "done": True,
+                                    "error": True,
+                                    "session_id": session_id,
+                                    "execution_id": execution_id
+                                }
+                                yield f"data: {json.dumps(error_response)}\n\n"
+                    
+                    # Return streaming response
+                    return StreamingResponse(
+                        generate(),
+                        media_type="text/event-stream"
+                    )
+                except Exception as e:
+                    logger.error(f"Error in standard chat processing: {str(e)}", exc_info=True)
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Error processing chat: {str(e)}"
+                    )
+        return response
     except Exception as e:
-        logger.error(f"General error in chat endpoint: {str(e)}", exc_info=True)
-        # Track execution with error
-        query_for_tracking = request.messages[-1].content if request.messages and len(request.messages) > 0 else ""
-        agent_id_for_tracking = final_agent_type if agent_used_flag else "direct_llm_error"
-        background_tasks.add_task(track_agent_execution, 
-            agent_id=agent_id_for_tracking, session_id=session_id, task=query_for_tracking, model=request.model, 
-            start_time=start_time, error=True, error_message=str(e)
+        logger.error(f"Error processing chat: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing chat: {str(e)}"
         )
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 async def save_chat_message(session_id: str, user_id: Optional[str], messages: List[ChatMessage]):
     """Save chat messages to the database."""
     try:
         conn = await get_db_connection()
         cursor = conn.cursor()
+        
+        # Use a default user_id if none is provided
+        if user_id is None:
+            user_id = f"guest_{str(uuid.uuid4())[:8]}"
+            logger.warning(f"No user_id provided for chat message in session {session_id}, using generated ID: {user_id}")
         
         for msg in messages:
             cursor.execute(

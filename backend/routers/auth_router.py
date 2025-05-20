@@ -19,7 +19,8 @@ router = APIRouter(
 )
 
 # Password context for hashing and verifying
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use bcrypt version 2a which is compatible with bcrypt 3.2.2
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__ident="2a")
 
 # OAuth2 scheme for token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

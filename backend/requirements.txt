@@ -15,7 +15,8 @@ flower==2.0.1
 pytest>=7.4.0  # For testing
 
 # Authentication
-passlib[bcrypt]>=1.7.4
+passlib>=1.7.4
+bcrypt==3.2.2  # Pinned version for passlib compatibility
 PyJWT>=2.10.0
 email-validator>=2.0.0
 
