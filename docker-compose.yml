@@ -11,6 +11,10 @@ services:
     environment:
       - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc"]
+      # Enable Neo4j Vector capabilities
+      - NEO4J_dbms_vector_search_enabled=true
+      # Disable strict configuration validation
+      - NEO4J_server_config_strict__validation_enabled=false
     # volumes:
     #   - neo4j_data:/data
     #   - neo4j_logs:/logs
@@ -65,23 +69,7 @@ services:
     cap_add:
       - SYS_NICE
 
-  qdrant:
-    image: qdrant/qdrant
-    container_name: regulaite-qdrant
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    networks:
-      - regulaite_network
-    # volumes:
-    #   - qdrant_data:/qdrant/storage
-    restart: on-failure
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+  # qdrant service removed and replaced with Neo4j vector capabilities
 
   unstructured:
     image: downloads.unstructured.io/unstructured-io/unstructured-api:latest
@@ -104,8 +92,6 @@ services:
     depends_on:
       neo4j:
         condition: service_healthy
-      qdrant:
-        condition: service_healthy
 
   ai-backend:
     build:
@@ -126,8 +112,6 @@ services:
       - MARIADB_DATABASE=${MARIADB_DATABASE:-regulaite}
       - MARIADB_USER=${MARIADB_USER:-regulaite_user}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD:-SecureP@ssw0rd!}
-      - QDRANT_URL=http://qdrant:6333
-      - QDRANT_GRPC_URL=qdrant:6334
       # Document Parser Settings
       - UNSTRUCTURED_API_URL=${UNSTRUCTURED_API_URL:-http://unstructured:8000/general/v0/general}
       - UNSTRUCTURED_CLOUD_API_URL=${UNSTRUCTURED_CLOUD_API_URL:-https://api.unstructured.io/general/v0/general}
@@ -150,8 +134,6 @@ services:
     restart: on-failure
     depends_on:
       neo4j:
-        condition: service_healthy
-      qdrant:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -190,7 +172,6 @@ services:
       - MARIADB_DATABASE=${MARIADB_DATABASE:-regulaite}
       - MARIADB_USER=${MARIADB_USER:-regulaite_user}
       - MARIADB_PASSWORD=${MARIADB_PASSWORD:-SecureP@ssw0rd!}
-      - QDRANT_URL=http://qdrant:6333
       - UNSTRUCTURED_API_URL=${UNSTRUCTURED_API_URL:-http://unstructured:8000/general/v0/general}
       # Document Parser Settings
       - UNSTRUCTURED_CLOUD_API_URL=${UNSTRUCTURED_CLOUD_API_URL:-https://api.unstructured.io/general/v0/general}
@@ -212,8 +193,6 @@ services:
       redis:
         condition: service_healthy
       neo4j:
-        condition: service_healthy
-      qdrant:
         condition: service_healthy
     restart: on-failure
 
@@ -263,8 +242,6 @@ networks:
 
 volumes:
   mariadb_data:
-    driver: local
-  qdrant_data:
     driver: local
   neo4j_data:
     driver: local

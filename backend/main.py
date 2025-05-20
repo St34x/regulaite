@@ -172,12 +172,11 @@ document_parser = DocumentParser(
     use_enrichment=True
 )
 
-# Initialize RAG system with Qdrant
+# Initialize RAG system with Neo4j Vector Store
 rag_system = RAGSystem(
     neo4j_uri=NEO4J_URI,
     neo4j_user=NEO4J_USER,
     neo4j_password=NEO4J_PASSWORD,
-    qdrant_url=QDRANT_URL,
     openai_api_key=OPENAI_API_KEY,
     hybrid_search=True,     # Enable hybrid search
     vector_weight=0.7,      # Set vector search weight
@@ -594,13 +593,16 @@ def health_check():
         except:
             pass
 
-    qdrant_status = "disconnected"
+    vector_store_status = "disconnected"
     try:
-        # Simple check if Qdrant client is initialized
-        if rag_system.qdrant_client:
-            collections = rag_system.qdrant_client.get_collections()
-            if collections:
-                qdrant_status = "connected"
+        # Check if vector store in RAG system is initialized
+        if rag_system and rag_system.language_settings:
+            # Check one language's vector store to see if it's connected
+            for lang, settings in rag_system.language_settings.items():
+                vector_store = settings.get("vector_store")
+                if vector_store and vector_store.driver:
+                    vector_store_status = "connected"
+                    break
     except:
         pass
 
@@ -619,7 +621,7 @@ def health_check():
         "status": "healthy",
         "components": {
             "neo4j": neo4j_status,
-            "qdrant": qdrant_status,
+            "neo4j_vector_store": vector_store_status,
             "mariadb": mariadb_status,
             "api": "healthy"
         },
@@ -787,16 +789,16 @@ async def process_document(
                     logger.warning(f"Could not get index_immediately setting, using default: {str(config_e)}")
                 
                 if index_immediately:
-                    logger.info(f"Indexing document {processed_doc_id} in Qdrant")
+                    logger.info(f"Indexing document {processed_doc_id} in vector store")
                     index_result = rag_system.index_document(processed_doc_id)
                     
                     if isinstance(index_result, dict):
                         if index_result.get("status") == "success":
                             vector_count = index_result.get("vector_count", 0)
-                            logger.info(f"Document {processed_doc_id} indexed in Qdrant with {vector_count} vectors")
+                            logger.info(f"Document {processed_doc_id} indexed in vector store with {vector_count} vectors")
                         elif "vector_count" in index_result and index_result.get("vector_count", 0) > 0:
                             vector_count = index_result.get("vector_count", 0)
-                            logger.info(f"Document {processed_doc_id} indexed in Qdrant with {vector_count} vectors")
+                            logger.info(f"Document {processed_doc_id} indexed in vector store with {vector_count} vectors")
                         elif index_result.get("message") == "Document already indexed":
                             logger.info(f"Document {processed_doc_id} was already indexed")
                         else:
@@ -806,7 +808,7 @@ async def process_document(
                 else:
                     logger.info(f"Immediate indexing disabled, document {processed_doc_id} will not be indexed now")
             except Exception as e:
-                logger.error(f"Error indexing document in Qdrant: {str(e)}", exc_info=True)
+                logger.error(f"Error indexing document in vector store: {str(e)}", exc_info=True)
                 # Continue without failing as the document is already processed in Neo4j
 
             # Make sure to close the custom parser if we created one
@@ -1674,11 +1676,11 @@ async def delete_document(doc_id: str, background_tasks: BackgroundTasks = None)
     try:
         logger.info(f"Processing request to delete document: {doc_id}")
 
-        # Step 1: Delete from RAG system (Qdrant vectors)
+        # Step 1: Delete from RAG system (Neo4j vector store)
         rag_deleted = rag_system.delete_document(doc_id)
         if not rag_deleted:
             logger.warning(f"Failed to delete document {doc_id} from RAG system or document not found in vector store")
-            # Continue with Neo4j deletion even if Qdrant deletion failed
+            # Continue with Neo4j deletion even if vector store deletion failed
 
         # Step 2: Delete from Neo4j
         try:
@@ -1909,6 +1911,79 @@ async def debug_qdrant_collections():
 
         # Also add information about initialized languages in RAG
         result["initialized_languages"] = rag_system.get_initialized_languages()
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in debug endpoint: {str(e)}")
+        return {"error": str(e)}
+
+
+@app.get("/debug/vector/collections")
+async def debug_vector_collections():
+    """Debug endpoint to check Neo4j vector collections and document count"""
+    try:
+        result = {
+            "collections": []
+        }
+
+        # Get all initialized languages in RAG system
+        initialized_languages = rag_system.get_initialized_languages()
+        
+        # For each language, get vector store info
+        for lang in initialized_languages:
+            if lang in rag_system.language_settings:
+                vector_store = rag_system.language_settings[lang].get("vector_store")
+                
+                if vector_store:
+                    # Get basic info about the vector store
+                    collection_data = {
+                        "name": f"neo4j_vector_{lang}",
+                        "language": lang,
+                        "vector_dimension": vector_store.default_vector_dim,
+                        "similarity_function": vector_store.similarity_function
+                    }
+                    
+                    # Try to query count of vectors in Neo4j
+                    try:
+                        count = 0
+                        with vector_store.driver.session() as session:
+                            count_result = session.run(
+                                f"MATCH (n:{vector_store.node_label}) RETURN count(n) as count"
+                            )
+                            record = count_result.single()
+                            if record:
+                                count = record["count"]
+                                
+                            # Get sample nodes
+                            sample_points = []
+                            if count > 0:
+                                sample_result = session.run(
+                                    f"""
+                                    MATCH (n:{vector_store.node_label})
+                                    WHERE n.{vector_store.metadata_property}.language = $language
+                                    RETURN n.id as id, n.{vector_store.metadata_property} as metadata
+                                    LIMIT 3
+                                    """,
+                                    language=lang
+                                )
+                                
+                                for record in sample_result:
+                                    payload_info = {
+                                        "id": record["id"],
+                                        "metadata": record["metadata"]
+                                    }
+                                    sample_points.append(payload_info)
+                            
+                            collection_data["point_count"] = count
+                            collection_data["sample_points"] = sample_points
+                    except Exception as count_error:
+                        collection_data["error"] = str(count_error)
+                        
+                    result["collections"].append(collection_data)
+                    
+        # Add information about initialized languages in RAG
+        result["initialized_languages"] = initialized_languages
 
         return result
 
@@ -2262,3 +2337,69 @@ def get_available_trees():
     }
     
     return trees
+
+@app.get("/debug/vector/neo4j")
+async def debug_neo4j_vector():
+    """Debug endpoint to check Neo4j vector indexes and vector nodes"""
+    try:
+        if not driver:
+            return {"error": "Neo4j driver not initialized"}
+            
+        result = {
+            "vector_indexes": [],
+            "vector_nodes": {}
+        }
+
+        # Check vector indexes in Neo4j
+        with driver.session() as session:
+            # Get vector indexes
+            indexes_result = session.run("""
+                SHOW INDEXES
+                YIELD name, type, labelsOrTypes, properties, options
+                WHERE type = 'VECTOR'
+                RETURN name, labelsOrTypes, properties, options
+            """)
+            
+            for record in indexes_result:
+                index_info = {
+                    "name": record["name"],
+                    "labels": record["labelsOrTypes"],
+                    "properties": record["properties"],
+                    "options": record["options"]
+                }
+                result["vector_indexes"].append(index_info)
+                
+            # Get vector node counts by label
+            counts_result = session.run("""
+                MATCH (n) 
+                WHERE n.embedding IS NOT NULL
+                RETURN labels(n) as labels, count(n) as count
+            """)
+            
+            for record in counts_result:
+                node_labels = ','.join(record["labels"])
+                result["vector_nodes"][node_labels] = record["count"]
+        
+        # Add information about initialized languages in RAG
+        result["initialized_languages"] = rag_system.get_initialized_languages()
+        
+        # Get vector store information from RAG system
+        vector_stores = {}
+        for lang, settings in rag_system.language_settings.items():
+            vector_store = settings.get("vector_store")
+            if vector_store:
+                vector_stores[lang] = {
+                    "type": type(vector_store).__name__,
+                    "node_label": getattr(vector_store, "node_label", "Unknown"),
+                    "embedding_property": getattr(vector_store, "embedding_property", "Unknown"),
+                    "similarity_function": getattr(vector_store, "similarity_function", "Unknown"),
+                    "index_name": getattr(vector_store, "index_name", "Unknown")
+                }
+        
+        result["vector_stores"] = vector_stores
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in Neo4j vector debug endpoint: {str(e)}")
+        return {"error": str(e)}

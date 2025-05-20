@@ -2,7 +2,7 @@
 fastapi>=0.95.0
 uvicorn[standard]>=0.22.0
 pydantic>=2.0.0
-neo4j>=5.8.0
+neo4j>=5.15.0  # Make sure we have a version that supports vector search
 python-multipart>=0.0.6
 requests>=2.32.3
 python-dotenv>=1.0.0
@@ -33,14 +33,12 @@ langchain-core>=0.3.54  # Core LangChain functionality
 # Additional document parsing APIs
 doctly>=0.1.0
 
-# Vector search and embeddings
-qdrant-client[fastembed]==1.13.3
-llama-index-vector-stores-qdrant>=0.5.0
-llama-index-embeddings-fastembed==0.3.1
+# Vector search and embeddings - Using Neo4j vector capabilities
 llama-index>=0.12.28
 llama-index-core==0.12.30
-sentence-transformers==4.0.2
+llama-index-embeddings-fastembed==0.3.1
 llama-index-retrievers-bm25==0.5.2
+sentence-transformers==4.0.2
 hf-xet==1.1.2
 PyStemmer==2.2.0.3
 
