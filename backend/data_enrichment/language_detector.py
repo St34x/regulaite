@@ -35,7 +35,7 @@ class LanguageDetector:
         'pt': 'Portuguese'
     }
 
-    def __init__(self, fallback_language: str = 'en'):
+    def __init__(self, fallback_language: str = 'fr'):
         """
         Initialize the language detector.
 
@@ -149,7 +149,7 @@ class LanguageDetector:
                 # For high confidence, try the multi-language model
                 model_name = 'xx_ent_wiki_sm'
             else:
-                # Otherwise default to English
+                # Otherwise default to French
                 model_name = self.LANGUAGE_MODEL_MAPPING[self.fallback_language]
                 lang_code = self.fallback_language
 

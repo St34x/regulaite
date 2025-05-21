@@ -311,7 +311,7 @@ async def document_list(
                    COALESCE(d.size, 0) as size,
                    COALESCE(d.page_count, 0) as page_count,
                    COALESCE(d.chunk_count, 0) as chunk_count,
-                   COALESCE(d.created, d.created_at, datetime()) as created_at,
+                   COALESCE(d.created_at, d.created, datetime()) as created_at,
                    COALESCE(d.tags, []) as tags,
                    COALESCE(d.category, '') as category,
                    COALESCE(d.author, '') as author,
@@ -400,14 +400,27 @@ async def get_document_stats():
             recent_result = session.run(
                 """
                 MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title, d.created as created,
+                RETURN d.doc_id as doc_id, d.title as title, d.created_at as created,
                        COALESCE(d.file_type, d.filetype) as file_type, d.language as language,
                        d.original_filename as filename, d.size as size
-                ORDER BY d.created DESC
+                ORDER BY d.created_at DESC
                 LIMIT 5
                 """
             )
-            recent_uploads = [dict(record) for record in recent_result]
+            
+            # Convert Neo4j DateTime objects to ISO format strings
+            recent_uploads = []
+            for record in recent_result:
+                record_dict = dict(record)
+                # Convert Neo4j DateTime to ISO string if present
+                if isinstance(record_dict.get('created'), Neo4jDateTime):
+                    created_dt = record_dict['created']
+                    record_dict['created'] = datetime(
+                        created_dt.year, created_dt.month, created_dt.day,
+                        created_dt.hour, created_dt.minute, created_dt.second,
+                        created_dt.nanosecond // 1000000
+                    ).isoformat()
+                recent_uploads.append(record_dict)
 
             # Calculate total storage
             total_storage = 0
@@ -575,7 +588,7 @@ async def get_document_config():
         result = DocumentConfig(
             chunk_size=int(settings.get('chunk_size', 1000)),
             chunk_overlap=int(settings.get('chunk_overlap', 200)),
-            default_language=settings.get('default_language', 'en'),
+            default_language=settings.get('default_language', 'fr'),
             auto_detect_language=settings.get('auto_detect_language', 'true').lower() == 'true',
             use_nlp=settings.get('use_nlp', 'true').lower() == 'true',
             use_enrichment=settings.get('use_enrichment', 'true').lower() == 'true',
@@ -666,7 +679,7 @@ async def get_document(doc_id: str, include_chunks: bool = False, include_entiti
                        COALESCE(d.size, 0) as size,
                        COALESCE(d.page_count, 0) as page_count,
                        COALESCE(d.chunk_count, 0) as chunk_count,
-                       COALESCE(d.created, d.created_at, datetime()) as created_at,
+                       COALESCE(d.created_at, d.created, datetime()) as created_at,
                        COALESCE(d.indexed_at, null) as indexed_at,
                        COALESCE(d.tags, []) as tags,
                        COALESCE(d.category, '') as category,
@@ -1002,6 +1015,82 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
         )
 
 
+@router.post("/{doc_id}/update-language")
+async def update_document_language(doc_id: str, language_code: str = Form(...)):
+    """Update document language and re-index."""
+    try:
+        # Get neo4j driver
+        driver = await get_neo4j_driver()
+        
+        # Get RAG system
+        rag_system = await get_rag_system()
+
+        with driver.session() as session:
+            # Check if document exists
+            doc_check = session.run(
+                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
+                doc_id=doc_id
+            )
+
+            if doc_check.single()["count"] == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document {doc_id} not found"
+                )
+                
+            # Update language
+            update_result = session.run(
+                """
+                MATCH (d:Document {doc_id: $doc_id})
+                SET d.language = $language_code,
+                    d.is_indexed = false
+                RETURN d.title as title
+                """,
+                doc_id=doc_id,
+                language_code=language_code
+            )
+            
+            doc_title = update_result.single()["title"]
+            
+            # Also update chunks language
+            chunks_result = session.run(
+                """
+                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
+                SET c.language = $language_code
+                RETURN count(c) as chunk_count
+                """,
+                doc_id=doc_id,
+                language_code=language_code
+            )
+            
+            chunk_count = chunks_result.single()["chunk_count"]
+            
+            # First, delete from current vector collection
+            delete_result = rag_system.delete_document(doc_id)
+            
+            # Then reindex with new language
+            index_result = rag_system.index_document(doc_id, force_reindex=True)
+            
+            return {
+                "doc_id": doc_id,
+                "title": doc_title,
+                "language": language_code,
+                "chunk_count": chunk_count,
+                "reindexed": True if index_result and index_result.get("vector_count", 0) > 0 else False,
+                "vector_count": index_result.get("vector_count", 0) if index_result else 0,
+                "message": f"Document language updated to {language_code} and document re-indexed"
+            }
+            
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating document language: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error updating document language: {str(e)}"
+        )
+
+
 @router.post("/index/{doc_id}", response_model=DocumentIndexStatus)
 async def index_document(doc_id: str, force_reindex: bool = False):
     """Index a document in the vector store."""
@@ -1086,32 +1175,43 @@ async def search_documents(request: DocumentSearchRequest):
         hybrid = request.hybrid_search if request.hybrid_search is not None else True
 
         # Use RAG system to search
-        results = rag_system.retrieve(
-            query=request.query,
-            top_k=request.limit,
-            filters=request.filters,
-            hybrid_search=hybrid
-        )
+        try:
+            results = rag_system.retrieve(
+                query=request.query,
+                top_k=request.limit,
+                filter_criteria=request.filters,
+                use_hybrid=hybrid
+            )
+        except Exception as retrieval_error:
+            logger.error(f"Error during document retrieval: {str(retrieval_error)}")
+            # Return empty results instead of failing completely
+            results = []
 
         # Process results
         processed_results = []
         seen_docs = set()
 
         for item in results:
-            doc_id = item["metadata"].get("doc_id")
+            try:
+                doc_id = item.get("metadata", {}).get("doc_id")
+                if not doc_id:
+                    continue
 
-            # Create a result entry
-            result_entry = {
-                "doc_id": doc_id,
-                "document_title": item["metadata"].get("doc_name", "Unknown document"),
-                "text": item["text"],
-                "section": item["metadata"].get("section", "Unknown"),
-                "score": item.get("score", 0),
-                "metadata": item["metadata"]
-            }
+                # Create a result entry
+                result_entry = {
+                    "doc_id": doc_id,
+                    "document_title": item.get("metadata", {}).get("doc_name", "Unknown document"),
+                    "text": item.get("text", ""),
+                    "section": item.get("metadata", {}).get("section", "Unknown"),
+                    "score": item.get("score", 0),
+                    "metadata": item.get("metadata", {})
+                }
 
-            processed_results.append(result_entry)
-            seen_docs.add(doc_id)
+                processed_results.append(result_entry)
+                seen_docs.add(doc_id)
+            except Exception as item_error:
+                logger.error(f"Error processing search result item: {str(item_error)}")
+                continue
 
         return {
             "results": processed_results,

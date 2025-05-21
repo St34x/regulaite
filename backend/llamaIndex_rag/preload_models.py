@@ -19,12 +19,12 @@ os.environ["HF_HOME"] = "/app/model_cache"
 
 # Dictionary mapping language codes to model names
 language_models = {
+    'fr': 'all-MiniLM-L6-v2',  # Primary language
     'en': 'all-MiniLM-L6-v2',
-    'fr': 'all-MiniLM-L6-v2',  # Using English model as fallback
-    'de': 'all-MiniLM-L6-v2',  # Using English model as fallback
-    'es': 'all-MiniLM-L6-v2',  # Using English model as fallback
-    'it': 'all-MiniLM-L6-v2',  # Using English model as fallback
-    'multi': 'all-MiniLM-L6-v2'  # Using English model as fallback
+    'de': 'all-MiniLM-L6-v2',  # Using same model as fallback
+    'es': 'all-MiniLM-L6-v2',  # Using same model as fallback
+    'it': 'all-MiniLM-L6-v2',  # Using same model as fallback
+    'multi': 'all-MiniLM-L6-v2'  # Using same model as fallback
 }
 
 # Global cache for loaded models

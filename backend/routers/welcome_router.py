@@ -231,11 +231,11 @@ async def get_dashboard_data():
                 RETURN d.doc_id as doc_id, 
                        COALESCE(d.title, d.name, 'Untitled') as title,
                        COALESCE(d.original_filename, d.name, d.doc_id) as filename, 
-                       COALESCE(d.created, d.created_at, datetime()) as created,
+                       COALESCE(d.created_at, d.created, datetime()) as created,
                        COALESCE(d.file_type, '') as file_type, 
                        COALESCE(d.size, 0) as size,
                        COALESCE(d.is_indexed, false) as is_indexed
-                ORDER BY COALESCE(d.created, d.created_at, datetime()) DESC
+                ORDER BY COALESCE(d.created_at, d.created, datetime()) DESC
                 LIMIT 5
             """
             recent_docs_details = [dict(record) for record in session.run(recent_docs_details_query)]

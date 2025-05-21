@@ -1,7 +1,7 @@
 # plugins/regul_aite/backend/main.py
 from fastapi import FastAPI, HTTPException, Depends, Body, File, UploadFile, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import logging
@@ -41,6 +41,18 @@ class Neo4jDateTimeEncoder(json.JSONEncoder):
             )
             return dt.isoformat()
         return super().default(obj)
+
+# Custom JSONResponse class using our Neo4j DateTime encoder
+class CustomJSONResponse(JSONResponse):
+    def render(self, content):
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            cls=Neo4jDateTimeEncoder,
+        ).encode("utf-8")
 
 # Import task router from routers package instead of directly from queuing_sys
 from routers.task_router import task_router
@@ -83,6 +95,8 @@ app = FastAPI(
     title="RegulAIte API",
     description="Backend API for RegulAIte application",
     version="1.0.0",
+    # Set default response class to use our custom JSON encoder
+    default_response_class=CustomJSONResponse,
     # Add custom JSON encoder for Neo4j DateTime objects to ensure proper serialization
     json_encoders={Neo4jDateTime: lambda dt: datetime(
         dt.year, dt.month, dt.day,
@@ -208,8 +222,8 @@ def startup_event():
     logger.info("Starting RegulAIte API...")
     
     # Start model preloading in a separate thread
-    # Default to multi-language model for better coverage
-    start_model_preloading(['multi'])
+    # Default to French language model as primary language
+    start_model_preloading(['fr'])
 
 def start_model_preloading(languages: List[str]):
     """
@@ -1003,6 +1017,63 @@ async def retrieve_context(request: ContextRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving context: {str(e)}"
+        )
+
+
+# New direct RAG retrieval endpoint
+class RagRetrieveRequest(BaseModel):
+    query: str
+    language: Optional[str] = None
+    top_k: Optional[int] = 5
+    use_hybrid: Optional[bool] = None
+    use_neo4j: Optional[bool] = True
+    filter_criteria: Optional[Dict[str, Any]] = None
+
+@app.post("/api/rag/retrieve")
+async def rag_retrieve(request: RagRetrieveRequest):
+    """Direct retrieval from RAG system."""
+    try:
+        # Log the request
+        logger.info(f"RAG retrieval request: {request.query[:100]}...")
+
+        # Default to French if no language specified
+        language = request.language or "fr"
+        logger.info(f"Using language {language} for RAG retrieval")
+
+        # Use RAG system to retrieve context with the parameters
+        results = rag_system.retrieve(
+            query=request.query,
+            top_k=request.top_k,
+            use_hybrid=request.use_hybrid,
+            use_neo4j=request.use_neo4j,
+            filter_criteria=request.filter_criteria
+        )
+
+        # Format results for return
+        formatted_results = []
+        for result in results:
+            # Extract text and metadata
+            formatted_result = {
+                "text": result["text"],
+                "score": result.get("score", 0.0),
+                "metadata": result["metadata"],
+                "source": result["metadata"].get("doc_name", "Unknown document"),
+                "section": result["metadata"].get("section", ""),
+                "language": result["language"] if "language" in result else language 
+            }
+            formatted_results.append(formatted_result)
+
+        return {
+            "results": formatted_results,
+            "query": request.query,
+            "count": len(formatted_results)
+        }
+
+    except Exception as e:
+        logger.error(f"Error in direct RAG retrieval: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error in RAG retrieval: {str(e)}"
         )
 
 

@@ -877,9 +877,9 @@ const DocumentsPage = () => {
                 value={filters.language}
                 onChange={(e) => setFilters({ ...filters, language: e.target.value })}
               >
+                <option value="french">French (Default)</option>
                 <option value="english">English</option>
                 <option value="spanish">Spanish</option>
-                <option value="french">French</option>
                 <option value="german">German</option>
                 <option value="chinese">Chinese</option>
               </Select>

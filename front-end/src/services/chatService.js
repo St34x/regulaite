@@ -3,7 +3,7 @@ import authService from './authService';
 import { jwtDecode } from 'jwt-decode';
 
 // Base URL for API calls
-const API_URL = process.env.AI_BACKEND_API_URL || 'http://ai-backend:8080';
+const API_URL = process.env.AI_BACKEND_API_URL || 'http://localhost:8090';
 
 // Create axios instance with base URL
 const api = axios.create({

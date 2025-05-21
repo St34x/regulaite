@@ -52,7 +52,15 @@ except ImportError:
 # Define BaseRetrieverOutput
 class BaseRetrieverOutput:
     def __init__(self, nodes):
-        self.nodes = nodes
+        self.nodes = nodes or []
+        
+    def __iter__(self):
+        """Make BaseRetrieverOutput objects directly iterable."""
+        return iter(self.nodes)
+        
+    def __len__(self):
+        """Allow checking length of nodes list."""
+        return len(self.nodes)
 
 class HybridRetriever(BaseRetriever):
     """
@@ -196,48 +204,69 @@ class HierarchicalRetriever(BaseRetriever):
         Returns:
             BaseRetrieverOutput containing retrieved nodes
         """
-        # Get base results
-        base_results = self.base_retriever.retrieve(query_bundle)
+        try:
+            # Get base results
+            base_results = self.base_retriever.retrieve(query_bundle)
 
-        # Check if we have Neo4j connectivity before trying hierarchical retrieval
-        if not self.neo4j_driver:
-            logger.warning("No Neo4j driver available, skipping hierarchical retrieval")
-            return base_results
+            # Check if we have Neo4j connectivity before trying hierarchical retrieval
+            if not self.neo4j_driver:
+                logger.warning("No Neo4j driver available, skipping hierarchical retrieval")
+                return base_results  # Return original results
 
-        # Extract node IDs from base results
-        initial_nodes = {}
-        for node in base_results:
-            node_id = node.node.node_id
-            initial_nodes[node_id] = {
-                "node": node.node,
-                "score": node.score,
-                "source": "direct"
-            }
+            # Extract nodes from base_results regardless of type
+            if hasattr(base_results, 'nodes'):
+                nodes_to_process = list(base_results.nodes)
+            else:
+                try:
+                    # Try to iterate over base_results directly
+                    nodes_to_process = list(base_results)
+                except Exception as iter_error:
+                    logger.warning(f"Unable to access nodes from retriever results: {str(iter_error)}")
+                    return base_results  # Return original results as fallback
 
-        # If no results or too few, just return what we have
-        if len(initial_nodes) < 2:
-            return base_results
+            # Extract node IDs from base results
+            initial_nodes = {}
+            for node in nodes_to_process:
+                try:
+                    node_id = node.node.node_id
+                    initial_nodes[node_id] = {
+                        "node": node.node,
+                        "score": node.score,
+                        "source": "direct"
+                    }
+                except AttributeError:
+                    logger.warning(f"Skipping node with missing attributes: {str(node)}")
+                    continue
 
-        # Get hierarchical context from Neo4j
-        augmented_nodes = self._augment_with_hierarchical_context(initial_nodes)
+            # If no results or too few, just return what we have
+            if len(initial_nodes) < 2:
+                return base_results  # Return original results
 
-        # Sort by score and take top_k
-        sorted_nodes = sorted(
-            augmented_nodes.values(),
-            key=lambda x: x["score"],
-            reverse=True
-        )[:self.top_k]
+            # Get hierarchical context from Neo4j
+            augmented_nodes = self._augment_with_hierarchical_context(initial_nodes)
 
-        # Convert to NodeWithScore format
-        from llama_index.core.schema import NodeWithScore
-        results = [
-            NodeWithScore(
-                node=item["node"],
-                score=item["score"]
-            ) for item in sorted_nodes
-        ]
+            # Sort by score and take top_k
+            sorted_nodes = sorted(
+                augmented_nodes.values(),
+                key=lambda x: x["score"],
+                reverse=True
+            )[:self.top_k]
 
-        return BaseRetrieverOutput(nodes=results)
+            # Convert to NodeWithScore format
+            from llama_index.core.schema import NodeWithScore
+            results = [
+                NodeWithScore(
+                    node=item["node"],
+                    score=item["score"]
+                ) for item in sorted_nodes
+            ]
+
+            return BaseRetrieverOutput(nodes=results)
+            
+        except Exception as e:
+            logger.error(f"Error in hierarchical retriever: {str(e)}")
+            # Return empty results rather than crashing
+            return BaseRetrieverOutput(nodes=[])
 
     def _augment_with_hierarchical_context(self, initial_nodes: Dict[str, Dict]) -> Dict[str, Dict]:
         """
@@ -314,7 +343,7 @@ class HierarchicalRetriever(BaseRetriever):
                         # Create a Document node
                         from llama_index.core.schema import TextNode
                         doc_node = TextNode(
-                            text=text,
+                            text=text if text is not None else "",
                             id_=node_id,
                             metadata=metadata
                         )
@@ -397,7 +426,7 @@ class RAGSystem:
         qdrant_url: str = None,
         qdrant_collection_prefix: str = "regulaite_docs",
         openai_api_key: str = None,
-        default_lang: str = "en",
+        default_lang: str = "fr",
         chunk_size: int = 1000,
         preload_languages: List[str] = None,
         hybrid_search: bool = True,  # New parameter for hybrid search
@@ -566,121 +595,165 @@ class RAGSystem:
             # Check if Qdrant collection exists
             collection_name = f"{self.qdrant_collection_prefix}_{lang_code}"
             try:
-                collection_info = self.qdrant_client.get_collection(collection_name=collection_name)
+                # Vector store setup
+                vector_name = "text-dense"
+                
+                # Check if collection exists and get vector name if it does
+                collection_info = self.qdrant_client.get_collection(
+                    collection_name=collection_name
+                )
                 logger.info(f"Collection {collection_name} exists: {collection_info}")
                 
-                # Check if existing collection has the correct vector dimension
+                # Extract vector name from collection info if available
+                detected_vector_name = None
                 if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
-                    existing_dim = None
                     if hasattr(collection_info.config.params, 'vectors'):
-                        if 'embed' in collection_info.config.params.vectors:
-                            existing_dim = collection_info.config.params.vectors['embed'].size
-                        elif 'default' in collection_info.config.params.vectors:
-                            existing_dim = collection_info.config.params.vectors['default'].size
-                    
-                    if existing_dim is not None and existing_dim != vector_dim:
-                        logger.warning(f"Collection {collection_name} has dimension {existing_dim}, but we need {vector_dim}")
-                        logger.warning(f"Recreating collection {collection_name} with correct dimension")
-                        
-                        # Get existing points if available
-                        try:
-                            existing_points = []
-                            scroll_result = self.qdrant_client.scroll(
-                                collection_name=collection_name,
-                                limit=100
-                            )
-                            points, next_page_offset = scroll_result
-                            existing_points.extend(points)
-                            
-                            # If there are points in the collection, save metadata for later re-indexing
-                            if existing_points:
-                                logger.warning(f"Found {len(existing_points)} points in collection. You'll need to re-index these documents.")
-                                doc_ids = set()
-                                for point in existing_points:
-                                    if hasattr(point, 'payload') and point.payload:
-                                        if 'doc_id' in point.payload:
-                                            doc_ids.add(point.payload['doc_id'])
-                                
-                                logger.warning(f"Documents to re-index: {doc_ids}")
-                        except Exception as e:
-                            logger.error(f"Error retrieving existing points: {str(e)}")
-                        
-                        # Delete the collection and recreate it
-                        self.qdrant_client.delete_collection(collection_name=collection_name)
-                        logger.info(f"Deleted collection {collection_name}")
-                        
-                        # Create a new collection with correct dimensions
-                        self.qdrant_client.create_collection(
-                            collection_name=collection_name,
-                            vectors_config={
-                                "embed": {
-                                    "size": vector_dim,
-                                    "distance": "Cosine"
-                                }
-                            }
-                        )
-                        logger.info(f"Recreated collection {collection_name} with dimension {vector_dim}")
-            except Exception as e:
-                # Collection doesn't exist, create it
-                logger.info(f"Creating new collection {collection_name}: {str(e)}")
-                self.qdrant_client.create_collection(
+                        # Find available vector names
+                        for name in collection_info.config.params.vectors:
+                            detected_vector_name = name
+                            logger.info(f"Using '{name}' as vector name for collection {collection_name}")
+                            break
+                
+                # Use detected vector name if found
+                if detected_vector_name:
+                    vector_name = detected_vector_name
+                
+                # Create vector store with explicit configuration for vector name
+                vector_store = QdrantVectorStore(
+                    client=self.qdrant_client,
                     collection_name=collection_name,
-                    vectors_config={
-                        "embed": {
-                            "size": vector_dim,
-                            "distance": "Cosine"
-                        }
-                    }
+                    vector_name=vector_name
                 )
-            
-            # Initialize vector store
-            vector_store = QdrantVectorStore(
-                client=self.qdrant_client,
-                collection_name=collection_name,
-                vector_name="embed"
-            )
-            
-            # Create vector index
-            Settings.embed_model = embed_model
-            vector_index = VectorStoreIndex.from_vector_store(vector_store)
-            
-            # Create a proper retriever from the index
-            vector_retriever = vector_index.as_retriever(similarity_top_k=5)
-            
-            # Store resources
-            self.language_resources[lang_code] = {
-                "embedding_model": embed_model,
-                "vector_retriever": vector_retriever
-            }
-            
-            # Add BM25 retriever if available
-            if BM25Retriever is not None:
-                try:
-                    # Create a new VectorStoreIndex with the right vector name for BM25
-                    # to ensure it uses the correct docstore
-                    bm25_vector_store = QdrantVectorStore(
-                        client=self.qdrant_client,
-                        collection_name=collection_name,
-                        vector_name="embed"
-                    )
-                    bm25_index = VectorStoreIndex.from_vector_store(bm25_vector_store)
+                
+                # Create vector index with explicit configuration for vector name
+                Settings.embed_model = embed_model
+                vector_index = VectorStoreIndex.from_vector_store(
+                    vector_store,
+                    service_context=None,  # Will use the default from Settings
+                    vector_store_kwargs={"vector_name": vector_name}  # Ensure vector name is set for all operations
+                )
+                
+                # Create a proper retriever from the index with the correct vector field name
+                vector_retriever = vector_index.as_retriever(
+                    similarity_top_k=5,
+                    vector_store_query_mode="default",
+                    # Explicitly set the vector name for queries to match the collection schema
+                    vector_store_kwargs={"vector_name": vector_name}
+                )
+                
+                # Add custom handling for invalid TextNode data
+                original_retrieve = vector_retriever._retrieve
+                
+                def safe_retrieve_wrapper(*args, **kwargs):
+                    try:
+                        # Call the original function
+                        results = original_retrieve(*args, **kwargs)
+                        return results
+                    except Exception as e:
+                        logger.error(f"Error in retriever for language {lang_code}: {str(e)}")
+                        # Check if this is a TextNode validation error
+                        if "Input should be a valid string" in str(e) and "input_value=None" in str(e):
+                            logger.warning(f"Caught None text value in TextNode for language {lang_code}, returning empty results")
+                        # Return empty results as proper BaseRetrieverOutput instance
+                        return BaseRetrieverOutput(nodes=[])
+                
+                # Replace the method with our wrapper
+                vector_retriever._retrieve = safe_retrieve_wrapper
+                
+                # Store resources
+                self.language_resources[lang_code] = {
+                    "embedding_model": embed_model,
+                    "vector_retriever": vector_retriever
+                }
+                
+                # Add BM25 retriever if available
+                if BM25Retriever is not None:
+                    try:
+                        # Check if collection is empty before trying to initialize BM25Retriever
+                        collection_info = self.qdrant_client.get_collection(
+                            collection_name=collection_name
+                        )
+                        point_count = collection_info.points_count
+                        
+                        if point_count == 0:
+                            logger.warning(f"Collection {collection_name} is empty, skipping BM25Retriever initialization")
+                        else:
+                            # Create a new VectorStoreIndex with the right vector name for BM25
+                            # to ensure it uses the correct docstore
+                            bm25_vector_store = QdrantVectorStore(
+                                client=self.qdrant_client,
+                                collection_name=collection_name,
+                                vector_name=vector_name
+                            )
+                            bm25_index = VectorStoreIndex.from_vector_store(bm25_vector_store)
+                            
+                            # Create BM25 retriever from the docstore
+                            self.language_resources[lang_code]["bm25_retriever"] = BM25Retriever.from_defaults(
+                                docstore=bm25_index.docstore,
+                                similarity_top_k=5
+                            )
+                    except Exception as bm25_error:
+                        logger.warning(f"Failed to initialize BM25Retriever: {str(bm25_error)}")
+                        # Continue without BM25 retriever
+                
+                # Mark as initialized
+                return True
+
+            except Exception as e:
+                logger.error(f"Error initializing resources for language {lang_code}: {str(e)}")
+                if "max() arg is an empty sequence" in str(e):
+                    logger.warning(f"This may indicate that the Qdrant collection {self.qdrant_collection_prefix}_{lang_code} is empty or not properly configured")
                     
-                    # Create BM25 retriever from the docstore
-                    self.language_resources[lang_code]["bm25_retriever"] = BM25Retriever.from_defaults(
-                        docstore=bm25_index.docstore,
-                        similarity_top_k=5
-                    )
-                except Exception as bm25_error:
-                    logger.warning(f"Failed to initialize BM25Retriever: {str(bm25_error)}")
-                    # Continue without BM25 retriever
-            
-            # Mark as initialized
-            return True
+                    # Try creating an empty but functional retriever anyway to prevent crashes
+                    try:
+                        logger.info(f"Attempting to create a fallback retriever for empty collection {self.qdrant_collection_prefix}_{lang_code}")
+                        
+                        # Initialize resources without attempting to load from empty collection
+                        class EmptyVectorRetriever(BaseRetriever):
+                            def _retrieve(self, query_bundle):
+                                logger.warning(f"Using empty vector retriever for language '{lang_code}' - empty collection")
+                                return BaseRetrieverOutput(nodes=[])
+                        
+                        # Store basic resources
+                        self.language_resources[lang_code] = {
+                            "embedding_model": embed_model,
+                            "vector_retriever": EmptyVectorRetriever(),
+                        }
+                        
+                        # Return success for this empty but functional retriever
+                        logger.warning(f"Created fallback empty retriever for language '{lang_code}'")
+                        return True
+                    except Exception as fallback_error:
+                        logger.error(f"Failed to create fallback retriever: {str(fallback_error)}")
+                
+                return False
 
         except Exception as e:
             logger.error(f"Error initializing resources for language {lang_code}: {str(e)}")
             if "max() arg is an empty sequence" in str(e):
                 logger.warning(f"This may indicate that the Qdrant collection {self.qdrant_collection_prefix}_{lang_code} is empty or not properly configured")
+                
+                # Try creating an empty but functional retriever anyway to prevent crashes
+                try:
+                    logger.info(f"Attempting to create a fallback retriever for empty collection {self.qdrant_collection_prefix}_{lang_code}")
+                    
+                    # Initialize resources without attempting to load from empty collection
+                    class EmptyVectorRetriever(BaseRetriever):
+                        def _retrieve(self, query_bundle):
+                            logger.warning(f"Using empty retriever for query: {query_bundle.query_str}")
+                            return BaseRetrieverOutput(nodes=[])
+                    
+                    # Store fallback resources
+                    self.language_resources["fallback"] = {
+                        "embedding_model": None,
+                        "vector_retriever": EmptyVectorRetriever(),
+                    }
+                    
+                    logger.info("Fallback placeholder initialized - system will return empty results")
+                    return True
+                except Exception as fallback_error:
+                    logger.error(f"Failed to create fallback retriever: {str(fallback_error)}")
+            
             return False
 
     def retrieve(
@@ -786,7 +859,12 @@ class RAGSystem:
                 # Use just vector retrieval
                 base_retriever = resources["vector_retriever"]
                 if use_hybrid:
-                    logger.warning("Hybrid search requested but BM25Retriever not available, falling back to vector search")
+                    if BM25Retriever is None:
+                        logger.warning("Hybrid search requested but BM25Retriever library not available, falling back to vector search")
+                    elif not resources.get("bm25_retriever"):
+                        logger.warning(f"Hybrid search requested but BM25Retriever not initialized for language '{lang}' (likely empty collection), falling back to vector search")
+                    else:
+                        logger.warning("Hybrid search requested but conditions not met, falling back to vector search")
 
             # Apply hierarchical retrieval if enabled
             if use_hierarchical and self.neo4j_driver and use_neo4j:
@@ -856,23 +934,72 @@ class RAGSystem:
                     logger.warning(f"Failed to check collection status: {str(e)}")
                 
                 # Attempt retrieval if we get here
-                retrieval_results = retriever.retrieve(query_bundle)
+                try:
+                    retrieval_results = retriever.retrieve(query_bundle)
+                    
+                    # Extract nodes to process from retrieval results
+                    if hasattr(retrieval_results, 'nodes'):
+                        # Handle BaseRetrieverOutput objects
+                        nodes_to_process = retrieval_results.nodes
+                    else:
+                        # Handle list of NodeWithScore objects directly
+                        try:
+                            nodes_to_process = list(retrieval_results)
+                        except TypeError:
+                            logger.error(f"Retrieved results for language {lang} are not iterable")
+                            # Skip this language's results
+                            continue
+                    
+                    # Validate that we have valid nodes before processing
+                    if not nodes_to_process:
+                        logger.info(f"No nodes retrieved for language {lang}")
+                        continue
+                    
+                    # Now process each node in the results
+                    for result in nodes_to_process:
+                        try:
+                            # Skip None results
+                            if result is None:
+                                logger.warning(f"Skipping None result in retrieval results for language {lang}")
+                                continue
 
-                # Convert to standard format
-                for result in retrieval_results.nodes:
-                    node = result.node
-
-                    # Extract text and metadata
-                    result_item = {
-                        "text": node.text,
-                        "score": result.score,
-                        "id": node.node_id,
-                        "metadata": node.metadata or {},
-                        "language": lang
-                    }
-
-                    all_results.append(result_item)
-
+                            # Handle missing node attribute
+                            if not hasattr(result, 'node'):
+                                logger.warning(f"Result missing 'node' attribute in language {lang}")
+                                continue
+                                
+                            node = result.node
+                            
+                            # Skip None nodes
+                            if node is None:
+                                logger.warning(f"Skipping None node in retrieval results for language {lang}")
+                                continue
+                                
+                            # Skip nodes with None text
+                            if node.text is None:
+                                logger.warning(f"Skipping node with None text in retrieval results for language {lang}")
+                                continue
+                            
+                            # Handle missing score attribute
+                            score = getattr(result, 'score', 0.0)
+                            
+                            # Ensure text is a valid string
+                            text_value = node.text if node.text is not None else ""
+                            
+                            # Extract text and metadata
+                            result_item = {
+                                "text": text_value,
+                                "score": score,
+                                "id": getattr(node, 'node_id', str(uuid.uuid4())),
+                                "metadata": getattr(node, 'metadata', {}) or {},
+                                "language": lang
+                            }
+                            
+                            all_results.append(result_item)
+                        except Exception as node_error:
+                            logger.error(f"Error processing result node for language {lang}: {str(node_error)}")
+                except Exception as retrieval_error:
+                    logger.error(f"Error during retrieval for language {lang}: {str(retrieval_error)}")
             except Exception as e:
                 logger.error(f"Error during retrieval for language {lang}: {str(e)}")
 
@@ -909,10 +1036,39 @@ class RAGSystem:
         Returns:
             The initialized language code (might be different if fallback was used)
         """
-        # Try to initialize the requested language
+        # First try to initialize the requested language
         if lang_code not in self.language_resources:
             success = self._initialize_language(lang_code)
             if success:
+                # Now check what vector name we're actually using
+                detected_vector_name = None
+                collection_name = f"{self.qdrant_collection_prefix}_{lang_code}"
+                try:
+                    collection_info = self.qdrant_client.get_collection(collection_name)
+                    if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
+                        if hasattr(collection_info.config.params, 'vectors'):
+                            # Find available vector names
+                            for vector_name in collection_info.config.params.vectors:
+                                detected_vector_name = vector_name
+                                logger.info(f"Detected vector name '{vector_name}' for language {lang_code}")
+                                break
+                except Exception as e:
+                    logger.warning(f"Error detecting vector name for language {lang_code}: {str(e)}")
+                
+                # Update vector name in retrievers if we detected one
+                if detected_vector_name:
+                    logger.info(f"Updating vector name to '{detected_vector_name}' for retrievers in language {lang_code}")
+                    resources = self.language_resources[lang_code]
+                    if "vector_retriever" in resources:
+                        # Try to update the vector name in the retriever
+                        try:
+                            retriever = resources["vector_retriever"]
+                            if hasattr(retriever, "_vector_store_kwargs"):
+                                retriever._vector_store_kwargs["vector_name"] = detected_vector_name
+                                logger.info(f"Updated vector name in retriever for language {lang_code}")
+                        except Exception as e:
+                            logger.warning(f"Failed to update vector name in retriever: {str(e)}")
+                
                 return lang_code
 
         # If we get here, either initialization failed or was not needed
@@ -987,7 +1143,7 @@ class RAGSystem:
         # Create empty placeholder resources
         class EmptyRetriever(BaseRetriever):
             def _retrieve(self, query_bundle):
-                logger.warning(f"Using empty retriever for query: {query_bundle.query_str}")
+                logger.warning("Using fallback empty retriever (no languages initialized)")
                 return BaseRetrieverOutput(nodes=[])
         
         # Store fallback resources
@@ -1362,29 +1518,32 @@ class RAGSystem:
                             logger.info(f"Collection {collection_name} exists with {collection_info.points_count} points")
                             
                             # Check vector name configuration to determine proper vector name
-                            vector_name = "default"
+                            vector_name = "text-dense"  # Default to text-dense
                             if hasattr(collection_info, 'config') and hasattr(collection_info.config, 'params'):
-                                if hasattr(collection_info.config.params, 'vectors') and 'embed' in collection_info.config.params.vectors:
-                                    vector_name = "embed"
-                                    logger.info(f"Using 'embed' as vector name for existing collection {collection_name}")
+                                if hasattr(collection_info.config.params, 'vectors'):
+                                    # Use existing vector name if available
+                                    if 'text-dense' in collection_info.config.params.vectors:
+                                        vector_name = "text-dense"
+                                        logger.info(f"Using 'text-dense' as vector name for existing collection {collection_name}")
+                                    elif 'embed' in collection_info.config.params.vectors:
+                                        vector_name = "embed"
+                                        logger.info(f"Using 'embed' as vector name for existing collection {collection_name}")
+                                    elif 'default' in collection_info.config.params.vectors:
+                                        vector_name = "default"
+                                        logger.info(f"Using 'default' as vector name for existing collection {collection_name}")
                             
                         except Exception as collection_error:
                             logger.info(f"Creating new collection {collection_name}: {str(collection_error)}")
                             vector_size = len(embedding)
-                            vector_name = "default"  # Use default for new collections
+                            vector_name = "text-dense"  # Use text-dense for new collections
                             
                             self.qdrant_client.create_collection(
                                 collection_name=collection_name,
-                                vectors_config=rest.VectorParams(
-                                    size=vector_size,
-                                    distance=rest.Distance.COSINE
-                                ),
-                                # Define the vector name explicitly as the default
-                                vectors={
-                                    vector_name: rest.VectorParams(
-                                        size=vector_size,
-                                        distance=rest.Distance.COSINE
-                                    )
+                                vectors_config={
+                                    "text-dense": {
+                                        "size": vector_size,
+                                        "distance": "Cosine"
+                                    }
                                 }
                             )
                             logger.info(f"Created new collection {collection_name} with vector size {vector_size}")
