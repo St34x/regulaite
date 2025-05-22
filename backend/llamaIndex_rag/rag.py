@@ -303,6 +303,87 @@ class RAGSystem:
                                         }
                                     })
                             chunks = text_chunks
+                
+                # If still no chunks, try to get them directly from Qdrant
+                if not chunks:
+                    logger.info(f"No chunks found using parser methods, trying direct Qdrant query for doc_id={doc_id}")
+                    try:
+                        # Get the collection name from the document parser
+                        collection_name = self.collection_name
+                        if hasattr(document_parser, 'qdrant_collection_name'):
+                            collection_name = document_parser.qdrant_collection_name
+                            
+                        # Query Qdrant directly to find chunks by doc_id
+                        chunk_points = self.client.scroll(
+                            collection_name=collection_name,
+                            scroll_filter=qdrant_models.Filter(
+                                must=[
+                                    qdrant_models.FieldCondition(
+                                        key="metadata.doc_id", 
+                                        match=qdrant_models.MatchValue(value=doc_id)
+                                    )
+                                ]
+                            ),
+                            limit=1000,
+                            with_payload=True,
+                            with_vectors=False
+                        )
+                        
+                        if chunk_points and len(chunk_points[0]) > 0:
+                            chunks = []
+                            for point in chunk_points[0]:
+                                payload = point.payload
+                                chunk = {
+                                    'text': payload.get('text', ''),
+                                    'content': payload.get('text', ''),
+                                    'metadata': payload.get('metadata', {})
+                                }
+                                chunks.append(chunk)
+                            logger.info(f"Retrieved {len(chunks)} chunks directly from Qdrant")
+                        
+                        # Try alternate field structure 
+                        if not chunks:
+                            chunk_points = self.client.scroll(
+                                collection_name=collection_name,
+                                scroll_filter=qdrant_models.Filter(
+                                    must=[
+                                        qdrant_models.FieldCondition(
+                                            key="doc_id", 
+                                            match=qdrant_models.MatchValue(value=doc_id)
+                                        )
+                                    ]
+                                ),
+                                limit=1000,
+                                with_payload=True,
+                                with_vectors=False
+                            )
+                            
+                            if chunk_points and len(chunk_points[0]) > 0:
+                                chunks = []
+                                for point in chunk_points[0]:
+                                    payload = point.payload
+                                    chunk = {
+                                        'text': payload.get('text', ''),
+                                        'content': payload.get('text', ''),
+                                        'metadata': {'doc_id': doc_id}
+                                    }
+                                    chunks.append(chunk)
+                                logger.info(f"Retrieved {len(chunks)} chunks from Qdrant using direct doc_id field")
+                    except Exception as qdrant_error:
+                        logger.warning(f"Error querying Qdrant directly: {str(qdrant_error)}")
+                        
+                    # As a last resort, add a small delay and try one more time
+                    if not chunks:
+                        logger.info("Adding delay and retrying chunk retrieval")
+                        try:
+                            time.sleep(1)  # Small delay to allow any potential async operations to complete
+                            if hasattr(document_parser, 'get_document_chunks'):
+                                chunks = document_parser.get_document_chunks(doc_id)
+                                if chunks:
+                                    logger.info(f"Successfully retrieved {len(chunks)} chunks after delay")
+                        except Exception as retry_error:
+                            logger.warning(f"Error in retry chunk retrieval: {str(retry_error)}")
+                
             except Exception as e:
                 logger.error(f"Error retrieving chunks for document {doc_id}: {str(e)}")
                 return {

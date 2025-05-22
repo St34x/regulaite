@@ -707,9 +707,9 @@ class DocumentParser:
             if "metadata" in element and "page_number" in element["metadata"]:
                 current_page_num = element["metadata"]["page_number"]
                 
-            # Check if this is a title/heading that might indicate a section
-            if element_type in ["Title", "Header", "Heading", "h1", "h2", "h3"]:
-                # If we have accumulated text, create a chunk
+            # Check if this is a title element to mark a new section
+            if element_type == "Title":
+                # If we have text in the current chunk, save it before starting a new section
                 if current_chunk_text:
                     chunk = {
                         "chunk_id": f"{doc_id}_chunk_{chunk_index}",
@@ -719,55 +719,64 @@ class DocumentParser:
                         "section": current_section,
                         "metadata": current_metadata.copy() if current_metadata else {},
                         "page_num": current_page_num,  # Add page number
-                        "order_index": chunk_index  # Add order index
+                        "order_index": chunk_index,  # Add order index
+                        "doc_id": doc_id  # Add doc_id directly in chunk
                     }
+                    
+                    # Make sure doc_id is also in metadata
+                    if "doc_id" not in chunk["metadata"]:
+                        chunk["metadata"]["doc_id"] = doc_id
+                        
                     chunks.append(chunk)
                     chunk_index += 1
-                    
-                    # Reset for next chunk
                     current_chunk_text = ""
                     current_element_types = []
-                    current_metadata = {}
+                    
+                # Update current section to the title text
+                current_section = element_text
                 
-                # Update section name based on heading
-                current_section = element_text[:100]  # Truncate long titles
-            
-            # Check if adding this element would exceed chunk size
-            if len(current_chunk_text) + len(element_text) + 2 > self.chunk_size:
-                # If we have accumulated text, create a chunk
-                if current_chunk_text:
-                    chunk = {
-                        "chunk_id": f"{doc_id}_chunk_{chunk_index}",
-                        "text": current_chunk_text,
-                        "index": chunk_index,
-                        "element_type": ", ".join(current_element_types),
-                        "section": current_section,
-                        "metadata": current_metadata.copy() if current_metadata else {},
-                        "page_num": current_page_num,  # Add page number
-                        "order_index": chunk_index  # Add order index
-                    }
-                    chunks.append(chunk)
-                    chunk_index += 1
-                    
-                    # Reset for next chunk
-                    current_chunk_text = ""
-                    current_element_types = []
-                    current_metadata = {}
-            
-            # Add element text to current chunk
+            # Add element to current chunk
             if current_chunk_text:
-                current_chunk_text += "\n\n" + element_text
-            else:
-                current_chunk_text = element_text
-                
-            # Track element type
+                current_chunk_text += "\n\n"
+            current_chunk_text += element_text
+            
+            # Keep track of element types in this chunk
             if element_type not in current_element_types:
                 current_element_types.append(element_type)
                 
-            # Merge metadata
+            # Copy metadata from element if available
             if "metadata" in element and isinstance(element["metadata"], dict):
                 for key, value in element["metadata"].items():
                     current_metadata[key] = value
+                    
+            # If we've reached the max chunk size, finalize this chunk and start a new one
+            if len(current_chunk_text) >= self.chunk_size:
+                chunk = {
+                    "chunk_id": f"{doc_id}_chunk_{chunk_index}",
+                    "text": current_chunk_text,
+                    "index": chunk_index,
+                    "element_type": ", ".join(current_element_types),
+                    "section": current_section,
+                    "metadata": current_metadata.copy() if current_metadata else {},
+                    "page_num": current_page_num,  # Add page number
+                    "order_index": chunk_index,  # Add order index
+                    "doc_id": doc_id  # Add doc_id directly in chunk
+                }
+                
+                # Make sure doc_id is also in metadata
+                if "doc_id" not in chunk["metadata"]:
+                    chunk["metadata"]["doc_id"] = doc_id
+                    
+                chunks.append(chunk)
+                chunk_index += 1
+                
+                # Start a new chunk with overlap
+                words = current_chunk_text.split()
+                overlap_word_count = min(len(words), int(self.chunk_overlap / 5))  # Approximate words for overlap
+                overlap_text = " ".join(words[-overlap_word_count:])
+                
+                current_chunk_text = overlap_text
+                current_element_types = [element_type]  # Reset to current element type
         
         # Add final chunk if not empty
         if current_chunk_text:
@@ -779,8 +788,14 @@ class DocumentParser:
                 "section": current_section,
                 "metadata": current_metadata.copy() if current_metadata else {},
                 "page_num": current_page_num,  # Add page number
-                "order_index": chunk_index  # Add order index
+                "order_index": chunk_index,  # Add order index
+                "doc_id": doc_id  # Add doc_id directly in chunk
             }
+            
+            # Make sure doc_id is also in metadata
+            if "doc_id" not in chunk["metadata"]:
+                chunk["metadata"]["doc_id"] = doc_id
+                
             chunks.append(chunk)
         
         return chunks
@@ -1083,7 +1098,7 @@ class DocumentParser:
 
                         # Create payload for Qdrant
                         payload = {
-                            "doc_id": doc_id,
+                            "doc_id": doc_id,  # Add doc_id at root level
                             "chunk_id": payload_chunk_id, # Use the original chunk_id style here
                             "text": text_content,
                             "page_number": page_num,
@@ -1092,74 +1107,106 @@ class DocumentParser:
                             "order_index": chunk_data.get("order_index", chunk_idx)
                         }
                         
+                        # Ensure doc_id is also in metadata
+                        if "metadata" in payload and isinstance(payload["metadata"], dict):
+                            payload["metadata"]["doc_id"] = doc_id
+                        
                         # Add a dummy vector (e.g., all ones) - RAG will create real embeddings later
                         # Use the embedding_dim passed to the constructor
                         dummy_vector = [1.0] * self.embedding_dim
-
+                        
                         points_to_upsert.append(
                             qdrant_models.PointStruct(
-                                id=qdrant_point_id,  # Use generated UUID for Qdrant point ID
-                                payload=payload, 
-                                vector=dummy_vector
+                                id=qdrant_point_id,
+                                vector=dummy_vector,
+                                payload=payload
                             )
                         )
                     
-                    if skipped_chunks > 0:
-                        logger.info(f"Skipped {skipped_chunks} chunks with empty text for document {doc_id}")
-                    
+                    # Batch upsert all points
                     if points_to_upsert:
+                        # Use wait=True to ensure operation completes before continuing
                         self.qdrant_client.upsert(
                             collection_name=self.qdrant_collection_name,
                             points=points_to_upsert,
                             wait=True
                         )
                         logger.info(f"Stored {len(points_to_upsert)} chunks for document {doc_id} in Qdrant collection '{self.qdrant_collection_name}'")
-                    else:
-                        logger.warning(f"No points to upsert for document {doc_id}.")
-
-                except Exception as e:
-                    logger.error(f"Error storing chunks in Qdrant for document {doc_id}: {e}", exc_info=True)
-                    # Update metadata status to error if chunk storage fails
-                    if self.qdrant_client:
+                        
+                        # Verify the chunks were stored properly
                         try:
-                            metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
-                            error_payload = doc_metadata.copy() # Start with current metadata
-                            error_payload["status"] = "error"
-                            error_payload["error_message"] = f"Failed to store chunks: {str(e)}"
-                             # Ensure all necessary fields are present for the payload
-                            final_error_payload = {
-                                "doc_id": doc_id,
-                                "title": error_payload.get("title", f"Document {doc_id}"),
-                                "name": error_payload.get("original_filename", file_name),
-                                "is_indexed": error_payload.get("is_indexed", False),
-                                "file_type": error_payload.get("file_type", "unknown"),
-                                "description": error_payload.get("description", ""),
-                                "language": error_payload.get("language", "en"),
-                                "size": error_payload.get("size", 0),
-                                "page_count": error_payload.get("page_count", 0),
-                                "chunk_count": error_payload.get("chunk_count", 0), 
-                                "created_at": error_payload.get("created_at", py_datetime.now().isoformat()),
-                                "tags": error_payload.get("tags", []),
-                                "category": error_payload.get("category", "Uncategorized"),
-                                "author": error_payload.get("author", "N/A"),
-                                "status": "error", # Explicitly set status
-                                "error_message": error_payload.get("error_message", "Unknown error during chunk storage"),
-                                **error_payload # Add any other fields
-                            }
-
-                            self.qdrant_client.upsert(
-                                collection_name=self.qdrant_metadata_collection_name,
-                                points=[
-                                    qdrant_models.PointStruct(
-                                        id=metadata_point_id,
-                                        vector=[1.0] * self.embedding_dim, # Use embedding_dim consistent with collection
-                                        payload=final_error_payload
-                                    )
-                                ]
+                            verification_response = self.qdrant_client.scroll(
+                                collection_name=self.qdrant_collection_name,
+                                scroll_filter=qdrant_models.Filter(
+                                    must=[
+                                        qdrant_models.FieldCondition(
+                                            key="doc_id",
+                                            match=qdrant_models.MatchValue(value=doc_id)
+                                        )
+                                    ]
+                                ),
+                                limit=1,
+                                with_payload=True
                             )
-                            logger.info(f"Updated metadata for document {doc_id} to error status due to chunk storage failure.")
-                        except Exception as meta_e:
-                             logger.error(f"Failed to update metadata to error status for {doc_id}: {meta_e}", exc_info=True)
+                            
+                            if verification_response and len(verification_response[0]) > 0:
+                                logger.info(f"Verified chunks for document {doc_id} are stored in Qdrant")
+                            else:
+                                logger.warning(f"Failed to verify chunks for document {doc_id} in Qdrant")
+                        except Exception as verify_e:
+                            logger.warning(f"Error verifying stored chunks: {str(verify_e)}")
+                        
+                    # Update document metadata with chunk count
+                    if doc_metadata is not None and "chunk_count" not in doc_metadata:
+                        doc_metadata["chunk_count"] = len(points_to_upsert)
+
+                    # Update document status to processed
+                    try:
+                        metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                        
+                        # Get existing metadata
+                        try:
+                            metadata_response = self.qdrant_client.retrieve(
+                                collection_name=self.qdrant_metadata_collection_name,
+                                ids=[metadata_point_id],
+                                with_payload=True
+                            )
+                            
+                            if metadata_response and len(metadata_response) > 0:
+                                existing_metadata = metadata_response[0].payload
+                            else:
+                                existing_metadata = {}
+                        except Exception as retrieve_error:
+                            logger.warning(f"Error retrieving existing metadata for {doc_id}: {str(retrieve_error)}")
+                            existing_metadata = {}
+                        
+                        # Merge with existing metadata
+                        final_payload_for_update = existing_metadata.copy() if existing_metadata else {}
+                        final_payload_for_update.update({
+                            "doc_id": doc_id,
+                            "status": "processed",
+                            "chunk_count": len(points_to_upsert),
+                            "is_indexed": doc_metadata.get("is_indexed", False)
+                        })
+                        
+                        # Update metadata in Qdrant
+                        self.qdrant_client.upsert(
+                            collection_name=self.qdrant_metadata_collection_name,
+                            points=[
+                                qdrant_models.PointStruct(
+                                    id=metadata_point_id,
+                                    vector=[1.0] * self.embedding_dim,
+                                    payload=final_payload_for_update
+                                )
+                            ],
+                            wait=True
+                        )
+                        logger.info(f"Updated metadata for document {doc_id} to status 'processed' with chunk_count {len(points_to_upsert)}")
+                    except Exception as e:
+                        logger.error(f"Error updating document metadata: {str(e)}")
+                except Exception as e:
+                    logger.error(f"Error storing chunks in Qdrant: {str(e)}")
+                    # Continue processing - we'll still return the extracted information
 
             elif not self.qdrant_client:
                 logger.error(f"Qdrant client not initialized. Cannot store chunks for document {doc_id}")
@@ -1458,3 +1505,101 @@ class DocumentParser:
                 "message": f"Error deleting chunks: {str(e)}",
                 "doc_id": doc_id
             }
+
+    def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve all chunks for a document from Qdrant.
+        
+        Args:
+            doc_id: Document ID to retrieve chunks for
+            
+        Returns:
+            List of chunk dictionaries with text and metadata
+        """
+        if not self.qdrant_client:
+            logger.error("Qdrant client not available, cannot retrieve document chunks")
+            return []
+        
+        try:
+            # Query Qdrant for chunks with this doc_id
+            response = self.qdrant_client.scroll(
+                                collection_name=self.qdrant_collection_name,
+                                scroll_filter=qdrant_models.Filter(
+                                    must=[
+                                        qdrant_models.FieldCondition(
+                                            key="doc_id",
+                                            match=qdrant_models.MatchValue(value=doc_id)
+                                        )
+                                    ]
+                                ),
+                limit=1000,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            chunks = []
+            if response and len(response[0]) > 0:
+                for point in response[0]:
+                    payload = point.payload
+                    # Create a chunk object with standard fields
+                    chunk = {
+                        "text": payload.get("text", ""),
+                        "content": payload.get("text", ""),  # Use 'text' as 'content' for compatibility
+                        "metadata": {
+                            "doc_id": doc_id,
+                            "chunk_id": payload.get("chunk_id", ""),
+                            "page_num": payload.get("page_number", 0),
+                            "element_type": payload.get("element_type", "")
+                        }
+                    }
+                    
+                    # Add additional metadata if available
+                    if "metadata" in payload and isinstance(payload["metadata"], dict):
+                        for key, value in payload["metadata"].items():
+                            chunk["metadata"][key] = value
+                    
+                    chunks.append(chunk)
+                
+                logger.info(f"Retrieved {len(chunks)} chunks for document {doc_id} from Qdrant")
+                return chunks
+            
+            # If no chunks found with 'doc_id' field, try with 'metadata.doc_id'
+            response = self.qdrant_client.scroll(
+                collection_name=self.qdrant_collection_name,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="metadata.doc_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                ),
+                limit=1000,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if response and len(response[0]) > 0:
+                for point in response[0]:
+                    payload = point.payload
+                    # Create a chunk object with standard fields
+                    chunk = {
+                        "text": payload.get("text", ""),
+                        "content": payload.get("text", ""),  # Use 'text' as 'content' for compatibility
+                        "metadata": payload.get("metadata", {})
+                    }
+                    
+                    # Ensure doc_id is in metadata
+                    if "metadata" in chunk and "doc_id" not in chunk["metadata"]:
+                        chunk["metadata"]["doc_id"] = doc_id
+                    
+                    chunks.append(chunk)
+                
+                logger.info(f"Retrieved {len(chunks)} chunks for document {doc_id} from Qdrant using metadata.doc_id")
+                return chunks
+            
+            logger.warning(f"No chunks found for document {doc_id} in Qdrant")
+            return []
+        except Exception as e:
+            logger.error(f"Error retrieving chunks for document {doc_id}: {str(e)}")
+            return []
