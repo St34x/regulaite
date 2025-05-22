@@ -64,6 +64,14 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const internalThoughtsColor = useColorModeValue('purple.800', 'purple.200');
   const processingStateBg = useColorModeValue('blue.50', 'blue.900');
   const processingStateColor = useColorModeValue('blue.700', 'blue.300');
+  
+  // Clean message content to remove any internal thoughts that might have been included
+  const cleanMessageContent = () => {
+    if (isUser || !message.content) return message.content;
+    
+    // Remove any <internal_thoughts> tags and their content
+    return message.content.replace(/<internal_thoughts>[\s\S]*?<\/internal_thoughts>/g, '');
+  };
 
   return (
     <Box 
@@ -182,7 +190,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
           )}
         </Flex>
         
-        {/* Message Content */}
+        {/* Message Content - Using cleaned content */}
         <Box 
           className="prose-sm prose max-w-none" 
           color={textColor}
@@ -190,7 +198,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
           lineHeight="1.6"
           fontSize="sm"
         >
-          <ReactMarkdown>{message.content}</ReactMarkdown>
+          <ReactMarkdown>{cleanMessageContent()}</ReactMarkdown>
         </Box>
         
         {/* Hallucination Risk */}

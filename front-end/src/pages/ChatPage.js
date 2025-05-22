@@ -653,9 +653,21 @@ const ChatPage = () => {
       
       console.log('Found session to delete:', sessionToDelete);
       
-      // First, remove from local state to update UI immediately
+      // Show loading state to indicate deletion in progress
+      setIsLoading(true);
+      
+      // First, remove from local state to update UI immediately (for better responsiveness)
       const updatedSessions = sessions.filter(session => session.id !== sessionId);
       setSessions(updatedSessions);
+      
+      // If we deleted the active session, switch to another one immediately for better UX
+      if (sessionId === activeSessionId) {
+        if (updatedSessions.length > 0) {
+          handleSelectSession(updatedSessions[0].id);
+        } else {
+          handleNewSession();
+        }
+      }
       
       // If the session was a fallback session, we don't need to delete from server
       const isFallbackSession = sessionToDelete.is_fallback === true || 
@@ -665,14 +677,9 @@ const ChatPage = () => {
       if (isFallbackSession) {
         console.log('Skipping server delete for fallback session:', sessionId);
         
-        // If we deleted the active session, switch to another one
-        if (sessionId === activeSessionId) {
-          if (updatedSessions.length > 0) {
-            handleSelectSession(updatedSessions[0].id);
-          } else {
-            handleNewSession();
-          }
-        }
+        // Short delay to ensure UI updates are visible
+        await new Promise(resolve => setTimeout(resolve, 300));
+        setIsLoading(false);
         
         toast({
           title: 'Conversation Deleted',
@@ -685,36 +692,65 @@ const ChatPage = () => {
         return;
       }
       
+      // For regular sessions, attempt to delete from server
+      let serverDeletionSuccess = false;
+      let errorDetails = null;
+      
       try {
-        // For regular sessions, attempt to delete from server
+        // Add a small delay to ensure UI updates first
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
         console.log('Deleting session from server:', sessionId);
-        await chatService.deleteSession(sessionId);
-        console.log('Session successfully deleted from server');
-      } catch (serverError) {
-        console.error('Server deletion failed but continuing:', serverError);
-        // Continue with UI updates even if server deletion fails
-        // The session is already removed from local state
-      }
-      
-      // If we deleted the active session, switch to another one
-      if (sessionId === activeSessionId) {
-        if (updatedSessions.length > 0) {
-          handleSelectSession(updatedSessions[0].id);
-        } else {
-          handleNewSession();
+        const result = await chatService.deleteSession(sessionId);
+        console.log('Server deletion response:', result);
+        
+        if (result && result.messages_deleted !== undefined) {
+          console.log(`Deleted ${result.messages_deleted} messages from session ${sessionId}`);
         }
+        
+        serverDeletionSuccess = true;
+      } catch (serverError) {
+        console.error('Server deletion failed:', serverError);
+        errorDetails = serverError?.message || 'Unknown server error';
+        
+        // Try one more time with a slight delay in case it was a temporary issue
+        try {
+          console.log('Retrying session deletion after failure...');
+          await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+          const result = await chatService.deleteSession(sessionId);
+          console.log('Server deletion retry response:', result);
+          serverDeletionSuccess = true;
+        } catch (retryError) {
+          console.error('Server deletion retry also failed:', retryError);
+          // We'll continue with UI updates even though server deletion failed
+        }
+      } finally {
+        // Always turn off loading state
+        setIsLoading(false);
       }
       
-      toast({
-        title: 'Conversation Deleted',
-        description: 'The conversation has been deleted.',
-        status: 'success',
-        duration: 3000,
-        isClosable: true,
-      });
+      // Show appropriate toast based on server deletion success
+      if (serverDeletionSuccess) {
+        toast({
+          title: 'Conversation Deleted',
+          description: 'The conversation has been deleted.',
+          status: 'success',
+          duration: 3000,
+          isClosable: true,
+        });
+      } else {
+        toast({
+          title: 'Partial Success',
+          description: `The conversation was removed from your view, but the server reported an error: ${errorDetails}`,
+          status: 'warning',
+          duration: 5000,
+          isClosable: true,
+        });
+      }
       
     } catch (error) {
       console.error('Error in handleDeleteSession:', error);
+      setIsLoading(false);
       
       // Make sure we still update the UI even if there was an error
       const updatedSessions = sessions.filter(session => session.id !== sessionId);

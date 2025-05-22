@@ -564,10 +564,88 @@ const chatService = {
    */
   deleteSession: async (sessionId) => {
     try {
-      const response = await api.delete(`/chat/sessions/${sessionId}`);
-      return response.data;
+      console.log(`Preparing to delete session: ${sessionId}`);
+      
+      // Get auth headers and ensure we have a token
+      const token = localStorage.getItem('token');
+      if (!token) {
+        console.error('No authentication token found for session deletion');
+        throw new Error('Authentication required to delete sessions');
+      }
+      
+      // Extract user ID from token to include in headers
+      let userId = null;
+      try {
+        const decoded = jwtDecode(token);
+        userId = decoded.sub || decoded.user_id || decoded.id;
+        console.log(`Extracted user ID from token for deletion: ${userId}`);
+      } catch (e) {
+        console.warn('Could not extract user ID from token', e);
+      }
+      
+      // Build headers with authentication information
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      };
+      
+      // Add user ID to headers if available
+      if (userId) {
+        headers['X-User-ID'] = userId;
+      }
+      
+      console.log(`Sending DELETE request to /chat/sessions/${sessionId}`);
+      console.log('Using authentication headers:', JSON.stringify(headers));
+      
+      // Use fetch with the DELETE method explicitly
+      const response = await fetch(`${API_URL}/chat/sessions/${sessionId}`, {
+        method: 'DELETE',
+        headers: headers,
+        // Don't include body for DELETE requests to avoid issues with some servers
+      });
+      
+      console.log(`Received response status: ${response.status} for session deletion: ${sessionId}`);
+      
+      // Handle error responses with more detailed logging
+      if (!response.ok) {
+        let errorText = '';
+        try {
+          // Try to parse error response as JSON
+          const errorData = await response.json();
+          errorText = errorData.detail || JSON.stringify(errorData);
+        } catch (e) {
+          // If not JSON, get as text
+          errorText = await response.text();
+        }
+        
+        console.error(`Error deleting session (${response.status}):`, errorText);
+        throw new Error(`Failed to delete session: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+      
+      // Parse the response
+      const data = await response.json();
+      console.log('Delete session response:', data);
+      
+      // Log deletion results
+      if (data.messages_deleted !== undefined) {
+        console.log(`Successfully deleted session ${sessionId} with ${data.messages_deleted} messages`);
+      } else {
+        console.log(`Successfully deleted session ${sessionId}`);
+      }
+      
+      return data;
     } catch (error) {
       console.error('Error deleting chat session:', error);
+      
+      // Add more specific error information
+      if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+        console.error('Network error: Could not connect to the server');
+      } else if (error.name === 'AbortError') {
+        console.error('Request was aborted');
+      } else if (error.message.includes('401') || error.message.includes('403')) {
+        console.error('Authentication or authorization error when deleting session');
+      }
+      
       throw error;
     }
   },

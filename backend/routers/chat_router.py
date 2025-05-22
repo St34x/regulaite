@@ -1191,9 +1191,13 @@ async def delete_chat_history(
         # Authentication might be required for deleting chat history
         user_id = await extract_user_id_from_request(req)
         
+        # Log the deletion request with detailed information
+        logger.info(f"Received request to delete chat history. session_id={session_id}, user_id={user_id}, before_days={before_days}")
+        
         # Get database connection
         conn = await get_db_connection()
         cursor = conn.cursor()
+        logger.info(f"Database connection established for history deletion. session_id={session_id}")
 
         # If auth is required or user_id is available, verify ownership
         if user_id:
@@ -1210,6 +1214,7 @@ async def delete_chat_history(
             )
             
             result = verify_cursor.fetchone()
+            logger.info(f"Ownership verification: found {result['count']} messages for user. session_id={session_id}, user_id={user_id}")
             
             # Also check if the session exists at all (for any user)
             verify_cursor.execute(
@@ -1224,9 +1229,11 @@ async def delete_chat_history(
             
             session_exists = verify_cursor.fetchone()
             verify_cursor.close()
+            logger.info(f"Session verification: found {session_exists['count']} total messages. session_id={session_id}")
             
             # If the session exists but doesn't belong to the user, deny access
             if session_exists and session_exists["count"] > 0 and result and result["count"] == 0:
+                logger.warning(f"Unauthorized attempt to delete chat history. session_id={session_id}, requesting_user={user_id}")
                 conn.close()
                 raise HTTPException(
                     status_code=403,
@@ -1236,6 +1243,7 @@ async def delete_chat_history(
             # If session doesn't exist for anyone, it might be a new session without messages yet
             # We'll consider this a successful deletion (since there's nothing to delete)
             if session_exists and session_exists["count"] == 0:
+                logger.info(f"No messages found for session. session_id={session_id}, user_id={user_id}")
                 conn.close()
                 return {
                     "session_id": session_id,
@@ -1243,6 +1251,8 @@ async def delete_chat_history(
                     "message": "Session had no messages to delete"
                 }
 
+            logger.info(f"Authorized chat history deletion. session_id={session_id}, user_id={user_id}")
+            
             # Base delete query with user check
             query = "DELETE FROM chat_history WHERE session_id = ? AND user_id = ?"
             params = [session_id, user_id]
@@ -1255,11 +1265,18 @@ async def delete_chat_history(
         if before_days is not None:
             query += " AND timestamp < DATE_SUB(NOW(), INTERVAL ? DAY)"
             params.append(before_days)
+            logger.info(f"Deleting messages older than {before_days} days for session_id={session_id}")
 
+        logger.info(f"Executing history deletion query. session_id={session_id}")
         cursor.execute(query, params)
         deleted_count = cursor.rowcount
+        logger.info(f"Deleted {deleted_count} messages from chat history. session_id={session_id}")
+        
         conn.commit()
+        logger.info(f"Database transaction committed. session_id={session_id}")
+        
         conn.close()
+        logger.info(f"Database connection closed after history deletion. session_id={session_id}")
 
         return {
             "session_id": session_id,
@@ -1268,9 +1285,10 @@ async def delete_chat_history(
         }
     except HTTPException as e:
         # Re-raise HTTP exceptions with proper status codes
+        logger.warning(f"HTTP exception while deleting chat history: {str(e)}, session_id={session_id}")
         raise
     except Exception as e:
-        logger.error(f"Error deleting chat history: {str(e)}")
+        logger.error(f"Error deleting chat history: {str(e)}, session_id={session_id}, user_id={user_id if 'user_id' in locals() else None}")
         raise HTTPException(
             status_code=500,
             detail=f"Error deleting chat history: {str(e)}"
@@ -1664,10 +1682,14 @@ async def delete_chat_session(
     # Extract user ID from request
     user_id = await extract_user_id_from_request(req)
     
+    # Log the deletion request with more details
+    logger.info(f"Received request to delete chat session. session_id={session_id}, user_id={user_id}, before_days={before_days}")
+    
     # Initialize database connection
     try:
         conn = await get_db_connection()
         cursor = conn.cursor()
+        logger.info(f"Database connection established for session deletion. session_id={session_id}")
     except Exception as e:
         logger.error(f"Error connecting to database: {str(e)}")
         raise HTTPException(
@@ -1686,7 +1708,21 @@ async def delete_chat_session(
         )
         session = cursor.fetchone()
         
+        # If session not found in chat_sessions, check chat_history as fallback
         if not session:
+            logger.info(f"Session not found in chat_sessions, checking chat_history. session_id={session_id}")
+            cursor.execute(
+                """
+                SELECT session_id, user_id FROM chat_history 
+                WHERE session_id = ?
+                GROUP BY session_id, user_id
+                """,
+                (session_id,)
+            )
+            session = cursor.fetchone()
+            
+        if not session:
+            logger.warning(f"Session not found for deletion. session_id={session_id}, user_id={user_id}")
             raise HTTPException(
                 status_code=404,
                 detail=f"Session with ID {session_id} not found"
@@ -1694,19 +1730,25 @@ async def delete_chat_session(
             
         # Verify ownership
         if session[1] != user_id:
+            logger.warning(f"Unauthorized attempt to delete session. session_id={session_id}, requesting_user={user_id}, owner_user={session[1]}")
             raise HTTPException(
                 status_code=403,
                 detail="You do not have permission to delete this session"
             )
             
+        logger.info(f"Authorized session deletion. session_id={session_id}, user_id={user_id}")
+            
         # Construct date filter if before_days is provided
         date_filter = ""
         date_filter_params = ()
         if before_days is not None:
-            date_filter = "AND timestamp < datetime('now', ?)"
-            date_filter_params = (f'-{before_days} days',)
+            # Use MariaDB date syntax instead of SQLite
+            date_filter = "AND timestamp < DATE_SUB(NOW(), INTERVAL ? DAY)"
+            date_filter_params = (before_days,)
+            logger.info(f"Deleting messages older than {before_days} days for session_id={session_id}")
             
         # Delete messages
+        logger.info(f"Executing message deletion for session_id={session_id}")
         cursor.execute(
             f"""
             DELETE FROM chat_history 
@@ -1715,6 +1757,7 @@ async def delete_chat_session(
             (session_id,) + date_filter_params
         )
         messages_deleted = cursor.rowcount
+        logger.info(f"Deleted {messages_deleted} messages from session_id={session_id}")
         
         # If deleting all messages (no date filter or all messages match filter)
         if before_days is None or messages_deleted > 0:
@@ -1727,18 +1770,26 @@ async def delete_chat_session(
                 (session_id,)
             )
             remaining_messages = cursor.fetchone()[0]
+            logger.info(f"Remaining messages after deletion: {remaining_messages}, session_id={session_id}")
             
             # If no messages remain, delete the session record
             if remaining_messages == 0:
-                cursor.execute(
-                    """
-                    DELETE FROM chat_sessions 
-                    WHERE session_id = ?
-                    """,
-                    (session_id,)
-                )
+                logger.info(f"No messages remain, deleting session record. session_id={session_id}")
+                try:
+                    cursor.execute(
+                        """
+                        DELETE FROM chat_sessions 
+                        WHERE session_id = ?
+                        """,
+                        (session_id,)
+                    )
+                    logger.info(f"Session record deleted successfully. session_id={session_id}")
+                except Exception as e:
+                    # Log but continue if deleting from chat_sessions fails
+                    logger.warning(f"Could not delete from chat_sessions: {str(e)}, session_id={session_id}")
                 
         conn.commit()
+        logger.info(f"Chat session deletion completed successfully. session_id={session_id}, messages_deleted={messages_deleted}")
         
         return {
             "status": "success",
@@ -1750,7 +1801,7 @@ async def delete_chat_session(
         # Re-raise HTTPExceptions
         raise
     except Exception as e:
-        logger.error(f"Error deleting chat session: {str(e)}")
+        logger.error(f"Error deleting chat session: {str(e)}, session_id={session_id}, user_id={user_id}")
         raise HTTPException(
             status_code=500,
             detail=f"Error deleting chat session: {str(e)}"
@@ -1759,6 +1810,7 @@ async def delete_chat_session(
         # Close database connection
         if conn:
             conn.close()
+            logger.info(f"Database connection closed after session deletion. session_id={session_id}")
 
 
 @router.post("/rag", response_model=ChatResponse)
