@@ -40,7 +40,7 @@ class RAGConfig(BaseModel):
     """Configuration for RAG settings."""
     hybrid_search: bool = Field(True, description="Whether to use hybrid search by default")
     vector_weight: float = Field(0.7, description="Weight for vector search in hybrid mode")
-    keyword_weight: float = Field(0.3, description="Weight for keyword search in hybrid mode")
+    semantic_weight: float = Field(0.3, description="Weight for semantic search in hybrid mode")
     default_top_k: int = Field(5, description="Default number of results to retrieve")
     reranking_enabled: bool = Field(False, description="Whether to use reranking")
     reranking_model: Optional[str] = Field(None, description="Model to use for reranking")
@@ -133,7 +133,7 @@ async def get_all_config():
         rag_config = RAGConfig(
             hybrid_search=settings.get('rag_hybrid_search', 'true').lower() == 'true',
             vector_weight=float(settings.get('rag_vector_weight', 0.7)),
-            keyword_weight=float(settings.get('rag_keyword_weight', 0.3)),
+            semantic_weight=float(settings.get('rag_semantic_weight', 0.3)),
             default_top_k=int(settings.get('rag_default_top_k', 5)),
             reranking_enabled=settings.get('rag_reranking_enabled', 'false').lower() == 'true',
             reranking_model=settings.get('rag_reranking_model', None),
@@ -258,8 +258,8 @@ async def update_rag_config(config: RAGConfig):
                 rag_system.hybrid_search = updates["hybrid_search"]
             if "vector_weight" in updates:
                 rag_system.vector_weight = updates["vector_weight"]
-            if "keyword_weight" in updates:
-                rag_system.keyword_weight = updates["keyword_weight"]
+            if "semantic_weight" in updates:
+                rag_system.semantic_weight = updates["semantic_weight"]
 
             logger.info("Updated RAG system with new configuration")
         except Exception as e:
@@ -494,7 +494,7 @@ async def reset_config(section: Optional[str] = None):
             "rag": {
                 "rag_hybrid_search": "true",
                 "rag_vector_weight": "0.7",
-                "rag_keyword_weight": "0.3",
+                "rag_semantic_weight": "0.3",
                 "rag_default_top_k": "5",
                 "rag_reranking_enabled": "false",
                 "rag_embedding_model": "text-embedding-ada-002",

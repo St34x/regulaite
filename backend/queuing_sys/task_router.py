@@ -74,7 +74,7 @@ async def queue_document_processing(
     doc_id: Optional[str] = Form(None),
     metadata: Optional[str] = Form(None),
     use_nlp: bool = Form(True),
-    use_enrichment: bool = Form(True),
+    use_enrichment: bool = Form(False),
     detect_language: bool = Form(True),
     language: Optional[str] = Form(None),
     parser_type: Optional[str] = Form(ParserType.UNSTRUCTURED.value),

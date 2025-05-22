@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 import os
 from datetime import datetime, timedelta
 from routers.auth_middleware import get_current_user
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 # Configure logging
 logging.basicConfig(
@@ -61,6 +63,17 @@ class DashboardResponse(BaseModel):
     system_status: Dict[str, Any] = Field(..., description="System status")
 
 
+class UserDashboardResponse(BaseModel):
+    """User dashboard data response."""
+    user_id: int
+    stats: Dict[str, int] = Field(..., description="User statistics")
+    document_types: List[Dict[str, int]] = Field(..., description="Document types")
+    recent_uploads: List[Dict[str, Any]] = Field(..., description="Recent uploads")
+    recent_chats: List[Dict[str, Any]] = Field(..., description="Recent chats")
+    activity: List[Dict[str, Any]] = Field(..., description="Activity")
+    timestamp: str
+
+
 # Helper function to get database connection
 async def get_db_connection():
     """Get MariaDB connection from main application."""
@@ -68,11 +81,11 @@ async def get_db_connection():
     return get_mariadb_connection()
 
 
-# Helper function to get Neo4j driver
-async def get_neo4j_driver():
-    """Get the Neo4j driver from main application."""
-    from main import driver
-    return driver
+# Helper function to get RAG system
+async def get_rag_system():
+    """Get the RAG system from main application."""
+    from main import rag_system
+    return rag_system
 
 
 @router.get("", response_model=WelcomeContent)
@@ -197,307 +210,246 @@ async def get_welcome_content():
 async def get_dashboard_data():
     """Get dashboard data and statistics."""
     try:
-        # Get Neo4j driver for document stats
-        neo4j_driver = await get_neo4j_driver()
+        # Get RAG system for document stats
+        rag_system = await get_rag_system()
 
         # Get MariaDB connection for chat and task stats
         db_conn = await get_db_connection()
         db_cursor = db_conn.cursor(dictionary=True)
 
-        # Get document stats from Neo4j
-        with neo4j_driver.session() as session:
-            # Total document count
-            doc_count_result = session.run("MATCH (d:Document) RETURN count(d) as count")
-            document_count = doc_count_result.single()["count"]
-
-            # Total storage usage
-            storage_result = session.run("MATCH (d:Document) RETURN sum(d.size) as total_size")
-            total_size = storage_result.single()["total_size"] or 0
-            storage_usage_mb = round(total_size / (1024 * 1024), 2)
-
-            # Recently added documents (last 7 days)
-            recent_date = datetime.now() - timedelta(days=7)
-            recent_docs_query = """
-                MATCH (d:Document)
-                WHERE d.created >= $recent_date
-                RETURN count(d) as count
-            """
-            recent_docs_result = session.run(recent_docs_query, recent_date=recent_date.strftime("%Y-%m-%d"))
-            recent_document_count = recent_docs_result.single()["count"]
-
-            # Get recent document details
-            recent_docs_details_query = """
-                MATCH (d:Document)
-                RETURN d.doc_id as doc_id, 
-                       COALESCE(d.title, d.name, 'Untitled') as title,
-                       COALESCE(d.original_filename, d.name, d.doc_id) as filename, 
-                       COALESCE(d.created_at, d.created, datetime()) as created,
-                       COALESCE(d.file_type, '') as file_type, 
-                       COALESCE(d.size, 0) as size,
-                       COALESCE(d.is_indexed, false) as is_indexed
-                ORDER BY COALESCE(d.created_at, d.created, datetime()) DESC
-                LIMIT 5
-            """
-            recent_docs_details = [dict(record) for record in session.run(recent_docs_details_query)]
+        # Get document stats from Qdrant collection metadata
+        doc_count = 0
+        doc_types = {}
+        recent_uploads = []
+        
+        if rag_system:
+            try:
+                # Get collection statistics from metadata collection
+                scroll_params = {
+                    "collection_name": rag_system.metadata_collection_name,
+                    "limit": 10  # Limit for recent uploads
+                }
+                metadata_points = rag_system.qdrant_client.scroll(**scroll_params)[0]
+                
+                # Count total documents
+                doc_count = len(metadata_points)
+                
+                # Count document types
+                for point in metadata_points:
+                    payload = point.payload
+                    file_type = payload.get("file_type", "unknown")
+                    if file_type in doc_types:
+                        doc_types[file_type] += 1
+                    else:
+                        doc_types[file_type] = 1
+                
+                # Get recent uploads
+                recent_uploads = []
+                for point in metadata_points:
+                    payload = point.payload
+                    recent_uploads.append({
+                        "doc_id": payload.get("doc_id"),
+                        "title": payload.get("title", "Untitled Document"),
+                        "file_type": payload.get("file_type", "unknown"),
+                        "created": payload.get("created_at", datetime.now().isoformat()),
+                        "indexed": payload.get("is_indexed", False),
+                        "size": payload.get("size", 0)
+                    })
+            except Exception as e:
+                logger.error(f"Error getting document stats from Qdrant: {str(e)}")
 
         # Get chat stats from MariaDB
-        # Recent chat sessions (last 7 days)
-        recent_chats_query = """
-            SELECT COUNT(DISTINCT session_id) as count
+        db_cursor.execute(
+            """
+            SELECT COUNT(DISTINCT session_id) as session_count, 
+                   COUNT(*) as message_count
             FROM chat_history
-            WHERE timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-        """
-        db_cursor.execute(recent_chats_query)
-        recent_chat_count = db_cursor.fetchone()["count"]
-
-        # Get recent chat session details
-        recent_chats_details_query = """
-            SELECT session_id, user_id, MAX(timestamp) as last_message,
-                   COUNT(*) as message_count,
-                   (SELECT message_text FROM chat_history c2
-                    WHERE c2.session_id = c1.session_id
-                    ORDER BY timestamp ASC LIMIT 1) as first_message
-            FROM chat_history c1
-            GROUP BY session_id, user_id
-            ORDER BY MAX(timestamp) DESC
-            LIMIT 5
-        """
-        db_cursor.execute(recent_chats_details_query)
-        recent_chats = db_cursor.fetchall()
-
-        # Format chat sessions
-        for chat in recent_chats:
-            if chat["first_message"] and len(chat["first_message"]) > 100:
-                chat["first_message"] = chat["first_message"][:97] + "..."
-
+            """
+        )
+        chat_stats = db_cursor.fetchone()
+        
         # Get task stats from MariaDB
-        task_stats_query = """
-            SELECT status, COUNT(*) as count
-            FROM tasks
-            GROUP BY status
-        """
-        db_cursor.execute(task_stats_query)
-        task_stats_rows = db_cursor.fetchall()
-
-        # Format task stats
-        task_stats = {row["status"]: row["count"] for row in task_stats_rows}
-
-        # Get recent tasks
-        recent_tasks_query = """
-            SELECT task_id, task_type, status, created_at, completed_at
-            FROM tasks
-            ORDER BY created_at DESC
-            LIMIT 5
-        """
-        db_cursor.execute(recent_tasks_query)
-        recent_tasks = db_cursor.fetchall()
-
-        # Get agent count
-        try:
-            from pyndantic_agents.agent_factory import get_agent_types
-            agent_types = get_agent_types()
-            agent_count = len(agent_types)
-        except:
-            logger.warning("Could not get agent count, using default")
-            agent_count = 3  # Default if can't determine
-
-        # Get system status
-        system_status = {
-            "status": "healthy",
-            "components": {
-                "database": "connected",
-                "neo4j": "connected",
-                "embedding_service": "operational",
-                "task_queue": "operational"
-            },
-            "version": os.environ.get("APP_VERSION", "1.0.0"),
-            "uptime": "unknown"  # Would need to track this separately
-        }
-
-        # Close database connection
+        db_cursor.execute(
+            """
+            SELECT 
+                COUNT(*) as total_tasks,
+                SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) as completed_tasks,
+                SUM(CASE WHEN status = 'FAILURE' THEN 1 ELSE 0 END) as failed_tasks,
+                SUM(CASE WHEN status = 'PENDING' OR status = 'STARTED' THEN 1 ELSE 0 END) as active_tasks
+            FROM celery_taskresult
+            """
+        )
+        task_stats = db_cursor.fetchone()
+        
         db_conn.close()
-
-        # Construct response
-        dashboard_stats = DashboardStats(
-            document_count=document_count,
-            agent_count=agent_count,
-            recent_document_count=recent_document_count,
-            recent_chat_count=recent_chat_count,
-            storage_usage_mb=storage_usage_mb,
-            task_stats=task_stats
-        )
-
-        dashboard_activity = DashboardActivity(
-            recent_documents=recent_docs_details,
-            recent_chats=recent_chats,
-            recent_tasks=recent_tasks
-        )
-
-        return DashboardResponse(
-            stats=dashboard_stats,
-            activity=dashboard_activity,
-            system_status=system_status
-        )
-
+        
+        # Return formatted dashboard data
+        return {
+            "stats": {
+                "document_count": doc_count,
+                "chat_session_count": chat_stats.get("session_count", 0) if chat_stats else 0,
+                "message_count": chat_stats.get("message_count", 0) if chat_stats else 0,
+                "task_count": task_stats.get("total_tasks", 0) if task_stats else 0
+            },
+            "document_types": [
+                {"type": doc_type, "count": count} 
+                for doc_type, count in doc_types.items()
+            ],
+            "recent_uploads": recent_uploads,
+            "recent_tasks": [],  # Would need additional query to get this data
+            "status": {
+                "components": {
+                    "database": "connected",
+                    "rag_system": "connected" if rag_system else "unavailable",
+                    "embedding_service": "operational",
+                    "task_queue": "operational"
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        }
     except Exception as e:
-        logger.error(f"Error retrieving dashboard data: {str(e)}")
+        logger.error(f"Error getting dashboard data: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error retrieving dashboard data: {str(e)}"
+            detail=f"Error getting dashboard data: {str(e)}"
         )
 
 
-@router.get("/user-dashboard", response_model=DashboardResponse)
-async def get_user_dashboard(current_user: dict = Depends(get_current_user)):
+@router.get("/user/dashboard", response_model=UserDashboardResponse)
+async def get_user_dashboard_data(
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
     """Get personalized dashboard data for authenticated user."""
     try:
-        # Get Neo4j driver for document stats
-        neo4j_driver = await get_neo4j_driver()
+        # Get RAG system for document stats
+        rag_system = await get_rag_system()
         
         # Get MariaDB connection for additional stats
-        conn = await get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        db_conn = await get_db_connection()
+        db_cursor = db_conn.cursor(dictionary=True)
         
-        # Get document count - filter by user_id for personal documents
+        # Extract user information
         user_id = current_user["user_id"]
         
-        with neo4j_driver.session() as session:
-            # Count documents specific to this user
-            result = session.run(
-                """
-                MATCH (d:Document)
-                WHERE COALESCE(d.owner_id, 'unknown') = $user_id
-                RETURN count(d) as document_count
-                """,
-                user_id=user_id
-            )
-            user_document_count = result.single()["document_count"]
-            
-            # Count recently added documents by this user
-            result = session.run(
-                """
-                MATCH (d:Document)
-                WHERE COALESCE(d.owner_id, 'unknown') = $user_id 
-                  AND COALESCE(d.created_at, d.created, datetime()) > datetime() - duration('P7D')
-                RETURN count(d) as recent_document_count
-                """,
-                user_id=user_id
-            )
-            user_recent_document_count = result.single()["recent_document_count"]
-            
-            # Get storage used by this user's documents
-            result = session.run(
-                """
-                MATCH (d:Document)
-                WHERE COALESCE(d.owner_id, 'unknown') = $user_id
-                RETURN sum(COALESCE(d.file_size, d.size, 0)) as total_size
-                """,
-                user_id=user_id
-            )
-            record = result.single()
-            total_size = record["total_size"] if record["total_size"] is not None else 0
-            storage_usage_mb = round(total_size / (1024 * 1024), 2)
+        # Get user-specific document stats from Qdrant
+        user_doc_count = 0
+        user_doc_types = {}
+        user_recent_uploads = []
         
-        # Get recent chat sessions for this user
-        cursor.execute(
+        if rag_system:
+            try:
+                # Get documents that belong to this user
+                scroll_params = {
+                    "collection_name": rag_system.metadata_collection_name,
+                    "limit": 10,  # Limit for recent uploads
+                    "filter": Filter(
+                        must=[
+                            FieldCondition(
+                                key="user_id",
+                                match=MatchValue(value=user_id)
+                            )
+                        ]
+                    )
+                }
+                metadata_points = rag_system.qdrant_client.scroll(**scroll_params)[0]
+                
+                # Count total documents for this user
+                user_doc_count = len(metadata_points)
+                
+                # Count document types for this user
+                for point in metadata_points:
+                    payload = point.payload
+                    file_type = payload.get("file_type", "unknown")
+                    if file_type in user_doc_types:
+                        user_doc_types[file_type] += 1
+                    else:
+                        user_doc_types[file_type] = 1
+                
+                # Get recent uploads for this user
+                user_recent_uploads = []
+                for point in metadata_points:
+                    payload = point.payload
+                    user_recent_uploads.append({
+                        "doc_id": payload.get("doc_id"),
+                        "title": payload.get("title", "Untitled Document"),
+                        "file_type": payload.get("file_type", "unknown"),
+                        "created": payload.get("created_at", datetime.now().isoformat()),
+                        "indexed": payload.get("is_indexed", False),
+                        "size": payload.get("size", 0)
+                    })
+            except Exception as e:
+                logger.error(f"Error getting user document stats from Qdrant: {str(e)}")
+        
+        # Get user chat stats from MariaDB
+        db_cursor.execute(
             """
-            SELECT COUNT(*) as chat_count
-            FROM chat_sessions
-            WHERE user_id = %s AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
-            """,
-            (user_id,)
-        )
-        recent_chat_count = cursor.fetchone()["chat_count"]
-        
-        # Get task statistics for this user
-        cursor.execute(
-            """
-            SELECT status, COUNT(*) as count
-            FROM tasks
-            WHERE user_id = %s AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
-            GROUP BY status
-            """,
-            (user_id,)
-        )
-        task_stats = {row["status"]: row["count"] for row in cursor.fetchall()}
-        
-        # Get available agent count (same for all users)
-        cursor.execute("SELECT COUNT(*) as count FROM agents WHERE is_active = 1")
-        agent_count = cursor.fetchone()["count"]
-        
-        # Get recent documents
-        cursor.execute(
-            """
-            SELECT d.document_id, d.filename, d.file_type, d.created_at
-            FROM documents d
-            WHERE d.user_id = %s
-            ORDER BY d.created_at DESC
-            LIMIT 5
-            """,
-            (user_id,)
-        )
-        recent_documents = cursor.fetchall()
-        
-        # Get recent chat sessions
-        cursor.execute(
-            """
-            SELECT cs.session_id, cs.title, cs.created_at, COUNT(cm.message_id) as message_count
-            FROM chat_sessions cs
-            LEFT JOIN chat_messages cm ON cs.session_id = cm.session_id
-            WHERE cs.user_id = %s
-            GROUP BY cs.session_id
-            ORDER BY cs.created_at DESC
-            LIMIT 5
-            """,
-            (user_id,)
-        )
-        recent_chats = cursor.fetchall()
-        
-        # Get recent tasks
-        cursor.execute(
-            """
-            SELECT task_id, task_type, status, created_at, completed_at
-            FROM tasks
+            SELECT COUNT(DISTINCT session_id) as session_count, 
+                   COUNT(*) as message_count
+            FROM chat_history
             WHERE user_id = %s
-            ORDER BY created_at DESC
+            """,
+            (user_id,)
+        )
+        chat_stats = db_cursor.fetchone()
+        
+        # Get user's recent chat sessions
+        db_cursor.execute(
+            """
+            SELECT 
+                session_id, 
+                MAX(timestamp) as last_interaction,
+                COUNT(*) as message_count
+            FROM chat_history
+            WHERE user_id = %s
+            GROUP BY session_id
+            ORDER BY MAX(timestamp) DESC
             LIMIT 5
             """,
             (user_id,)
         )
-        recent_tasks = cursor.fetchall()
+        recent_chats = db_cursor.fetchall()
         
-        # Get system status
-        cursor.execute(
+        # Get user's activity summary
+        db_cursor.execute(
             """
-            SELECT component, status, last_check
-            FROM system_status
-            """
+            SELECT 
+                DATE(timestamp) as date, 
+                COUNT(*) as activity_count
+            FROM chat_history
+            WHERE user_id = %s
+            GROUP BY DATE(timestamp)
+            ORDER BY DATE(timestamp) DESC
+            LIMIT 7
+            """,
+            (user_id,)
         )
-        system_status = {row["component"]: {"status": row["status"], "last_check": row["last_check"]} 
-                         for row in cursor.fetchall()}
+        activity_data = db_cursor.fetchall()
         
-        conn.close()
+        db_conn.close()
         
-        # Create response
-        response = DashboardResponse(
-            stats=DashboardStats(
-                document_count=user_document_count,
-                agent_count=agent_count,
-                recent_document_count=user_recent_document_count,
-                recent_chat_count=recent_chat_count,
-                storage_usage_mb=storage_usage_mb,
-                task_stats=task_stats
-            ),
-            activity=DashboardActivity(
-                recent_documents=recent_documents,
-                recent_chats=recent_chats,
-                recent_tasks=recent_tasks
-            ),
-            system_status=system_status
-        )
-        
-        return response
-        
+        # Return the personalized dashboard data
+        return {
+            "user_id": user_id,
+            "stats": {
+                "document_count": user_doc_count,
+                "chat_session_count": chat_stats.get("session_count", 0) if chat_stats else 0,
+                "message_count": chat_stats.get("message_count", 0) if chat_stats else 0
+            },
+            "document_types": [
+                {"type": doc_type, "count": count} 
+                for doc_type, count in user_doc_types.items()
+            ],
+            "recent_uploads": user_recent_uploads,
+            "recent_chats": recent_chats,
+            "activity": [
+                {
+                    "date": item.get("date").isoformat() if hasattr(item.get("date"), "isoformat") else str(item.get("date")),
+                    "count": item.get("activity_count", 0)
+                }
+                for item in activity_data
+            ],
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
         logger.error(f"Error retrieving user dashboard data: {str(e)}")
         raise HTTPException(

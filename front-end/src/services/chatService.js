@@ -502,6 +502,27 @@ const chatService = {
   },
   
   /**
+   * Send a chat message with RAG enabled by default
+   * @param {Object} payload - The message payload
+   * @returns {Promise<Object>} Chat response
+   */
+  sendChatMessage: async (payload) => {
+    try {
+      // Ensure RAG is enabled by default
+      const requestPayload = {
+        ...payload,
+        use_rag: true
+      };
+      
+      const response = await api.post(`/chat/rag`, requestPayload);
+      return response.data;
+    } catch (error) {
+      console.error('Error sending RAG-enabled message:', error);
+      throw error;
+    }
+  },
+  
+  /**
    * Delete a chat session
    * @param {string} sessionId - ID of the session to delete
    * @returns {Promise<Object>} Result of the deletion

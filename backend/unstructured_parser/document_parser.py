@@ -5,16 +5,19 @@ import logging
 import json
 import uuid
 from typing import Dict, List, Any, Optional, BinaryIO, Callable, Literal
-from datetime import datetime as py_datetime  # Rename to avoid conflict with Neo4j's datetime()
+from datetime import datetime as py_datetime  
 import datetime  # Import the full module too
 import tempfile
-from neo4j import GraphDatabase
-from data_enrichment.language_detector import LanguageDetector
-from data_enrichment.enrichment_pipeline import EnrichmentPipeline
-from data_enrichment.metadata_parser import MetadataParser
 import time
 import math
 import re
+import asyncio
+
+# Import Qdrant client
+from qdrant_client import QdrantClient, models as qdrant_models
+
+# Import MetadataParser
+from data_enrichment.metadata_parser import MetadataParser
 
 # Import LangChain TokenTextSplitter with fallback
 try:
@@ -37,19 +40,18 @@ ChunkingStrategy = Literal["fixed", "recursive", "semantic", "hierarchical", "to
 class DocumentParser:
     """
     Parser for documents using Unstructured API.
-    Extracts text and metadata from documents and stores in Neo4j.
     """
 
     def __init__(
           self,
-          neo4j_uri: str,
-          neo4j_user: str,
-          neo4j_password: str,
           unstructured_api_url: Optional[str] = None,
           unstructured_api_key: Optional[str] = None,
+          qdrant_url: Optional[str] = None,
+          qdrant_collection_name: str = "regulaite_docs",
+          qdrant_metadata_collection_name: str = "regulaite_metadata",
+          embedding_dim: int = 384,  # Added embedding_dim
           chunk_size: int = 1000,
           chunk_overlap: int = 200,
-          use_enrichment: bool = True,
           chunking_strategy: ChunkingStrategy = "fixed",
           extract_tables: bool = True,
           extract_metadata: bool = True,
@@ -60,24 +62,22 @@ class DocumentParser:
       Initialize the document parser.
 
       Args:
-          neo4j_uri: URI for Neo4j database
-          neo4j_user: Username for Neo4j
-          neo4j_password: Password for Neo4j
           unstructured_api_url: URL for Unstructured API (defaults to env var)
           unstructured_api_key: API key for Unstructured API (defaults to env var)
+          qdrant_url: URL for Qdrant service
+          qdrant_collection_name: Name of the Qdrant collection for document chunks
+          qdrant_metadata_collection_name: Name of the Qdrant collection for document metadata
+          embedding_dim: Dimension of the embeddings to be used for dummy vectors
           chunk_size: Maximum size of text chunks in characters
           chunk_overlap: Number of characters to overlap between chunks
-          use_enrichment: Whether to enrich documents by default
           chunking_strategy: Strategy for chunking text ("fixed", "recursive", "semantic", "hierarchical", "token")
           extract_tables: Whether to extract tables from documents
           extract_metadata: Whether to extract detailed metadata
           extract_images: Whether to extract and process images
           is_cloud: Whether to use the cloud version of Unstructured API
       """
-      self.neo4j_uri = neo4j_uri
-      self.neo4j_user = neo4j_user
-      self.neo4j_password = neo4j_password
       self.is_cloud = is_cloud
+      self.embedding_dim = embedding_dim # Store embedding_dim
 
       # Get Unstructured API credentials from environment if not provided
       if is_cloud:
@@ -109,54 +109,23 @@ class DocumentParser:
       self.extract_metadata = extract_metadata
       self.extract_images = extract_images
 
-      # Initialize enrichment variables
-      self.use_enrichment = use_enrichment
-
-      # Initialize Enrichment Pipeline if enabled
-      if use_enrichment:
-          try:
-              self.enrichment_pipeline = EnrichmentPipeline(
-                  neo4j_uri=neo4j_uri,
-                  neo4j_user=neo4j_user,
-                  neo4j_password=neo4j_password,
-                  multilingual=True
-              )
-              logger.info("Enrichment pipeline initialized")
-          except Exception as e:
-              logger.error(f"Failed to initialize enrichment pipeline: {str(e)}")
-              self.enrichment_pipeline = None
-              self.use_enrichment = False
-      else:
-          self.enrichment_pipeline = None
-
-      # Initialize Neo4j connection
-      self.driver = None
-      self._connect_to_neo4j()
+      # Initialize Qdrant client
+      self.qdrant_url = qdrant_url or os.getenv("QDRANT_URL", "http://qdrant:6333")
+      self.qdrant_collection_name = qdrant_collection_name
+      self.qdrant_metadata_collection_name = qdrant_metadata_collection_name
+      try:
+          self.qdrant_client = QdrantClient(url=self.qdrant_url)
+          logger.info(f"Successfully connected to Qdrant at {self.qdrant_url}")
+      except Exception as e:
+          logger.error(f"Failed to connect to Qdrant at {self.qdrant_url}: {e}")
+          self.qdrant_client = None
 
       # Initialize metadata parser
       self.metadata_parser = MetadataParser()
-
+      
       # Log initialization
       api_type = "cloud" if is_cloud else "local"
       logger.info(f"Initialized DocumentParser with {api_type} Unstructured API at {self.unstructured_api_url}")
-
-    def _connect_to_neo4j(self):
-        """Establish connection to Neo4j"""
-        try:
-            self.driver = GraphDatabase.driver(
-                self.neo4j_uri,
-                auth=(self.neo4j_user, self.neo4j_password),
-                max_connection_lifetime=3600
-            )
-            # Test connection
-            with self.driver.session() as session:
-                result = session.run("RETURN 'Connected to Neo4j' AS message")
-                for record in result:
-                    logger.info(record["message"])
-            logger.info(f"Document parser connected to Neo4j at {self.neo4j_uri}")
-        except Exception as e:
-            logger.error(f"Failed to connect to Neo4j: {str(e)}")
-            raise
 
     def _call_unstructured_api(self, file_content: bytes, file_name: str) -> List[Dict[str, Any]]:
       """
@@ -317,90 +286,41 @@ class DocumentParser:
         return [fallback_element]
 
     def _process_table_elements(self, elements: List[Dict[str, Any]]) -> None:
-        """
-        Process table elements to make them more usable in Neo4j and RAG.
-
-        Args:
-            elements: List of elements to process
-        """
-        if not self.extract_tables:
-            return
-
-        for i, element in enumerate(elements):
+        """Process table elements to enhance their data."""
+        for element in elements:
             if element.get("type") == "Table":
-                # Convert table to markdown for better text representation
-                if "metadata" in element and "text_as_html" in element.get("metadata", {}):
-                    try:
-                        html_table = element["metadata"]["text_as_html"]
-                        # Add table representation as markdown for better text retrieval
-                        element["text"] = f"{element.get('text', '')}\nTable content:\n{html_table}"
-                    except Exception as e:
-                        logger.warning(f"Error processing table element: {e}")
-
+                # Add any table-specific processing here
+                pass
+    
     def _enhance_metadata(self, elements: List[Dict[str, Any]], file_name: str) -> None:
         """
-        Enhance metadata for all elements to improve Neo4j relationships.
-
+        Enhance element metadata with additional information.
+        
         Args:
-            elements: List of elements to enhance
-            file_name: Name of the file being processed
+            elements: List of document elements to enhance
+            file_name: Original filename for reference
         """
-        if not self.extract_metadata:
-            return
-
-        # Extract file extension
-        _, file_ext = os.path.splitext(file_name.lower())
-        file_ext = file_ext.lstrip('.')
-
-        # Get document level metadata
-        doc_metadata = {}
-        for element in elements:
-            if element.get("metadata") and element.get("metadata", {}).get("filename"):
-                # Create a copy of metadata to prevent circular references
-                doc_metadata = self._safe_copy_metadata(element.get("metadata", {}))
-                break
-
-        # Add section hierarchy information
-        current_section = {}
-        section_stack = []
-
-        for i, element in enumerate(elements):
-            # Ensure metadata exists
-            if "metadata" not in element:
-                element["metadata"] = {}
-
-            # Add file metadata (ensure it's a safe copy to prevent circular references)
-            element["metadata"]["file_extension"] = file_ext
-            element["metadata"]["filetype"] = file_ext
-            element["metadata"]["file_type"] = file_ext  # Add both property names for compatibility
+        try:
+            # Extract basename from file
+            basename = os.path.basename(file_name)
             
-            # Store document metadata as a safe copy
-            element["metadata"]["document_metadata"] = self._safe_copy_metadata(doc_metadata)
-
-            # Track section hierarchy for better context
-            if element.get("type") in ["Title", "NarrativeText"] and element.get("metadata", {}).get("category") == "Header":
-                header_text = element.get("text", "").strip()
-                header_level = element.get("metadata", {}).get("header_level", 1)
-
-                # Pop higher level sections
-                while section_stack and section_stack[-1]["level"] >= header_level:
-                    section_stack.pop()
-
-                current_section = {
-                    "text": header_text,
-                    "level": header_level
-                }
-                section_stack.append(current_section)
-
-            # Add section hierarchy to element metadata as a clean copy
-            if section_stack:
-                element["metadata"]["section_hierarchy"] = [
-                    {"level": s["level"], "title": s["text"]}
-                    for s in section_stack
-                ]
-
-            # Add sequential position for preserving document order
-            element["metadata"]["sequence_num"] = i
+            # Add global metadata to all elements
+            for element in elements:
+                if "metadata" not in element:
+                    element["metadata"] = {}
+                
+                # Add source file info
+                element["metadata"]["source_file"] = basename
+                
+                # Add position context if available
+                if "position" in element and isinstance(element["position"], dict):
+                    # Copy relevant position info to metadata
+                    for key in ["page_number", "section", "paragraph"]:
+                        if key in element["position"]:
+                            element["metadata"][key] = element["position"][key]
+        
+        except Exception as e:
+            logger.error(f"Error enhancing element metadata: {str(e)}")
 
     def _safe_copy_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -631,7 +551,6 @@ class DocumentParser:
         """
         # For simplicity, this implementation is similar to semantic chunking
         # In a production environment, this would track parent-child relationships
-        # and store them in Neo4j for hierarchical retrieval
         return self._semantic_chunking(text)
 
     def _token_chunking(self, text: str) -> List[str]:
@@ -865,416 +784,21 @@ class DocumentParser:
             chunks.append(chunk)
         
         return chunks
-
-    def _save_chunks_to_neo4j(self, chunks: List[Dict[str, Any]], doc_id: str) -> None:
-        """
-        Save chunks to Neo4j database.
-        
-        Args:
-            chunks: List of chunk dictionaries
-            doc_id: Document ID
-        """
-        logger.info(f"Saving {len(chunks)} chunks to Neo4j for document {doc_id}")
-        
-        max_retries = 3
-        retry_delay = 2  # seconds
-        
-        if not chunks:
-            logger.warning(f"No chunks to save for document {doc_id}")
-            return
-        
-        # Process in smaller batches to avoid overwhelming Neo4j
-        batch_size = 50
-        chunk_batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
-        logger.info(f"Processing {len(chunk_batches)} batches of chunks")
-        
-        saved_count = 0
-        
-        for batch_index, batch in enumerate(chunk_batches):
-            logger.info(f"Processing batch {batch_index+1}/{len(chunk_batches)} with {len(batch)} chunks")
-            
-            for chunk in batch:
-                # Prepare metadata for storage
-                chunk_props = chunk.copy()
-                
-                # If metadata is a dictionary, convert to JSON string
-                if "metadata" in chunk_props and isinstance(chunk_props["metadata"], dict):
-                    try:
-                        chunk_props["metadata"] = json.dumps(chunk_props["metadata"])
-                    except Exception as e:
-                        logger.warning(f"Failed to JSON encode metadata, using str instead: {str(e)}")
-                        chunk_props["metadata"] = str(chunk_props["metadata"])
-                
-                # Try to save with retries
-                for attempt in range(max_retries):
-                    try:
-                        with self.driver.session() as session:
-                            # Create chunk node and link to document
-                            session.run(
-                                """
-                                MATCH (d:Document {doc_id: $doc_id})
-                                MERGE (c:Chunk {chunk_id: $chunk_id})
-                                SET c += $properties
-                                MERGE (d)-[:CONTAINS]->(c)
-                                """,
-                                doc_id=doc_id,
-                                chunk_id=chunk["chunk_id"],
-                                properties=chunk_props
-                            )
-                        saved_count += 1
-                        break
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Error saving chunk (attempt {attempt+1}/{max_retries}): {str(e)}")
-                            time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
-                        else:
-                            logger.error(f"Failed to save chunk after {max_retries} attempts: {str(e)}")
-            
-            # Sleep briefly between batches to avoid overwhelming Neo4j
-            if batch_index < len(chunk_batches) - 1:
-                time.sleep(0.5)
-                
-        logger.info(f"Successfully saved {saved_count}/{len(chunks)} chunks for document {doc_id}")
-    
-    def _save_sections_to_neo4j(self, sections: List[Dict[str, Any]], doc_id: str) -> None:
-        """
-        Save sections to Neo4j database with hierarchical relationships.
-        
-        Args:
-            sections: List of section dictionaries
-            doc_id: Document ID
-        """
-        logger.info(f"Saving {len(sections)} sections to Neo4j for document {doc_id}")
-        
-        with self.driver.session() as session:
-            # First pass: Create all section nodes
-            for idx, section in enumerate(sections):
-                section_id = f"{doc_id}_section_{idx}"
-                
-                # Create section properties
-                section_props = {
-                    "section_id": section_id,
-                    "name": section.get("name", "Unknown"),
-                    "level": section.get("level", 0),
-                    "index": idx
-                }
-                
-                # Create section node and link to document
-                session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    MERGE (s:Section {section_id: $section_id})
-                    SET s += $properties
-                    MERGE (d)-[:HAS_SECTION]->(s)
-                    """,
-                    doc_id=doc_id,
-                    section_id=section_id,
-                    properties=section_props
-                )
-            
-            # Second pass: Create parent-child relationships
-            for idx, section in enumerate(sections):
-                if section.get("parent"):
-                    # Find parent section node
-                    parent_name = section["parent"]
-                    
-                    # Create relationship between parent and child sections
-                    session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        MATCH (d)-[:HAS_SECTION]->(parent:Section)
-                        WHERE parent.name = $parent_name
-                        MATCH (d)-[:HAS_SECTION]->(child:Section {section_id: $section_id})
-                        MERGE (parent)-[:CONTAINS]->(child)
-                        """,
-                        doc_id=doc_id,
-                        parent_name=parent_name,
-                        section_id=f"{doc_id}_section_{idx}"
-                    )
-                    
-        logger.info(f"Successfully saved {len(sections)} sections for document {doc_id}")
-        
+           
     def _enrich_document(self, doc_id: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Enrich a document with NLP processing to extract entities, concepts, etc.
+        This method has been modified to no longer perform entity extraction.
+        It now always returns an empty list to maintain compatibility with the rest of the codebase.
 
         Args:
             doc_id: Document ID
             chunks: Document chunks
 
         Returns:
-            List of extracted entities
+            Empty list (no entities)
         """
-        if not self.enrichment_pipeline:
-            logger.warning("Enrichment pipeline not initialized, skipping enrichment")
-            return []
-            
-        try:
-            # Get all text from chunks for processing
-            all_text = "\n\n".join([chunk["text"] for chunk in chunks if "text" in chunk])
-            
-            # Use the enrichment pipeline to process the document
-            # Instead of calling enrich_document which expects just doc_id,
-            # call enrich_text with the document text and provide context
-            result = self.enrichment_pipeline.enrich_text(all_text, {"doc_id": doc_id})
-            
-            if not result or "entities" not in result:
-                logger.warning(f"Enrichment produced no entities for document {doc_id}")
-                return []
-                
-            logger.info(f"Extracted {len(result['entities'])} entities from document {doc_id}")
-            return result["entities"]
-            
-        except Exception as e:
-            logger.error(f"Error enriching document {doc_id}: {str(e)}", exc_info=True)
-            return []
-
-    def _store_document_in_neo4j(
-          self,
-          doc_id: str,
-          file_name: str,
-          elements: List[Dict[str, Any]],
-          metadata: Dict[str, Any]
-        ) -> Dict[str, Any]:
-        """
-        Store the parsed document and its elements in Neo4j.
-
-        Args:
-            doc_id: Document ID
-            file_name: Original file name
-            elements: Elements extracted from the document
-            metadata: Additional document metadata
-
-        Returns:
-            Dictionary with document ID and statistics
-        """
-        logger.info(f"Storing document {doc_id} in Neo4j with {len(elements)} elements")
-
-        # Extract file extension
-        file_ext = ""
-        if "." in file_name:
-            file_ext = file_name.split(".")[-1].lower()
-
-        # Ensure file size is a valid number
-        file_size = metadata.get("size", 0)
-        if not isinstance(file_size, (int, float)) or math.isnan(file_size):
-            file_size = 0
-            
-        # Ensure title is valid
-        title = metadata.get("title", file_name)
-        if not title or not isinstance(title, str):
-            title = file_name
-            
-        # Ensure we have a valid creation timestamp
-        try:
-            created_at = py_datetime.now().isoformat()
-            if metadata.get("created_at") and isinstance(metadata.get("created_at"), str):
-                # Try to parse the existing timestamp
-                py_datetime.fromisoformat(metadata.get("created_at").replace('Z', '+00:00'))
-                created_at = metadata.get("created_at")
-        except (ValueError, TypeError):
-            created_at = py_datetime.now().isoformat()
-            
-        # Ensure language is valid
-        language = metadata.get("language", "en")
-        if not language or not isinstance(language, str):
-            language = "en"
-            
-        # Ensure category is valid
-        category = metadata.get("category", "Uncategorized")
-        if not category or not isinstance(category, str):
-            category = "Uncategorized"
-            
-        # Ensure author is valid
-        author = metadata.get("author", "")
-        if not author or not isinstance(author, str):
-            author = ""
-
-        # Prepare document metadata with all required fields and validated values
-        doc_metadata = {
-            "doc_id": doc_id,
-            "name": file_name,
-            "title": title,
-            "created_at": created_at,
-            "uploaded_at": py_datetime.now().isoformat(),
-            "file_type": file_ext or "Unknown",
-            "size": file_size,
-            "size_kb": round(file_size / 1024, 2) if file_size > 0 else 0,
-            "language": language,
-            "category": category,
-            "author": author,
-            "is_indexed": False
-        }
-
-        # Add additional metadata (with circular reference protection)
-        safe_metadata = self._safe_copy_metadata(metadata)
-        # Only add metadata fields that are not already in doc_metadata
-        for key, value in safe_metadata.items():
-            if key not in doc_metadata and value is not None:
-                # Ensure we don't add None values or empty strings
-                if isinstance(value, str) and not value.strip():
-                    continue
-                doc_metadata[key] = value
-
-        # Store document node and chunks
-        with self.driver.session() as session:
-            # Create document node first with minimal properties
-            # Extract file extension
-            file_ext = ""
-            if "." in file_name:
-                file_ext = file_name.split(".")[-1].lower()
-                
-            # Calculate file size in KB for display
-            size_kb = round(len(file_content) / 1024, 2)
-            
-            session.run(
-                """
-                MERGE (d:Document {doc_id: $doc_id})
-                SET d.name = $name,
-                    d.title = $title,
-                    d.created_at = datetime(),
-                    d.uploaded_at = datetime(),
-                    d.file_name = $name,
-                    d.file_type = $file_type,
-                    d.size = $size,
-                    d.size_kb = $size_kb,
-                    d.author = $author,
-                    d.category = $category,
-                    d.language = $language,
-                    d.is_indexed = false,
-                    d.processing_status = 'processing'
-                """,
-                doc_id=doc_id,
-                name=file_name,
-                title=doc_metadata.get("title", os.path.splitext(os.path.basename(file_name))[0]),
-                file_type=file_ext or "Unknown",
-                size=len(file_content),
-                size_kb=size_kb,
-                author=doc_metadata.get("author", "N/A"),
-                category=doc_metadata.get("category", "Uncategorized"),
-                language=doc_metadata.get("language", "en")
-            )
-
-            # Log the elements structure to debug
-            logger.info(f"Elements structure sample: {str(elements[:2])[:500]}")
-
-            # Count elements with text
-            text_elements = [e for e in elements if e.get("text", "").strip()]
-            logger.info(f"Elements with text: {len(text_elements)} out of {len(elements)}")
-
-            # Process elements and create chunk nodes
-            chunk_index = 0
-            sections_created = set()  # Track created sections
-
-            # Create at least one chunk even if no elements have text
-            if not text_elements:
-                logger.warning(f"No text elements found for document {doc_id}, creating placeholder chunk")
-
-                chunk_id = f"{doc_id}_chunk_0"
-                section_name = "Document"
-
-                chunk_props = {
-                    "chunk_id": chunk_id,
-                    "text": f"Document: {file_name} (No extractable text found)",
-                    "index": 0,
-                    "section": section_name,
-                    "section_index": 0,
-                    "element_type": "placeholder",
-                }
-
-                # Create chunk node and link to document
-                session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    MERGE (c:Chunk {chunk_id: $chunk_id})
-                    SET c += $properties
-                    MERGE (d)-[:CONTAINS]->(c)
-                    """,
-                    doc_id=doc_id,
-                    chunk_id=chunk_id,
-                    properties=chunk_props
-                )
-
-                chunk_index = 1
-                sections_created.add(section_name)
-            else:
-                # Process each element with text
-                for element in text_elements:
-                    element_type = element.get("type", "unknown")
-                    element_text = element.get("text", "").strip()
-
-                    # Determine section based on element type or metadata
-                    section_name = "Default"
-                    if element_type in ["Title", "Header", "Heading", "h1", "h2", "h3"]:
-                        section_name = element_text[:100]  # Truncate long titles
-                    elif "metadata" in element and isinstance(element["metadata"], dict):
-                        if "section" in element["metadata"]:
-                            section_name = element["metadata"]["section"]
-                        elif "section_name" in element["metadata"]:
-                            section_name = element["metadata"]["section_name"]
-
-                    # Add to tracked sections
-                    sections_created.add(section_name)
-
-                    # For longer text elements, split into chunks
-                    if len(element_text) > self.chunk_size:
-                        chunks = self._chunk_text(element_text)
-                    else:
-                        chunks = [element_text]
-
-                    # Create chunks from this element
-                    for i, chunk_text in enumerate(chunks):
-                        chunk_id = f"{doc_id}_chunk_{chunk_index}"
-
-                        # Create metadata
-                        chunk_props = {
-                            "chunk_id": chunk_id,
-                            "text": chunk_text,
-                            "index": chunk_index,
-                            "section": section_name,
-                            "section_index": i,
-                            "element_type": element_type,
-                        }
-
-                        # Add element metadata if available
-                        if "metadata" in element and isinstance(element["metadata"], dict):
-                            chunk_props["metadata"] = json.dumps(element["metadata"])
-
-                        # Create chunk node and link to document
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            MERGE (c:Chunk {chunk_id: $chunk_id})
-                            SET c += $properties
-                            MERGE (d)-[:CONTAINS]->(c)
-                            """,
-                            doc_id=doc_id,
-                            chunk_id=chunk_id,
-                            properties=chunk_props
-                        )
-
-                        chunk_index += 1
-
-            # Set the document statistics
-            session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})
-                SET d.chunk_count = $chunk_count,
-                    d.section_count = $section_count
-                """,
-                doc_id=doc_id,
-                chunk_count=chunk_index,
-                section_count=len(sections_created)
-            )
-
-            logger.info(f"Document {doc_id} stored in Neo4j with {chunk_index} chunks and {len(sections_created)} sections")
-
-            # Return document ID and statistics
-            return {
-                "doc_id": doc_id,
-                "chunk_count": chunk_index,
-                "section_count": len(sections_created)
-            }
+        logger.info(f"Entity extraction feature has been disabled for document {doc_id}")
+        return []
 
     def process_document(
         self,
@@ -1282,7 +806,6 @@ class DocumentParser:
         file_name: str,
         doc_id: Optional[str] = None,
         doc_metadata: Optional[Dict[str, Any]] = None,
-        enrich: Optional[bool] = None,
         detect_language: bool = True,
         **kwargs
     ) -> Dict[str, Any]:
@@ -1294,7 +817,6 @@ class DocumentParser:
             file_name: Name of the file
             doc_id: Optional document ID
             doc_metadata: Optional document metadata
-            enrich: Whether to enrich the document (defaults to class setting)
             detect_language: Whether to detect document language
             **kwargs: Additional parser-specific arguments
 
@@ -1312,9 +834,56 @@ class DocumentParser:
         # Validate and sanitize metadata
         self._sanitize_metadata(doc_metadata, file_name, file_content)
         
-        # Ensure is_indexed is set to False
-        if "is_indexed" not in doc_metadata:
-            doc_metadata["is_indexed"] = False
+        # Ensure is_indexed is set to False initially in the main metadata
+        doc_metadata["is_indexed"] = False
+        doc_metadata["status"] = "processing" # Indicate it's being processed
+
+        # Persist initial document metadata (including size, title etc.) to Qdrant metadata collection
+        if self.qdrant_client:
+            try:
+                metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                # Ensure all expected fields for DocumentMetadata model are present or have defaults
+                # This helps prevent issues if RAGSystem's _get_document_metadata expects certain fields
+                
+                # Default values for fields often expected by RAGSystem or frontend
+                # based on DocumentMetadata Pydantic model and RAGSystem._create_default_metadata
+                payload_to_store = {
+                    "doc_id": doc_id,
+                    "title": doc_metadata.get("title", f"Document {doc_id}"),
+                    "name": doc_metadata.get("original_filename", file_name), # Use original_filename for display
+                    "is_indexed": doc_metadata.get("is_indexed", False),
+                    "file_type": doc_metadata.get("file_type", "unknown"),
+                    "description": doc_metadata.get("description", ""),
+                    "language": doc_metadata.get("language", "en"),
+                    "size": doc_metadata.get("size", 0),
+                    "page_count": doc_metadata.get("page_count", 0),
+                    "chunk_count": doc_metadata.get("chunk_count", 0), # Will be 0 initially
+                    "created_at": doc_metadata.get("created_at", py_datetime.now().isoformat()),
+                    "tags": doc_metadata.get("tags", []),
+                    "category": doc_metadata.get("category", "Uncategorized"),
+                    "author": doc_metadata.get("author", "N/A"),
+                    "status": doc_metadata.get("status", "active"),
+                    # Add any other fields from doc_metadata that are not explicitly listed
+                    **doc_metadata 
+                }
+
+
+                self.qdrant_client.upsert(
+                    collection_name=self.qdrant_metadata_collection_name,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=metadata_point_id,
+                            vector=[1.0] * self.embedding_dim, # Use embedding_dim consistent with collection
+                            payload=payload_to_store
+                        )
+                    ]
+                )
+                logger.info(f"Stored initial metadata for document {doc_id} in '{self.qdrant_metadata_collection_name}'")
+            except Exception as e:
+                logger.error(f"Error storing initial metadata for document {doc_id} in Qdrant: {e}", exc_info=True)
+        else:
+            logger.error("Qdrant client not available, cannot store initial document metadata.")
+
             
         # Apply parser settings from metadata if provided
         if "parser_settings" in doc_metadata and isinstance(doc_metadata["parser_settings"], dict):
@@ -1350,10 +919,6 @@ class DocumentParser:
                 self.chunk_overlap = settings["chunk_overlap"]
                 logger.info(f"Setting chunk_overlap to {self.chunk_overlap} from document metadata")
 
-        # Set the enrichment flag
-        if enrich is None:
-            enrich = self.use_enrichment
-            
         # Check if file size exceeds threshold for special processing
         file_size = len(file_content)
         max_regular_size = 20 * 1024 * 1024  # 20 MB
@@ -1367,62 +932,18 @@ class DocumentParser:
             if file_ext in ['.txt', '.md', '.csv', '.tsv']:
                 # For text files, split by content
                 return self._process_large_text_document(
-                    file_content, file_name, doc_id, doc_metadata, enrich, detect_language
+                    file_content, file_name, doc_id, doc_metadata
                 )
             else:
                 # For binary files like PDFs, use a different approach
                 return self._process_large_binary_document(
-                    file_content, file_name, doc_id, doc_metadata, enrich, detect_language,
+                    file_content, file_name, doc_id, doc_metadata,
                     max_size_per_chunk=10 * 1024 * 1024  # 10 MB per chunk
                 )
 
         # For normal sized documents
         try:
             logger.info(f"Processing document: {file_name} (ID: {doc_id}, Size: {file_size/1024:.1f} KB)")
-            
-            # First, ensure the document exists in Neo4j, regardless of what happens later
-            try:
-                with self.driver.session() as session:
-                    # Create document node first with minimal properties
-                    # Extract file extension
-                    file_ext = ""
-                    if "." in file_name:
-                        file_ext = file_name.split(".")[-1].lower()
-                        
-                    # Calculate file size in KB for display
-                    size_kb = round(len(file_content) / 1024, 2)
-                    
-                    session.run(
-                        """
-                        MERGE (d:Document {doc_id: $doc_id})
-                        SET d.name = $name,
-                            d.title = $title,
-                            d.created_at = datetime(),
-                            d.uploaded_at = datetime(),
-                            d.file_name = $name,
-                            d.file_type = $file_type,
-                            d.size = $size,
-                            d.size_kb = $size_kb,
-                            d.author = $author,
-                            d.category = $category,
-                            d.language = $language,
-                            d.is_indexed = false,
-                            d.processing_status = 'processing'
-                        """,
-                        doc_id=doc_id,
-                        name=file_name,
-                        title=doc_metadata.get("title", os.path.splitext(os.path.basename(file_name))[0]),
-                        file_type=file_ext or "Unknown",
-                        size=len(file_content),
-                        size_kb=size_kb,
-                        author=doc_metadata.get("author", "N/A"),
-                        category=doc_metadata.get("category", "Uncategorized"),
-                        language=doc_metadata.get("language", "en")
-                    )
-                logger.info(f"Successfully created document node in Neo4j with ID: {doc_id}")
-            except Exception as ne:
-                logger.error(f"Failed to create initial document node in Neo4j: {str(ne)}", exc_info=True)
-                # We'll continue anyway to try the rest of the processing
             
             # Call Unstructured API to extract elements
             try:
@@ -1477,41 +998,61 @@ class DocumentParser:
                     doc_metadata["language_name"] = language_name
                     doc_metadata["language_confidence"] = confidence
                     
-                    # Update document with language info
-                    with self.driver.session() as session:
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            SET d.language = $language,
-                                d.language_name = $language_name,
-                                d.language_confidence = $confidence
-                            """,
-                            doc_id=doc_id,
-                            language=language_code,
-                            language_name=language_name,
-                            confidence=confidence
-                        )
+                    # Update document metadata in Qdrant with language info
+                    if self.qdrant_client:
+                        try:
+                            metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                            # Prepare payload with updated language and potentially other fields
+                            # It's important to merge with existing metadata in Qdrant or ensure full update
+                            # For simplicity, we update specific fields here. A more robust solution
+                            # would fetch existing payload, merge, then upsert.
+                            # However, RAGSystem._update_document_metadata does a full upsert.
+                            # So we should also provide the full metadata again.
+                            
+                            # Fetch current doc_metadata again as it might have been updated by sanitize_metadata
+                            # or other previous steps.
+                            current_payload = doc_metadata.copy() # Start with what we have
+                            current_payload["language"] = language_code
+                            current_payload["language_name"] = language_name
+                            current_payload["language_confidence"] = confidence
+                            
+                            # Ensure all necessary fields are present
+                            final_payload_for_update = {
+                                "doc_id": doc_id,
+                                "title": current_payload.get("title", f"Document {doc_id}"),
+                                "name": current_payload.get("original_filename", file_name),
+                                "is_indexed": current_payload.get("is_indexed", False),
+                                "file_type": current_payload.get("file_type", "unknown"),
+                                "description": current_payload.get("description", ""),
+                                "language": current_payload.get("language", "en"),
+                                "size": current_payload.get("size", 0),
+                                "page_count": current_payload.get("page_count", 0),
+                                "chunk_count": current_payload.get("chunk_count", 0), 
+                                "created_at": current_payload.get("created_at", py_datetime.now().isoformat()),
+                                "tags": current_payload.get("tags", []),
+                                "category": current_payload.get("category", "Uncategorized"),
+                                "author": current_payload.get("author", "N/A"),
+                                "status": current_payload.get("status", "active"),
+                                 **current_payload # Add any other fields
+                            }
+
+
+                            self.qdrant_client.upsert(
+                                collection_name=self.qdrant_metadata_collection_name,
+                                points=[
+                                    qdrant_models.PointStruct(
+                                        id=metadata_point_id,
+                                        vector=[1.0] * self.embedding_dim, # Use embedding_dim consistent with collection
+                                        payload=final_payload_for_update
+                                    )
+                                ]
+                            )
+                            logger.info(f"Updated metadata for document {doc_id} with language info.")
+                        except Exception as e:
+                            logger.error(f"Error updating metadata with language info for {doc_id}: {e}", exc_info=True)
             
-            # Count elements with text
-            text_elements = [e for e in elements if e.get("text", "").strip()]
-            logger.info(f"Elements with text: {len(text_elements)} out of {len(elements)}")
-
-            # Create Neo4j document and extract document structure
-            with self.driver.session() as session:
-                # Create document node first
-                result = session.run(
-                    """
-                    MERGE (d:Document {doc_id: $doc_id})
-                    SET d += $properties
-                    RETURN d
-                    """,
-                    doc_id=doc_id,
-                    properties=doc_metadata
-                )
-
             # Parse elements to chunks
             chunks = []
-            entities = []
             sections = []
             
             if self.chunking_strategy == "hierarchical":
@@ -1522,60 +1063,154 @@ class DocumentParser:
                 logger.info(f"Using fixed chunking strategy (size={self.chunk_size}, overlap={self.chunk_overlap})")
                 chunks = self._fixed_chunking_from_elements(elements, doc_id)
             
-            # Save chunks to Neo4j
-            self._save_chunks_to_neo4j(chunks, doc_id)
-            
-            # If we have sections, save them too
-            if sections:
-                self._save_sections_to_neo4j(sections, doc_id)
-            
-            # Do enrichment if requested
-            if enrich:
-                entities = self._enrich_document(doc_id, chunks)
-                
-            # Update document status in Neo4j
-            try:
-                with self.driver.session() as session:
-                    session.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        SET d.processed = true,
-                            d.processed_at = datetime(),
-                            d.chunk_count = $chunk_count,
-                            d.section_count = $section_count,
-                            d.is_indexed = false,
-                            d.processing_status = 'completed'
-                        """,
-                        doc_id=doc_id,
-                        chunk_count=len(chunks),
-                        section_count=len(sections)
-                    )
-                    
-                    # If language was detected, update document
-                    if detect_language and "language" in doc_metadata:
-                        session.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            SET d.language = $language,
-                                d.language_name = $language_name,
-                                d.language_confidence = $confidence
-                            """,
-                            doc_id=doc_id,
-                            language=doc_metadata.get("language"),
-                            language_name=doc_metadata.get("language_name"),
-                            confidence=doc_metadata.get("language_confidence", 0.0)
+            # Store chunks in Qdrant
+            if self.qdrant_client and chunks:
+                try:
+                    points_to_upsert = []
+                    skipped_chunks = 0
+                    for chunk_idx, chunk_data in enumerate(chunks):
+                        # Ensure basic fields are present
+                        payload_chunk_id = chunk_data.get("chunk_id", f"{doc_id}_chunk_{chunk_idx}")
+                        qdrant_point_id = str(uuid.uuid4()) # Generate UUID for Qdrant point ID
+                        text_content = chunk_data.get("text", "")
+                        
+                        # Skip chunks with empty text content
+                        if not text_content or text_content.strip() == "":
+                            skipped_chunks += 1
+                            continue
+                            
+                        page_num = chunk_data.get("page_num", 0)
+
+                        # Create payload for Qdrant
+                        payload = {
+                            "doc_id": doc_id,
+                            "chunk_id": payload_chunk_id, # Use the original chunk_id style here
+                            "text": text_content,
+                            "page_number": page_num,
+                            "metadata": chunk_data.get("metadata", {}),
+                            "element_type": chunk_data.get("element_type", "unknown"),
+                            "order_index": chunk_data.get("order_index", chunk_idx)
+                        }
+                        
+                        # Add a dummy vector (e.g., all ones) - RAG will create real embeddings later
+                        # Use the embedding_dim passed to the constructor
+                        dummy_vector = [1.0] * self.embedding_dim
+
+                        points_to_upsert.append(
+                            qdrant_models.PointStruct(
+                                id=qdrant_point_id,  # Use generated UUID for Qdrant point ID
+                                payload=payload, 
+                                vector=dummy_vector
+                            )
                         )
-            except Exception as e:
-                logger.error(f"Error updating document status in Neo4j: {str(e)}", exc_info=True)
-                # We'll continue to return success as document and chunks are created
+                    
+                    if skipped_chunks > 0:
+                        logger.info(f"Skipped {skipped_chunks} chunks with empty text for document {doc_id}")
+                    
+                    if points_to_upsert:
+                        self.qdrant_client.upsert(
+                            collection_name=self.qdrant_collection_name,
+                            points=points_to_upsert,
+                            wait=True
+                        )
+                        logger.info(f"Stored {len(points_to_upsert)} chunks for document {doc_id} in Qdrant collection '{self.qdrant_collection_name}'")
+                    else:
+                        logger.warning(f"No points to upsert for document {doc_id}.")
+
+                except Exception as e:
+                    logger.error(f"Error storing chunks in Qdrant for document {doc_id}: {e}", exc_info=True)
+                    # Update metadata status to error if chunk storage fails
+                    if self.qdrant_client:
+                        try:
+                            metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                            error_payload = doc_metadata.copy() # Start with current metadata
+                            error_payload["status"] = "error"
+                            error_payload["error_message"] = f"Failed to store chunks: {str(e)}"
+                             # Ensure all necessary fields are present for the payload
+                            final_error_payload = {
+                                "doc_id": doc_id,
+                                "title": error_payload.get("title", f"Document {doc_id}"),
+                                "name": error_payload.get("original_filename", file_name),
+                                "is_indexed": error_payload.get("is_indexed", False),
+                                "file_type": error_payload.get("file_type", "unknown"),
+                                "description": error_payload.get("description", ""),
+                                "language": error_payload.get("language", "en"),
+                                "size": error_payload.get("size", 0),
+                                "page_count": error_payload.get("page_count", 0),
+                                "chunk_count": error_payload.get("chunk_count", 0), 
+                                "created_at": error_payload.get("created_at", py_datetime.now().isoformat()),
+                                "tags": error_payload.get("tags", []),
+                                "category": error_payload.get("category", "Uncategorized"),
+                                "author": error_payload.get("author", "N/A"),
+                                "status": "error", # Explicitly set status
+                                "error_message": error_payload.get("error_message", "Unknown error during chunk storage"),
+                                **error_payload # Add any other fields
+                            }
+
+                            self.qdrant_client.upsert(
+                                collection_name=self.qdrant_metadata_collection_name,
+                                points=[
+                                    qdrant_models.PointStruct(
+                                        id=metadata_point_id,
+                                        vector=[1.0] * self.embedding_dim, # Use embedding_dim consistent with collection
+                                        payload=final_error_payload
+                                    )
+                                ]
+                            )
+                            logger.info(f"Updated metadata for document {doc_id} to error status due to chunk storage failure.")
+                        except Exception as meta_e:
+                             logger.error(f"Failed to update metadata to error status for {doc_id}: {meta_e}", exc_info=True)
+
+            elif not self.qdrant_client:
+                logger.error(f"Qdrant client not initialized. Cannot store chunks for document {doc_id}")
             
+            # After successful chunking and storage, update metadata status to "processed" or "pending_indexing"
+            if self.qdrant_client:
+                try:
+                    metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                    # Update status to 'processed', indicating chunks are stored, ready for indexing by RAGSystem
+                    # The RAGSystem will later update it to is_indexed=True and status='active' or 'indexed'
+                    processed_payload = doc_metadata.copy()
+                    processed_payload["status"] = "processed" 
+                    processed_payload["chunk_count"] = len(chunks) # Update chunk_count here
+
+                    final_processed_payload = {
+                        "doc_id": doc_id,
+                        "title": processed_payload.get("title", f"Document {doc_id}"),
+                        "name": processed_payload.get("original_filename", file_name),
+                        "is_indexed": processed_payload.get("is_indexed", False), # Should still be False
+                        "file_type": processed_payload.get("file_type", "unknown"),
+                        "description": processed_payload.get("description", ""),
+                        "language": processed_payload.get("language", "en"),
+                        "size": processed_payload.get("size", 0),
+                        "page_count": processed_payload.get("page_count", 0), 
+                        "chunk_count": processed_payload.get("chunk_count", 0), 
+                        "created_at": processed_payload.get("created_at", py_datetime.now().isoformat()),
+                        "tags": processed_payload.get("tags", []),
+                        "category": processed_payload.get("category", "Uncategorized"),
+                        "author": processed_payload.get("author", "N/A"),
+                        "status": "processed", # Explicitly set status
+                         **processed_payload # Add any other fields
+                    }
+                    
+                    self.qdrant_client.upsert(
+                        collection_name=self.qdrant_metadata_collection_name,
+                        points=[
+                            qdrant_models.PointStruct(
+                                id=metadata_point_id,
+                                vector=[1.0] * self.embedding_dim, # Use embedding_dim consistent with collection
+                                payload=final_processed_payload
+                            )
+                        ]
+                    )
+                    logger.info(f"Updated metadata for document {doc_id} to status 'processed' with chunk_count {len(chunks)}.")
+                except Exception as e:
+                    logger.error(f"Error updating metadata status to processed for {doc_id}: {e}", exc_info=True)
+
             return {
                 "doc_id": doc_id,
                 "chunk_count": len(chunks),
                 "section_count": len(sections),
-                "entity_count": len(entities),
-                "language": doc_metadata.get("language"),
-                "language_name": doc_metadata.get("language_name"),
                 "image_count": image_count,
                 "table_count": table_count
             }
@@ -1584,421 +1219,12 @@ class DocumentParser:
             logger.error(f"Error processing document: {str(e)}", exc_info=True)
             raise
 
-    def delete_document(self, doc_id: str, purge_orphans: bool = False) -> Dict[str, Any]:
-        """
-        Delete a document and all its related data from Neo4j.
-
-        Args:
-            doc_id: Document ID to delete
-            purge_orphans: Whether to purge orphaned nodes after deletion
-
-        Returns:
-            Dictionary with deletion results
-        """
-        logger.info(f"Deleting document {doc_id} from Neo4j with purge_orphans={purge_orphans}")
-
-        deletion_stats = {
-            "document_deleted": False,
-            "chunks_deleted": 0,
-            "relationships_deleted": 0,
-            "entities_deleted": 0,
-            "concepts_deleted": 0,
-            "legislation_deleted": 0,
-            "requirements_deleted": 0,
-            "deadlines_deleted": 0
-        }
-
-        try:
-            with self.driver.session() as session:
-                # Check if document exists
-                check_result = session.run(
-                    "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count, d.name as doc_name",
-                    doc_id=doc_id
-                )
-                record = check_result.single()
-
-                if record["count"] == 0:
-                    logger.warning(f"Document {doc_id} not found in Neo4j")
-                    return {"status": "error", "message": "Document not found"}
-
-                doc_name = record["doc_name"]
-
-                # First check which relationship types exist in the database to avoid warnings
-                schema_result = session.run(
-                    """
-                    CALL db.relationshipTypes() YIELD relationshipType
-                    RETURN collect(relationshipType) as types
-                    """
-                )
-                rel_types = schema_result.single()["types"]
-
-                # Similarly check which node labels exist
-                labels_result = session.run(
-                    """
-                    CALL db.labels() YIELD label
-                    RETURN collect(label) as labels
-                    """
-                )
-                node_labels = labels_result.single()["labels"]
-
-                logger.info(f"Found relationship types: {rel_types}")
-                logger.info(f"Found node labels: {node_labels}")
-
-                # First count all chunks for accurate statistics
-                chunk_count_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                    RETURN count(c) as chunk_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                chunk_count_record = chunk_count_result.single()
-                chunk_count = chunk_count_record["chunk_count"] if chunk_count_record else 0
-                
-                if chunk_count is None:
-                    chunk_count = 0
-                    
-                logger.info(f"Found {chunk_count} chunks to delete for document {doc_id}")
-
-                # Get relationships count in a separate query to avoid null aggregation warnings
-                rel_count_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    OPTIONAL MATCH (d)-[r]-()
-                    RETURN count(r) as rel_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                relationship_count = rel_count_result.single()["rel_count"]
-                if relationship_count is None:
-                    relationship_count = 0
-
-                # Start transaction for atomic deletion
-                tx = session.begin_transaction()
-                try:
-                    # Count specific entity types only if they exist in schema
-                    entity_count = 0
-                    if "HAS_ENTITY" in rel_types and "Entity" in node_labels:
-                        # First update doc_names for entities
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_ENTITY]->(e:Entity)
-                            WHERE e.doc_names IS NOT NULL AND $doc_name IN e.doc_names
-                            SET e.doc_names = [name IN e.doc_names WHERE name <> $doc_name]
-                            """,
-                            doc_id=doc_id,
-                            doc_name=doc_name
-                        )
-
-                        # Then count entities that will be deleted (those with empty doc_names)
-                        entity_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_ENTITY]->(e:Entity)
-                            WHERE e.doc_names IS NULL OR size(e.doc_names) = 0
-                            RETURN count(e) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        entity_count = entity_result.single()["count"]
-
-                    concept_count = 0
-                    if "HAS_CONCEPT" in rel_types and "Concept" in node_labels:
-                        # First update doc_names for concepts
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_CONCEPT]->(c:Concept)
-                            WHERE c.doc_names IS NOT NULL AND $doc_name IN c.doc_names
-                            SET c.doc_names = [name IN c.doc_names WHERE name <> $doc_name]
-                            """,
-                            doc_id=doc_id,
-                            doc_name=doc_name
-                        )
-
-                        # Then count concepts that will be deleted (those with empty doc_names)
-                        concept_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_CONCEPT]->(c:Concept)
-                            WHERE c.doc_names IS NULL OR size(c.doc_names) = 0
-                            RETURN count(c) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        concept_count = concept_result.single()["count"]
-
-                    legislation_count = 0
-                    if "REFERENCES_LEGISLATION" in rel_types and "Legislation" in node_labels:
-                        # First update doc_names for legislation
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:REFERENCES_LEGISLATION]->(l:Legislation)
-                            WHERE l.doc_names IS NOT NULL AND $doc_name IN l.doc_names
-                            SET l.doc_names = [name IN l.doc_names WHERE name <> $doc_name]
-                            """,
-                            doc_id=doc_id,
-                            doc_name=doc_name
-                        )
-
-                        # Then count legislation that will be deleted (those with empty doc_names)
-                        legislation_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:REFERENCES_LEGISLATION]->(l:Legislation)
-                            WHERE l.doc_names IS NULL OR size(l.doc_names) = 0
-                            RETURN count(l) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        legislation_count = legislation_result.single()["count"]
-
-                    requirement_count = 0
-                    if "HAS_REQUIREMENT" in rel_types and "Requirement" in node_labels:
-                        # First update doc_names for requirements
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_REQUIREMENT]->(r:Requirement)
-                            WHERE r.doc_names IS NOT NULL AND $doc_name IN r.doc_names
-                            SET r.doc_names = [name IN r.doc_names WHERE name <> $doc_name]
-                            """,
-                            doc_id=doc_id,
-                            doc_name=doc_name
-                        )
-
-                        # Then count requirements that will be deleted (those with empty doc_names)
-                        requirement_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_REQUIREMENT]->(r:Requirement)
-                            WHERE r.doc_names IS NULL OR size(r.doc_names) = 0
-                            RETURN count(r) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        requirement_count = requirement_result.single()["count"]
-
-                    deadline_count = 0
-                    if "HAS_DEADLINE" in rel_types and "Deadline" in node_labels:
-                        # First update doc_names for deadlines
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_DEADLINE]->(dl:Deadline)
-                            WHERE dl.doc_names IS NOT NULL AND $doc_name IN dl.doc_names
-                            SET dl.doc_names = [name IN dl.doc_names WHERE name <> $doc_name]
-                            """,
-                            doc_id=doc_id,
-                            doc_name=doc_name
-                        )
-
-                        # Then count deadlines that will be deleted (those with empty doc_names)
-                        deadline_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:HAS_DEADLINE]->(dl:Deadline)
-                            WHERE dl.doc_names IS NULL OR size(dl.doc_names) = 0
-                            RETURN count(dl) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        deadline_count = deadline_result.single()["count"]
-
-                    # Also check for Text nodes (used in some parsers)
-                    text_count = 0
-                    if "Text" in node_labels:
-                        text_result = tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
-                            RETURN count(t) as count
-                            """,
-                            doc_id=doc_id
-                        )
-                        text_count = text_result.single()["count"]
-                        
-                        # Delete Text nodes if they exist
-                        if text_count > 0:
-                            logger.info(f"Found {text_count} Text nodes to delete")
-                            tx.run(
-                                """
-                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
-                                OPTIONAL MATCH (t)-[tr]-()
-                                DELETE tr
-                                """,
-                                doc_id=doc_id
-                            )
-                            
-                            tx.run(
-                                """
-                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(t:Text)
-                                DETACH DELETE t
-                                """,
-                                doc_id=doc_id
-                            )
-
-                    # Step 1: Delete relationships between Chunks and other nodes
-                    if chunk_count > 0:
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            OPTIONAL MATCH (c)-[cr]-()
-                            DELETE cr
-                            """,
-                            doc_id=doc_id
-                        )
-
-                        # Step 2: Delete Chunk nodes
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            DETACH DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
-
-                    # Step 3: Delete document relationships
-                    tx.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        OPTIONAL MATCH (d)-[r]-()
-                        DELETE r
-                        """,
-                        doc_id=doc_id
-                    )
-
-                    # Step 4: Delete document node
-                    tx.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        DELETE d
-                        """,
-                        doc_id=doc_id
-                    )
-
-                    # Step 5: If purge_orphans is true, clean up any orphaned nodes
-                    if purge_orphans:
-                        logger.info("Purging orphaned nodes...")
-                        # Delete nodes that have no relationships
-                        if "Entity" in node_labels:
-                            tx.run(
-                                """
-                                MATCH (e:Entity) 
-                                WHERE NOT exists((e)--()) 
-                                DELETE e
-                                """
-                            )
-                        
-                        if "Concept" in node_labels:
-                            tx.run(
-                                """
-                                MATCH (c:Concept) 
-                                WHERE NOT exists((c)--()) 
-                                DELETE c
-                                """
-                            )
-                        
-                        if "Legislation" in node_labels:
-                            tx.run(
-                                """
-                                MATCH (l:Legislation) 
-                                WHERE NOT exists((l)--()) 
-                                DELETE l
-                                """
-                            )
-                        
-                        if "Requirement" in node_labels:
-                            tx.run(
-                                """
-                                MATCH (r:Requirement) 
-                                WHERE NOT exists((r)--()) 
-                                DELETE r
-                                """
-                            )
-                        
-                        if "Deadline" in node_labels:
-                            tx.run(
-                                """
-                                MATCH (d:Deadline) 
-                                WHERE NOT exists((d)--()) 
-                                DELETE d
-                                """
-                            )
-                    
-                    tx.commit()
-                    logger.info(f"Document {doc_id} deleted successfully with {chunk_count} chunks")
-                except Exception as e:
-                    tx.rollback()
-                    logger.error(f"Error in document deletion transaction: {str(e)}")
-                    raise
-                
-                # Verify deletion was successful with a separate transaction
-                verify_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id}) 
-                    RETURN count(d) as doc_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                doc_count = verify_result.single()["doc_count"]
-                if doc_count > 0:
-                    logger.error(f"Document {doc_id} still exists after deletion attempt")
-                    return {
-                        "status": "error",
-                        "message": f"Document {doc_id} still exists after deletion attempt"
-                    }
-                
-                # Also verify if chunks were deleted properly
-                chunk_verify_result = session.run(
-                    """
-                    MATCH (c:Chunk {doc_id: $doc_id}) 
-                    RETURN count(c) as chunk_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                orphaned_chunks = chunk_verify_result.single()["chunk_count"]
-                if orphaned_chunks > 0:
-                    logger.warning(f"Found {orphaned_chunks} orphaned chunks after document deletion")
-                    
-                    if purge_orphans:
-                        # Delete orphaned chunks in a new transaction
-                        cleanup_tx = session.begin_transaction()
-                        try:
-                            cleanup_tx.run(
-                                """
-                                MATCH (c:Chunk {doc_id: $doc_id})
-                                DETACH DELETE c
-                                """,
-                                doc_id=doc_id
-                            )
-                            cleanup_tx.commit()
-                            logger.info(f"Cleaned up {orphaned_chunks} orphaned chunks")
-                        except Exception as cleanup_error:
-                            cleanup_tx.rollback()
-                            logger.error(f"Error cleaning up orphaned chunks: {str(cleanup_error)}")
-
-            deletion_stats["document_deleted"] = True
-            deletion_stats["chunks_deleted"] = chunk_count
-            deletion_stats["relationships_deleted"] = relationship_count
-            deletion_stats["entities_deleted"] = entity_count
-            deletion_stats["concepts_deleted"] = concept_count
-            deletion_stats["legislation_deleted"] = legislation_count
-            deletion_stats["requirements_deleted"] = requirement_count
-            deletion_stats["deadlines_deleted"] = deadline_count
-            if "Text" in node_labels:
-                deletion_stats["text_nodes_deleted"] = text_count
-
-            return deletion_stats
-
-        except Exception as e:
-            logger.error(f"Error during deletion: {str(e)}")
-            raise
-
     def process_large_document(
         self,
         file_content: bytes,
         file_name: str,
         doc_id: Optional[str] = None,
         doc_metadata: Optional[Dict[str, Any]] = None,
-        enrich: Optional[bool] = None,
-        detect_language: bool = True,
         max_size_per_chunk: int = 5 * 1024 * 1024,  # 5MB chunks
         **kwargs
     ) -> Dict[str, Any]:
@@ -2013,8 +1239,6 @@ class DocumentParser:
             file_name: Name of the file
             doc_id: Optional document ID
             doc_metadata: Optional document metadata
-            enrich: Whether to enrich the document (defaults to class setting)
-            detect_language: Whether to detect document language
             max_size_per_chunk: Maximum size per chunk in bytes
             **kwargs: Additional parser-specific arguments
 
@@ -2026,8 +1250,7 @@ class DocumentParser:
             file_name=file_name,
             doc_id=doc_id,
             doc_metadata=doc_metadata,
-            enrich=enrich,
-            detect_language=detect_language,
+            detect_language=True,
             **kwargs
         )
 
@@ -2106,3 +1329,132 @@ class DocumentParser:
                 else:
                     # Remove other None fields
                     del metadata[key]
+
+    async def reprocess_document(self, doc_id: str) -> Dict[str, Any]:
+        """
+        Reprocess a document by re-parsing and re-chunking it.
+        
+        Args:
+            doc_id: Document ID to reprocess
+            
+        Returns:
+            Dict with operation status
+        """
+        logger.info(f"Reprocessing document: {doc_id}")
+        
+        try:
+            # First, check if document exists in the metadata store
+            doc_metadata = await self.get_document_metadata(doc_id)
+            
+            if not doc_metadata:
+                logger.error(f"Document {doc_id} not found in metadata store")
+                return {
+                    "status": "error",
+                    "message": f"Document {doc_id} not found",
+                    "doc_id": doc_id
+                }
+                
+            # Delete all existing chunks for the document
+            try:
+                await self.delete_document_chunks(doc_id)
+                logger.info(f"Deleted existing chunks for document {doc_id}")
+            except Exception as del_error:
+                logger.error(f"Error deleting chunks for document {doc_id}: {str(del_error)}")
+                
+            # Check if the document file still exists
+            original_path = doc_metadata.get("original_path")
+            if not original_path or not os.path.exists(original_path):
+                logger.error(f"Original file for document {doc_id} not found at {original_path}")
+                return {
+                    "status": "error",
+                    "message": f"Original file for document {doc_id} not found",
+                    "doc_id": doc_id
+                }
+                
+            # Reprocess the document using the original path
+            try:
+                # Update metadata to indicate reprocessing
+                doc_metadata["status"] = "reprocessing"
+                doc_metadata["is_indexed"] = False
+                doc_metadata["updated_at"] = datetime.now().isoformat()
+                await self.update_document_metadata(doc_id, doc_metadata)
+                
+                # Start reprocessing
+                reprocess_task = asyncio.create_task(
+                    self.process_document_file(
+                        file_path=original_path,
+                        doc_id=doc_id,
+                        file_extension=doc_metadata.get("file_type", ""),
+                        language=doc_metadata.get("language", "auto"),
+                        metadata=doc_metadata
+                    )
+                )
+                
+                return {
+                    "status": "success",
+                    "message": f"Document {doc_id} reprocessing started",
+                    "doc_id": doc_id
+                }
+                
+            except Exception as proc_error:
+                logger.error(f"Error starting reprocessing for document {doc_id}: {str(proc_error)}")
+                
+                # Update metadata to indicate error
+                doc_metadata["status"] = "error"
+                doc_metadata["error_message"] = f"Reprocessing failed: {str(proc_error)}"
+                doc_metadata["updated_at"] = datetime.now().isoformat()
+                await self.update_document_metadata(doc_id, doc_metadata)
+                
+                return {
+                    "status": "error",
+                    "message": f"Error reprocessing document: {str(proc_error)}",
+                    "doc_id": doc_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in document reprocessing: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error reprocessing document: {str(e)}",
+                "doc_id": doc_id
+            }
+            
+    async def delete_document_chunks(self, doc_id: str) -> Dict[str, Any]:
+        """
+        Delete all chunks for a document from Qdrant.
+        
+        Args:
+            doc_id: Document ID
+            
+        Returns:
+            Dict with deletion status
+        """
+        try:
+            # Delete from Qdrant
+            self.qdrant_client.delete(
+                collection_name=self.collection_name,
+                points_selector=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="doc_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                )
+            )
+            
+            logger.info(f"Deleted chunks for document {doc_id} from Qdrant")
+            
+            return {
+                "status": "success",
+                "message": f"Deleted chunks for document {doc_id}",
+                "doc_id": doc_id
+            }
+            
+        except Exception as e:
+            logger.error(f"Error deleting chunks for document {doc_id}: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error deleting chunks: {str(e)}",
+                "doc_id": doc_id
+            }

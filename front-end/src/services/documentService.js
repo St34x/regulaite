@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090';
 
 // Helper function to get auth header
 const getAuthHeader = () => {
@@ -34,7 +34,14 @@ export const getDocuments = async (
       headers: getAuthHeader(),
       params,
     });
-    return response.data;
+    
+    // The backend directly returns an array of documents, not an object with documents property
+    // Transform the response to match what the frontend expects
+    const documentsArray = response.data;
+    return {
+      documents: documentsArray,
+      total_count: documentsArray.length
+    };
   } catch (error) {
     throw error;
   }
@@ -64,7 +71,6 @@ export const uploadDocument = async (
   metadata = {},
   options = {
     useNlp: true,
-    useEnrichment: true,
     detectLanguage: true,
     language: null,
     useQueue: false,
@@ -82,7 +88,6 @@ export const uploadDocument = async (
     }
     
     formData.append('use_nlp', options.useNlp.toString());
-    formData.append('use_enrichment', options.useEnrichment.toString());
     formData.append('detect_language', options.detectLanguage.toString());
     
     if (options.language) {
@@ -245,11 +250,91 @@ export const indexDocument = async (docId, forceReindex = false) => {
 // Reindex all documents that need indexing
 export const reindexAllDocuments = async (force = false) => {
   try {
-    const response = await axios.post(`${API_URL}/documents/reindex-all?force=${force}`, {}, {
-      headers: getAuthHeader(),
+    const response = await axios.post(
+      `${API_URL}/documents/reindex-all`,
+      { force_reindex: force },
+      {
+        headers: {
+          ...getAuthHeader(),
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Error reindexing all documents:', error);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+    }
+    throw error;
+  }
+};
+
+// Repair document metadata
+export const repairDocumentMetadata = async (docId = null) => {
+  try {
+    const url = `${API_URL}/documents/repair-metadata`;
+    const params = docId ? { doc_id: docId } : {};
+    
+    const response = await axios.post(url, {}, {
+      headers: {
+        ...getAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      params: params,
     });
     return response.data;
   } catch (error) {
+    console.error('Error repairing document metadata:', error);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+    }
+    throw error;
+  }
+};
+
+// Repair document sizes
+export const repairDocumentSizes = async () => {
+  try {
+    const url = `${API_URL}/documents/repair-sizes`;
+    
+    const response = await axios.post(url, {}, {
+      headers: {
+        ...getAuthHeader(),
+        'Content-Type': 'application/json',
+      }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error repairing document sizes:', error);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+    }
+    throw error;
+  }
+};
+
+// Repair document file types
+export const repairDocumentFileTypes = async () => {
+  try {
+    const url = `${API_URL}/documents/repair-file-types`;
+    
+    const response = await axios.post(url, {}, {
+      headers: {
+        ...getAuthHeader(),
+        'Content-Type': 'application/json',
+      }
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error repairing document file types:', error);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+    }
     throw error;
   }
 }; 

@@ -54,7 +54,6 @@ app.conf.update(
 # Import tasks - we define these here to avoid circular imports
 from unstructured_parser.base_parser import BaseParser, ParserType
 from llamaIndex_rag.rag import RAGSystem
-from pyndantic_agents.agents import create_agent, AgentConfig
 
 # Configuration from environment variables
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
@@ -139,11 +138,15 @@ def get_rag_system():
     while retry_count < max_retries:
         try:
             rag = RAGSystem(
-                neo4j_uri=NEO4J_URI,
-                neo4j_user=NEO4J_USER,
-                neo4j_password=NEO4J_PASSWORD,
+                collection_name="regulaite_docs",
+                metadata_collection_name="regulaite_metadata",
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+                embedding_dim=384,
+                llm_model="gpt-4.1",
                 qdrant_url=QDRANT_URL,
-                openai_api_key=OPENAI_API_KEY
+                openai_api_key=OPENAI_API_KEY,
+                vector_weight=0.7,
+                semantic_weight=0.3
             )
             logger.info("RAG system initialized successfully")
             return rag
@@ -331,50 +334,32 @@ def execute_agent_task(self, agent_type: str, task: str, config: Optional[Dict[s
         Dictionary with agent execution results
     """
     try:
-        # Import here to avoid circular imports
-        from pyndantic_agents.agents import create_agent, AgentConfig
-
         # Generate agent ID
         agent_id = f"{agent_type}_{uuid.uuid4()}"
-
-        # Create agent configuration
-        if config:
-            agent_config = AgentConfig(**config)
-        else:
-            agent_config = AgentConfig(
-                name=f"{agent_type.capitalize()} Agent",
-                description=f"A {agent_type} agent for regulatory AI",
-                include_context=include_context,
-                context_query=context_query
-            )
-
+        
         # Initialize RAG system
         rag_system = get_rag_system()
-
-        # Create and initialize agent
-        agent = create_agent(
-            agent_type=agent_type,
-            agent_id=agent_id,
-            config=agent_config,
-            neo4j_uri=NEO4J_URI,
-            neo4j_user=NEO4J_USER,
-            neo4j_password=NEO4J_PASSWORD,
-            openai_api_key=OPENAI_API_KEY,
-            rag_system=rag_system
-        )
-
-        # Execute the task
-        result = agent.execute(task)
-
+        
+        # Since pyndantic_agents is removed, we need an alternative approach
+        # Using direct LLM calls via RAG system
+        query = f"Task: {task}\nAgent type: {agent_type}"
+        
+        if include_context and context_query:
+            context = rag_system.retrieve_context(context_query or task, top_k=5)
+            context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(context)])
+            query = f"{context_str}\n\n{query}"
+            
+        # Use RAG system's query method directly
+        result = rag_system.query(query)
+        
         # Clean up
-        agent.close()
         rag_system.close()
 
         return {
             "agent_id": agent_id,
             "agent_type": agent_type,
             "task": task,
-            "result": result,
+            "result": str(result),
             "status": "completed"
         }
     except Exception as e:
@@ -480,7 +465,7 @@ def retrieve_context(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         rag_system = get_rag_system()
 
         # Retrieve context
-        results = rag_system.retrieve(query, top_k=top_k)
+        results = rag_system.retrieve_context(query, top_k=top_k)
 
         # Clean up
         rag_system.close()

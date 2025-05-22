@@ -36,10 +36,11 @@ import {
   TagLabel,
   HStack,
   Tooltip,
-  Divider
+  Divider,
+  ButtonGroup
 } from '@chakra-ui/react';
-import { FiUpload, FiSearch, FiFilter, FiMoreVertical, FiFile, FiTrash2, FiDownload, FiInfo, FiSettings } from 'react-icons/fi';
-import { getDocuments, uploadDocument, deleteDocument, getDocumentStats, getParserTypes } from '../services/documentService';
+import { FiUpload, FiSearch, FiFilter, FiMoreVertical, FiFile, FiTrash2, FiDownload, FiInfo, FiSettings, FiRefreshCw } from 'react-icons/fi';
+import { getDocuments, uploadDocument, deleteDocument, getDocumentStats, getParserTypes, repairDocumentMetadata, repairDocumentSizes, repairDocumentFileTypes } from '../services/documentService';
 
 const DocumentsPage = () => {
   const toast = useToast();
@@ -73,7 +74,6 @@ const DocumentsPage = () => {
   });
   const [processingOptions, setProcessingOptions] = useState({
     useNlp: true,
-    useEnrichment: true,
     detectLanguage: true,
     parserType: 'unstructured',
     useQueue: false,
@@ -110,12 +110,16 @@ const DocumentsPage = () => {
         search: searchTerm
       });
       
+      console.log('Documents API Response:', result);
+      console.log('Documents Array:', result.documents || result);
+      
       setDocuments(result.documents || []);
       setPagination(prev => ({
         ...prev,
         totalCount: result.total_count || 0
       }));
     } catch (error) {
+      console.error('Error fetching documents:', error);
       toast({
         title: 'Error fetching documents',
         description: error.message,
@@ -131,6 +135,7 @@ const DocumentsPage = () => {
   const fetchStats = async () => {
     try {
       const result = await getDocumentStats();
+      console.log('Stats API Response:', result);
       setStats(result);
     } catch (error) {
       console.error('Error fetching document stats:', error);
@@ -202,7 +207,6 @@ const DocumentsPage = () => {
         metadataToSend,
         {
           useNlp: processingOptions.useNlp,
-          useEnrichment: processingOptions.useEnrichment,
           detectLanguage: processingOptions.detectLanguage,
           parserType: processingOptions.parserType,
           useQueue: processingOptions.useQueue,
@@ -361,18 +365,116 @@ const DocumentsPage = () => {
   // The selected parser info
   const selectedParserInfo = getSelectedParserInfo();
 
+  // Add the repair function
+  const handleRepairMetadata = async () => {
+    try {
+      setLoading(true);
+      await repairDocumentMetadata();
+      toast({
+        title: 'Metadata repair initiated',
+        description: 'Document metadata is being repaired. This may take a moment.',
+        status: 'info',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Refresh document list after a delay
+      setTimeout(() => {
+        fetchDocuments();
+        fetchStats();
+      }, 1000);
+    } catch (error) {
+      console.error('Error repairing metadata:', error);
+      toast({
+        title: 'Error repairing metadata',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Add size repair function
+  const handleRepairSizes = async () => {
+    try {
+      setLoading(true);
+      await repairDocumentSizes();
+      toast({
+        title: 'Size repair initiated',
+        description: 'Document sizes are being updated. This may take a moment.',
+        status: 'info',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Refresh document list after a delay
+      setTimeout(() => {
+        fetchDocuments();
+        fetchStats();
+      }, 1000);
+    } catch (error) {
+      console.error('Error repairing document sizes:', error);
+      toast({
+        title: 'Error repairing document sizes',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Add file type repair function
+  const handleRepairFileTypes = async () => {
+    try {
+      setLoading(true);
+      await repairDocumentFileTypes();
+      toast({
+        title: 'File type repair initiated',
+        description: 'Document file types are being updated. This may take a moment.',
+        status: 'info',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Refresh document list after a delay
+      setTimeout(() => {
+        fetchDocuments();
+        fetchStats();
+      }, 1000);
+    } catch (error) {
+      console.error('Error repairing document file types:', error);
+      toast({
+        title: 'Error repairing document file types',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <Box p={5}>
       <Flex justifyContent="space-between" alignItems="center" mb={6}>
         <Heading size="lg">Document Management</Heading>
-        <Button 
-          leftIcon={<FiUpload />} 
-          colorScheme="purple" 
-          bg="#4415b6"
-          onClick={onUploadOpen}
-        >
-          Upload Document
-        </Button>
+        <ButtonGroup spacing={2}>
+          <Button 
+            leftIcon={<FiUpload />} 
+            colorScheme="purple" 
+            bg="#4415b6"
+            onClick={onUploadOpen}
+          >
+            Upload Document
+          </Button>
+        </ButtonGroup>
       </Flex>
 
       {/* Stats Cards */}
@@ -449,12 +551,12 @@ const DocumentsPage = () => {
                       <Td>
                         <Flex align="center">
                           {getFileIcon(doc.file_type)}
-                          <Text ml={2} fontWeight="medium">{doc.title || doc.filename}</Text>
+                          <Text ml={2} fontWeight="medium">{doc.name || doc.title}</Text>
                         </Flex>
                       </Td>
                       <Td>{getFileTypeBadge(doc.file_type)}</Td>
                       <Td>{formatDate(doc.created_at)}</Td>
-                      <Td>{(doc.file_size / 1024).toFixed(2)} KB</Td>
+                      <Td>{(doc.size / 1024).toFixed(2)} KB</Td>
                       <Td>{doc.category || 'Uncategorized'}</Td>
                       <Td onClick={(e) => e.stopPropagation()}>
                         <Menu>
@@ -730,29 +832,6 @@ const DocumentsPage = () => {
             </FormControl>
 
             <FormControl display="flex" alignItems="center" mb={2}>
-              <FormLabel htmlFor="useEnrichment" mb="0">
-                Use Data Enrichment
-                <Tooltip 
-                  label="Enrich document data with additional information from knowledge bases"
-                  placement="top"
-                >
-                  <Box as="span" ml={1} color="gray.500" cursor="help">
-                    <FiInfo size={14} />
-                  </Box>
-                </Tooltip>
-              </FormLabel>
-              <input
-                type="checkbox"
-                id="useEnrichment"
-                checked={processingOptions.useEnrichment}
-                onChange={() => setProcessingOptions(prev => ({ 
-                  ...prev, 
-                  useEnrichment: !prev.useEnrichment 
-                }))}
-              />
-            </FormControl>
-
-            <FormControl display="flex" alignItems="center" mb={2}>
               <FormLabel htmlFor="detectLanguage" mb="0">
                 Auto-detect Language
                 <Tooltip 
@@ -918,14 +997,17 @@ const DocumentsPage = () => {
             <ModalBody>
               <Grid templateColumns="1fr 1fr" gap={4}>
                 <Box>
+                  <Text fontWeight="bold">Filename</Text>
+                  <Text mb={3}>{selectedDoc.name || "Unknown"}</Text>
+                  
                   <Text fontWeight="bold">Title</Text>
-                  <Text mb={3}>{selectedDoc.title || selectedDoc.filename}</Text>
+                  <Text mb={3}>{selectedDoc.title || "Untitled"}</Text>
                   
                   <Text fontWeight="bold">File Type</Text>
                   <Text mb={3}>{selectedDoc.file_type?.toUpperCase() || 'Unknown'}</Text>
                   
                   <Text fontWeight="bold">File Size</Text>
-                  <Text mb={3}>{(selectedDoc.file_size / 1024).toFixed(2)} KB</Text>
+                  <Text mb={3}>{(selectedDoc.size / 1024).toFixed(2)} KB</Text>
                   
                   <Text fontWeight="bold">Uploaded</Text>
                   <Text mb={3}>{formatDate(selectedDoc.created_at)}</Text>

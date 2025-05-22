@@ -10,7 +10,7 @@ The `llm_config.py` file provides a `LLMConfig` class for configuring LLM models
 
 ```python
 from config.llm_config import LLMConfig
-from pyndantic_agents.agent_factory import create_agent
+from openai import OpenAI
 
 # Create an LLM configuration
 llm_config = LLMConfig(
@@ -22,10 +22,22 @@ llm_config = LLMConfig(
     api_url=None,  # Optional, for custom API endpoints
 )
 
-# Create an agent with the LLM configuration
-agent = create_agent(
-    agent_type="rag",
-    llm_config=llm_config
+# Use the configuration with OpenAI client
+client = OpenAI(
+    api_key=llm_config.api_key,
+    base_url=llm_config.api_url or None
+)
+
+# Make a request
+response = client.chat.completions.create(
+    model=llm_config.model,
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello!"}
+    ],
+    temperature=llm_config.temperature,
+    max_tokens=llm_config.max_tokens,
+    **llm_config.additional_params
 )
 ```
 

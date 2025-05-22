@@ -1,7 +1,7 @@
 import React from 'react';
-import { User, Bot, Info, Cpu, ArrowDownRight } from 'lucide-react';
+import { User, Bot, Info, Cpu, ArrowDownRight, FileText, AlertTriangle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip } from '@chakra-ui/react';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip, Progress } from '@chakra-ui/react';
 
 /**
  * Renders a single chat message
@@ -15,6 +15,10 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const isUser = message.role === 'user';
   const isShortUserMessage = isUser && message.content.trim().length <= 20;
   const showContextIndicator = isShortUserMessage && previousMessage && previousMessage.role === 'user';
+  
+  // Check if message has sources
+  const hasSources = !isUser && message.metadata && message.metadata.sources && message.metadata.sources.length > 0;
+  const hasHallucinationRisk = !isUser && message.metadata && message.metadata.hallucination_risk !== undefined;
   
   // Theme colors
   const accentColor = useColorModeValue("#4415b6", "#6c45e7");
@@ -32,6 +36,8 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const assistantMessageShadow = "0 2px 6px rgba(68, 21, 182, 0.08)";
   const agentInfoBg = useColorModeValue('gray.50', 'gray.700');
   const contextIndicatorColor = useColorModeValue('gray.400', 'gray.500');
+  const warningColor = useColorModeValue('orange.500', 'orange.300');
+  const sourceContentBg = useColorModeValue('white', 'gray.900');
 
   return (
     <Box 
@@ -131,6 +137,20 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             </Badge>
           )}
           
+          {/* Context Quality Badge */}
+          {!isUser && message.metadata && message.metadata.context_quality && (
+            <Badge
+              bg={message.metadata.context_quality === 'insufficient' ? 'yellow.100' : 'green.100'}
+              color={message.metadata.context_quality === 'insufficient' ? 'yellow.800' : 'green.800'}
+              variant="subtle"
+              fontSize="xs"
+              borderRadius="full"
+              px={2}
+            >
+              {message.metadata.context_quality === 'insufficient' ? 'Limited Context' : 'Good Context'}
+            </Badge>
+          )}
+          
           {isLoading && (
             <Spinner size="xs" color={accentColor} ml={2} thickness="2px" speed="0.8s" />
           )}
@@ -146,6 +166,114 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
         >
           <ReactMarkdown>{message.content}</ReactMarkdown>
         </Box>
+        
+        {/* Hallucination Risk */}
+        {hasHallucinationRisk && message.metadata.hallucination_risk > 0.5 && (
+          <Box mt={3} mb={3}>
+            <Flex alignItems="center" mb={1}>
+              <Icon as={AlertTriangle} boxSize={4} color={warningColor} mr={2} />
+              <Text fontSize="sm" fontWeight="medium" color={warningColor}>
+                Information may be incomplete or uncertain
+              </Text>
+            </Flex>
+            <Progress 
+              value={(1 - message.metadata.hallucination_risk) * 100}
+              size="sm"
+              colorScheme={message.metadata.hallucination_risk > 0.7 ? "red" : "yellow"}
+              borderRadius="full"
+              mt={1}
+            />
+          </Box>
+        )}
+        
+        {/* Sources Information */}
+        {hasSources && (
+          <Box 
+            mt={3} 
+            pt={2} 
+            borderTop="1px solid" 
+            borderColor={dividerColor} 
+            fontSize="xs" 
+            color={mutedTextColor}
+          >
+            <Flex align="center" mb={2}>
+              <Icon as={FileText} boxSize={3} mr={1} color={accentColor} />
+              <Text fontWeight="medium" color={accentColor}>Sources:</Text>
+            </Flex>
+            
+            {message.metadata.sources.map((source, idx) => (
+              <Box key={idx} ml={4} mb={4} p={3} borderRadius="md" bg={agentInfoBg} borderLeft="3px solid" borderLeftColor={accentColor}>
+                {/* Document Title and Relevance */}
+                <Flex justify="space-between" align="center" mb={2}>
+                  <Flex align="center">
+                    <Icon as={FileText} boxSize={3} mr={1} color={accentColor} />
+                    <Text fontWeight="bold" fontSize="sm" color={textColor}>
+                      {source.title || (source.doc_id && source.doc_id.split('/').pop()) || 'Document'}
+                    </Text>
+                  </Flex>
+                  <Badge 
+                    colorScheme={source.score > 0.7 ? "green" : source.score > 0.5 ? "yellow" : "red"}
+                    fontSize="xs"
+                  >
+                    Relevance: {Math.max(0, Math.round(source.score * 100))}%
+                  </Badge>
+                </Flex>
+                
+                {/* Extracted Content Chunk */}
+                {source.content && (
+                  <Box 
+                    bg={sourceContentBg}
+                    p={2} 
+                    borderRadius="md" 
+                    borderWidth="1px" 
+                    borderColor={dividerColor}
+                    mb={2}
+                    fontSize="xs"
+                    color={textColor}
+                    maxH="100px"
+                    overflowY="auto"
+                    whiteSpace="pre-wrap"
+                  >
+                    <Text>{source.content}</Text>
+                  </Box>
+                )}
+                
+                {/* Document Metadata */}
+                <Flex flexWrap="wrap" gap={2} mt={1}>
+                  {source.doc_id && (
+                    <Badge variant="outline" fontSize="xs">
+                      ID: {source.doc_id.split('/').pop()}
+                    </Badge>
+                  )}
+                  {source.page_number && (
+                    <Badge variant="outline" fontSize="xs">
+                      Page: {source.page_number}
+                    </Badge>
+                  )}
+                  {source.file_type && (
+                    <Badge variant="outline" fontSize="xs" colorScheme="blue">
+                      {source.file_type.toUpperCase()}
+                    </Badge>
+                  )}
+                  {source.retrieval_method && (
+                    <Tooltip label={`Retrieval method used to find this source`} placement="top" hasArrow>
+                      <Badge variant="outline" fontSize="xs" cursor="help" colorScheme="purple">
+                        Method: {source.retrieval_method.replace(/_/g, ' ')}
+                      </Badge>
+                    </Tooltip>
+                  )}
+                  {source.original_score && (
+                    <Tooltip label="Original retrieval score before any adjustments" placement="top" hasArrow>
+                      <Badge variant="outline" fontSize="xs" cursor="help">
+                        Base Score: {Math.round(source.original_score * 100)}%
+                      </Badge>
+                    </Tooltip>
+                  )}
+                </Flex>
+              </Box>
+            ))}
+          </Box>
+        )}
         
         {/* Agent Information */}
         {!isUser && agentInfo && (

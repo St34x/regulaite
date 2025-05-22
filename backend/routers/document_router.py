@@ -12,11 +12,11 @@ import os
 from datetime import datetime
 import asyncio
 
-# Neo4j imports
-from neo4j.time import DateTime as Neo4jDateTime
-
 # Import parser types
 from unstructured_parser.base_parser import ParserType
+
+# Import Qdrant models for filtering
+from qdrant_client.http import models as qdrant_models
 
 # Configure logging
 logging.basicConfig(
@@ -32,17 +32,29 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-# Helper function to serialize Neo4j DateTime objects
-def neo4j_datetime_serializer(obj):
-    """Custom serializer for Neo4j DateTime objects."""
-    if isinstance(obj, Neo4jDateTime):
-        # Convert Neo4j DateTime to Python datetime
-        return datetime(
-            obj.year, obj.month, obj.day,
-            obj.hour, obj.minute, obj.second,
-            obj.nanosecond // 1000000
-        ).isoformat()
+# Helper function to serialize datetime objects
+def datetime_serializer(obj):
+    """Custom serializer for datetime objects."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+# Custom JSON Response class
+class CustomJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        try:
+            # Use custom serializer for datetime objects
+            return json.dumps(
+                content,
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=None,
+                separators=(",", ":"),
+                default=datetime_serializer,
+            ).encode("utf-8")
+        except Exception as e:
+            logger.error(f"Error rendering JSON: {str(e)}")
+            return super().render(content)
 
 # Models for API
 class DocumentMetadata(BaseModel):
@@ -138,13 +150,6 @@ class DocumentStatsResponse(BaseModel):
     total_storage_mb: float = Field(..., description="Total storage used in MB")
 
 
-# Dependency to get Neo4j driver
-async def get_neo4j_driver():
-    """Get the Neo4j driver from main application."""
-    from main import driver
-    return driver
-
-
 # Dependency to get document parser
 async def get_document_parser():
     """Get the document parser from main application."""
@@ -166,77 +171,144 @@ async def get_task_router():
     return queue_document_processing
 
 
-@router.post("/process", response_model=DocumentProcessResponse)
+@router.post("", response_class=CustomJSONResponse)
 async def process_document(
     file: UploadFile = File(...),
     doc_id: Optional[str] = Form(None),
     metadata: Optional[str] = Form(None),
     use_nlp: bool = Form(True),
-    use_enrichment: bool = Form(True),
+    use_enrichment: bool = Form(False),
     detect_language: bool = Form(True),
     language: Optional[str] = Form(None),
-    use_queue: bool = Form(False),
     parser_type: str = Form(ParserType.UNSTRUCTURED.value),
-    extract_images: bool = Form(False)
+    document_parser = Depends(get_document_parser)
 ):
-    """Process a document using the specified parser and store in Neo4j."""
-
-    # Validate parser type
+    """Process a document using the specified parser and store it in the system."""
     try:
-        if parser_type not in [pt.value for pt in ParserType]:
-            logger.warning(f"Invalid parser type: {parser_type}, using default: {ParserType.UNSTRUCTURED.value}")
-            parser_type = ParserType.UNSTRUCTURED.value
+        # Generate document ID if not provided
+        if not doc_id:
+            doc_id = f"doc_{uuid.uuid4()}"
+            
+        # Parse metadata if provided
+        doc_metadata = {}
+        if metadata:
+            try:
+                doc_metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse metadata JSON: {metadata}")
+                
+        # Read the file
+        file_content = await file.read()
+        
+        # Extract file extension and determine file type
+        filename = file.filename
+        extension = None
+        if "." in filename:
+            extension = filename.split(".")[-1].lower()
+            
+        # Map common extensions to standardized file types
+        file_type = "unknown"
+        if extension:
+            extension_to_type = {
+                # Documents
+                "pdf": "pdf",
+                "doc": "doc",
+                "docx": "docx",
+                "txt": "txt",
+                "md": "md",
+                "markdown": "md",
+                "rtf": "rtf",
+                "odt": "odt",
+                # Spreadsheets
+                "xls": "xls",
+                "xlsx": "xlsx",
+                "csv": "csv",
+                "ods": "ods",
+                # Presentations
+                "ppt": "ppt",
+                "pptx": "pptx",
+                "odp": "odp",
+                # Web
+                "html": "html",
+                "htm": "html",
+                "xml": "xml",
+                "json": "json",
+                # Images
+                "jpg": "jpg",
+                "jpeg": "jpg",
+                "png": "png",
+                "gif": "gif",
+                "bmp": "bmp",
+                "svg": "svg",
+                # Archives
+                "zip": "zip",
+                "rar": "rar",
+                "tar": "tar",
+                "gz": "gz",
+                "7z": "7z"
+            }
+            file_type = extension_to_type.get(extension, extension)
+        
+        # Fall back to content type if extension extraction failed
+        if file_type == "unknown" and file.content_type:
+            content_type = file.content_type.lower()
+            if "pdf" in content_type:
+                file_type = "pdf"
+            elif "word" in content_type or "docx" in content_type:
+                file_type = "docx"
+            elif "excel" in content_type or "xlsx" in content_type:
+                file_type = "xlsx"
+            elif "powerpoint" in content_type or "pptx" in content_type:
+                file_type = "pptx"
+            elif "text/plain" in content_type:
+                file_type = "txt"
+            elif "text/markdown" in content_type:
+                file_type = "md"
+            elif "html" in content_type:
+                file_type = "html"
+        
+        logger.info(f"Detected file type: {file_type} for {filename}")
+        
+        # Add file metadata
+        doc_metadata["original_filename"] = file.filename
+        doc_metadata["name"] = file.filename  # Set name field to the original filename for display
+        doc_metadata["content_type"] = file.content_type
+        doc_metadata["file_type"] = file_type  # Set the detected file type
+        doc_metadata["size"] = len(file_content)  # Store actual byte size of the file content
+        doc_metadata["use_nlp"] = use_nlp
+        doc_metadata["use_enrichment"] = use_enrichment
+        
+        # Process the document
+        result = document_parser.process_document(
+            file_content=file_content,
+            file_name=file.filename,
+            doc_id=doc_id,
+            doc_metadata=doc_metadata,
+            detect_language=detect_language
+        )
+        
+        return result
     except Exception as e:
-        logger.warning(f"Error validating parser type: {str(e)}, using default")
-        parser_type = ParserType.UNSTRUCTURED.value
-
-    # Add parser type to metadata
-    metadata_dict = {}
-    if metadata:
-        try:
-            metadata_dict = json.loads(metadata)
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse metadata JSON: {metadata}")
-    
-    metadata_dict["parser_type"] = parser_type
-    
-    # Add parser settings to metadata
-    if "parser_settings" not in metadata_dict:
-        metadata_dict["parser_settings"] = {}
-    
-    # Set extract_images in parser settings
-    metadata_dict["parser_settings"]["extract_images"] = extract_images
-
-    # Convert back to JSON string
-    metadata = json.dumps(metadata_dict)
-
-    # Import and forward to existing implementation in main.py
-    from main import process_document as main_process_document
-
-    response = await main_process_document(
-        file=file,
-        doc_id=doc_id,
-        metadata=metadata,
-        use_nlp=use_nlp,
-        use_enrichment=use_enrichment,
-        detect_language=detect_language,
-        language=language,
-        use_queue=use_queue,
-        parser_type=parser_type
-    )
-
-    return response
+        logger.error(f"Error processing document: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing document: {str(e)}"
+        )
 
 
 @router.get("/", response_model=List[DocumentMetadata])
+@router.get("", response_model=List[DocumentMetadata])  # Also handle URL without trailing slash
 async def document_list(
-    skip: int = 0,
-    limit: int = 100,
-    sort_by: str = "created_at",
-    sort_order: str = "desc",
-    filter_tags: Optional[List[str]] = Query(None),
-    filter_status: Optional[List[str]] = Query(None),
-    search_query: Optional[str] = None
+    skip: int = Query(0, alias="offset"),
+    limit: int = Query(100, alias="limit"),
+    sort_by: str = Query("created_at", alias="sort_by"),
+    sort_order: str = Query("desc", alias="sort_order"),
+    filter_tags: Optional[List[str]] = Query(None, alias="tags"),
+    filter_status: Optional[List[str]] = Query(None, alias="status"),
+    search_query: Optional[str] = Query(None, alias="search"),
+    file_type: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    language: Optional[str] = Query(None)
 ):
     """
     Get a list of documents with optional filtering and search.
@@ -246,206 +318,180 @@ async def document_list(
     valid_sort_orders = ["asc", "desc"]
 
     if sort_by not in valid_sort_fields:
-        sort_by = "created_at"
+        # Map 'created' from frontend to 'created_at' in backend
+        if sort_by == "created":
+            sort_by = "created_at"
+        else:
+            sort_by = "created_at"
+
     if sort_order not in valid_sort_orders:
         sort_order = "desc"
 
-    # Connect to Neo4j
-    from neo4j import GraphDatabase
-    from config.settings import get_settings
-
-    settings = get_settings()
-    neo4j_driver = GraphDatabase.driver(
-        settings.NEO4J_URI,
-        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-    )
-
     documents = []
     try:
-        with neo4j_driver.session() as session:
-            # Build query based on filters
-            query = """
-            MATCH (d:Document)
-            """
-
-            # Apply tag filter if provided
-            if filter_tags and len(filter_tags) > 0:
-                query += """
-                WHERE any(tag IN d.tags WHERE tag IN $filter_tags)
-                """
-
-            # Apply status filter if provided
-            if filter_status and len(filter_status) > 0:
-                if "WHERE" not in query:
-                    query += "WHERE "
-                else:
-                    query += "AND "
-                query += """
-                d.status IN $filter_status
-                """
-
-            # Apply text search if provided
-            if search_query and search_query.strip():
-                if "WHERE" not in query:
-                    query += "WHERE "
-                else:
-                    query += "AND "
-                # Full-text search across multiple fields
-                query += """
-                (
-                    toLower(d.title) CONTAINS toLower($search_query) OR
-                    toLower(d.name) CONTAINS toLower($search_query) OR
-                    toLower(COALESCE(d.description, '')) CONTAINS toLower($search_query)
-                )
-                """
-
-            # Add return statement with sorting
-            query += f"""
-            RETURN d.doc_id as doc_id, 
-                   COALESCE(d.title, d.name) as title, 
-                   COALESCE(d.is_indexed, false) as is_indexed,
-                   COALESCE(d.name, '') as name, 
-                   COALESCE(d.file_type, '') as file_type, 
-                   COALESCE(d.description, '') as description,
-                   COALESCE(d.language, 'en') as language,
-                   COALESCE(d.size, 0) as size,
-                   COALESCE(d.page_count, 0) as page_count,
-                   COALESCE(d.chunk_count, 0) as chunk_count,
-                   COALESCE(d.created_at, d.created, datetime()) as created_at,
-                   COALESCE(d.tags, []) as tags,
-                   COALESCE(d.category, '') as category,
-                   COALESCE(d.author, '') as author,
-                   COALESCE(d.status, 'active') as status
-            ORDER BY d.{sort_by} {sort_order}
-            SKIP $skip LIMIT $limit
-            """
-
-            # Execute the query with parameters
-            result = session.run(
-                query,
-                skip=skip,
-                limit=limit,
-                filter_tags=filter_tags if filter_tags else [],
-                filter_status=filter_status if filter_status else [],
-                search_query=search_query if search_query else ""
+        # Get RAG system for Qdrant access
+        rag_system = await get_rag_system()
+        
+        if not rag_system:
+            logger.warning("RAG system not available for document listing")
+            return []
+        
+        # Build filter criteria
+        filter_conditions = []
+        
+        # Add tag filter if provided
+        if filter_tags and len(filter_tags) > 0:
+            from qdrant_client.models import FieldCondition, MatchAny
+            tag_filter = FieldCondition(
+                key="tags",
+                match=MatchAny(any=filter_tags)
+            )
+            filter_conditions.append(tag_filter)
+            
+        # Add status filter if provided
+        if filter_status and len(filter_status) > 0:
+            from qdrant_client.models import FieldCondition, MatchAny
+            status_filter = FieldCondition(
+                key="status",
+                match=MatchAny(any=filter_status)
+            )
+            filter_conditions.append(status_filter)
+            
+        # Add file_type filter if provided
+        if file_type:
+            from qdrant_client.models import FieldCondition, MatchValue
+            file_type_filter = FieldCondition(
+                key="file_type",
+                match=MatchValue(value=file_type)
+            )
+            filter_conditions.append(file_type_filter)
+            
+        # Add category filter if provided
+        if category:
+            from qdrant_client.models import FieldCondition, MatchValue
+            category_filter = FieldCondition(
+                key="category",
+                match=MatchValue(value=category)
+            )
+            filter_conditions.append(category_filter)
+            
+        # Add language filter if provided
+        if language:
+            from qdrant_client.models import FieldCondition, MatchValue
+            language_filter = FieldCondition(
+                key="language",
+                match=MatchValue(value=language)
+            )
+            filter_conditions.append(language_filter)
+            
+        # Create filter object if we have conditions
+        query_filter = None
+        if filter_conditions:
+            from qdrant_client.models import Filter
+            query_filter = Filter(
+                must=filter_conditions
             )
 
-            # Process the results
-            for record in result:
-                doc = {
-                    "doc_id": record["doc_id"],
-                    "title": record["title"],
-                    "name": record["name"],
-                    "is_indexed": record["is_indexed"],
-                    "file_type": record["file_type"],
-                    "description": record["description"],
-                    "language": record["language"],
-                    "size": record["size"],
-                    "page_count": record["page_count"],
-                    "chunk_count": record["chunk_count"],
-                    "created_at": record["created_at"],
-                    "tags": record["tags"],
-                    "category": record["category"],
-                    "author": record["author"],
-                    "status": record["status"]
-                }
+        # Get documents from Qdrant metadata collection
+        try:
+            # Get all points from metadata collection
+            scroll_params = {
+                "collection_name": rag_system.metadata_collection_name,
+                "limit": limit,  # Use the limit from the request
+                "offset": skip, # Use the skip (offset) from the request
+                "with_payload": True,
+                "with_vectors": False,
+            }
+            
+            # Only add filter if we have conditions
+            if query_filter:
+                scroll_params["filter"] = query_filter
+                
+            scroll_result = rag_system.qdrant_client.scroll(**scroll_params)
+            
+            metadata_points = scroll_result[0] if scroll_result and len(scroll_result) > 0 else []
+            
+            # Filter by search query if provided
+            if search_query:
+                filtered_points = []
+                search_query = search_query.lower()
+                for point in metadata_points:
+                    payload = point.payload
+                    if not payload:
+                        continue
+                    
+                    # Search in title, description, and other fields
+                    title = payload.get("title", "").lower()
+                    description = payload.get("description", "").lower()
+                    file_name = payload.get("name", "").lower()
+                    original_filename = payload.get("original_filename", "").lower()
+                    
+                    if (search_query in title or 
+                        search_query in description or 
+                        search_query in file_name or
+                        search_query in original_filename):
+                        filtered_points.append(point)
+                
+                metadata_points = filtered_points
+            
+            # Sort the points
+            def get_sort_key(point):
+                payload = point.payload if point.payload else {}
+                if sort_by == "created_at":
+                    return payload.get("created_at", "")
+                elif sort_by == "title":
+                    return payload.get("title", "").lower()
+                elif sort_by == "file_type":
+                    return payload.get("file_type", "").lower()
+                elif sort_by == "size":
+                    return payload.get("size", 0)
+                elif sort_by == "language":
+                    return payload.get("language", "").lower()
+                return ""
+            
+            metadata_points.sort(
+                key=get_sort_key,
+                reverse=(sort_order == "desc")
+            )
+            
+            # Apply pagination - THIS IS NO LONGER NEEDED AS QDRANT HANDLES IT
+            # paginated_points = metadata_points[skip:skip+limit]
+            paginated_points = metadata_points # Qdrant already paginated
+            
+            # Convert to DocumentMetadata objects
+            for point in paginated_points:
+                payload = point.payload
+                if not payload:
+                    continue
+                
+                # Extract document metadata
+                doc = DocumentMetadata(
+                    doc_id=payload.get("doc_id", ""),
+                    title=payload.get("title", "Untitled"),
+                    name=payload.get("name", payload.get("original_filename", "Document " + payload.get("doc_id", "")[:8])),
+                    is_indexed=payload.get("is_indexed", False),
+                    file_type=payload.get("file_type", ""),
+                    description=payload.get("description", ""),
+                    language=payload.get("language", "en"),
+                    size=payload.get("size", 0),
+                    page_count=payload.get("page_count", 0),
+                    chunk_count=payload.get("chunk_count", 0),
+                    created_at=payload.get("created_at", datetime.now().isoformat()),
+                    tags=payload.get("tags", []),
+                    category=payload.get("category", ""),
+                    author=payload.get("author", ""),
+                    status=payload.get("status", "active")
+                )
                 documents.append(doc)
+                
+        except Exception as e:
+            logger.error(f"Error fetching documents from Qdrant: {str(e)}")
 
     except Exception as e:
         logger.error(f"Error fetching document list: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        neo4j_driver.close()
 
     return documents
-
-
-@router.get("/stats", response_model=DocumentStatsResponse)
-async def get_document_stats():
-    """Get statistics about documents in the system."""
-    try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
-
-        with driver.session() as session:
-            # Get total document count
-            total_doc_result = session.run("MATCH (d:Document) RETURN count(d) as count")
-            total_documents = total_doc_result.single()["count"]
-
-            # Get total chunk count
-            total_chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) as count")
-            total_chunks = total_chunk_result.single()["count"]
-
-            # Get documents by type
-            type_result = session.run(
-                """
-                MATCH (d:Document)
-                RETURN COALESCE(d.file_type, d.filetype) as type, count(d) as count
-                ORDER BY count DESC
-                """
-            )
-            documents_by_type = {record["type"] or "unknown": record["count"] for record in type_result}
-
-            # Get documents by language
-            lang_result = session.run(
-                """
-                MATCH (d:Document)
-                RETURN d.language as language, count(d) as count
-                ORDER BY count DESC
-                """
-            )
-            documents_by_language = {record["language"] or "unknown": record["count"] for record in lang_result}
-
-            # Get recent uploads
-            recent_result = session.run(
-                """
-                MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title, d.created_at as created,
-                       COALESCE(d.file_type, d.filetype) as file_type, d.language as language,
-                       d.original_filename as filename, d.size as size
-                ORDER BY d.created_at DESC
-                LIMIT 5
-                """
-            )
-            
-            # Convert Neo4j DateTime objects to ISO format strings
-            recent_uploads = []
-            for record in recent_result:
-                record_dict = dict(record)
-                # Convert Neo4j DateTime to ISO string if present
-                if isinstance(record_dict.get('created'), Neo4jDateTime):
-                    created_dt = record_dict['created']
-                    record_dict['created'] = datetime(
-                        created_dt.year, created_dt.month, created_dt.day,
-                        created_dt.hour, created_dt.minute, created_dt.second,
-                        created_dt.nanosecond // 1000000
-                    ).isoformat()
-                recent_uploads.append(record_dict)
-
-            # Calculate total storage
-            total_storage = 0
-            if total_documents > 0:
-                storage_result = session.run("MATCH (d:Document) RETURN sum(d.size) as total_size")
-                total_storage = storage_result.single()["total_size"] or 0
-
-            # Convert to MB
-            total_storage_mb = round(total_storage / (1024 * 1024), 2)
-
-            return DocumentStatsResponse(
-                total_documents=total_documents,
-                total_chunks=total_chunks,
-                documents_by_type=documents_by_type,
-                documents_by_language=documents_by_language,
-                recent_uploads=recent_uploads,
-                total_storage_mb=total_storage_mb
-            )
-
-    except Exception as e:
-        logger.error(f"Error retrieving document statistics: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving document statistics: {str(e)}"
-        )
 
 
 @router.get("/parsers", response_model=Dict[str, List[Dict[str, str]]])
@@ -472,93 +518,6 @@ def get_parser_description(parser_type: ParserType) -> str:
         ParserType.LLAMAPARSE: "AI-powered document parser based on LlamaIndex with advanced semantic understanding"
     }
     return descriptions.get(parser_type, "Document parser")
-
-@router.post("/reindex-all", response_model=Dict[str, Any])
-async def reindex_all_documents(force: bool = False):
-    """Reindex all documents in the vector store."""
-    try:
-        # Get dependencies
-        driver = await get_neo4j_driver()
-        rag_system = await get_rag_system()
-
-        # Get all document IDs from Neo4j
-        with driver.session() as session:
-            docs_result = session.run(
-                """
-                MATCH (d:Document)
-                RETURN d.doc_id as doc_id, d.title as title, d.is_indexed as is_indexed
-                """
-            )
-            
-            documents = []
-            for record in docs_result:
-                doc_id = record["doc_id"]
-                title = record["title"]
-                is_indexed = record["is_indexed"]
-                
-                # Skip already indexed documents unless force is True
-                if not force and is_indexed:
-                    continue
-                    
-                documents.append({
-                    "doc_id": doc_id,
-                    "title": title
-                })
-
-        # No documents to reindex
-        if not documents:
-            return {
-                "status": "success",
-                "message": "No documents need reindexing",
-                "total": 0,
-                "documents": []
-            }
-            
-        # Reindex each document
-        results = []
-        for doc in documents:
-            doc_id = doc["doc_id"]
-            title = doc["title"]
-            
-            try:
-                logger.info(f"Reindexing document: {doc_id} - {title}")
-                result = rag_system.index_document(doc_id, force_reindex=True)
-                
-                # Add document info to results
-                doc_result = {
-                    "doc_id": doc_id,
-                    "title": title,
-                    "status": result.get("status", "unknown"),
-                    "vector_count": result.get("vector_count", 0)
-                }
-                results.append(doc_result)
-                
-                # Don't overload the system
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error reindexing document {doc_id}: {str(e)}")
-                results.append({
-                    "doc_id": doc_id,
-                    "title": title,
-                    "status": "error",
-                    "error": str(e)
-                })
-
-        return {
-            "status": "success",
-            "message": f"Reindexed {len(results)} documents",
-            "total": len(results),
-            "documents": results
-        }
-
-    except Exception as e:
-        logger.error(f"Error reindexing all documents: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error reindexing all documents: {str(e)}"
-        )
-
 
 @router.get("/config", response_model=DocumentConfig)
 async def get_document_config():
@@ -657,89 +616,14 @@ async def update_document_config(config: DocumentConfigUpdate):
         )
 
 
-@router.get("/{doc_id}", response_model=Dict[str, Any])
-async def get_document(doc_id: str, include_chunks: bool = False, include_entities: bool = False):
-    """Get document metadata and optionally chunks and entities."""
-    try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
-
-        with driver.session() as session:
-            # Get document metadata
-            doc_result = session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})
-                RETURN d.doc_id as doc_id, 
-                       COALESCE(d.title, d.name) as title, 
-                       COALESCE(d.name, '') as name,
-                       COALESCE(d.is_indexed, false) as is_indexed,
-                       COALESCE(d.file_type, '') as file_type, 
-                       COALESCE(d.description, '') as description,
-                       COALESCE(d.language, 'en') as language,
-                       COALESCE(d.size, 0) as size,
-                       COALESCE(d.page_count, 0) as page_count,
-                       COALESCE(d.chunk_count, 0) as chunk_count,
-                       COALESCE(d.created_at, d.created, datetime()) as created_at,
-                       COALESCE(d.indexed_at, null) as indexed_at,
-                       COALESCE(d.tags, []) as tags,
-                       COALESCE(d.category, '') as category,
-                       COALESCE(d.author, '') as author,
-                       COALESCE(d.status, 'active') as status
-                """,
-                doc_id=doc_id
-            )
-            
-            record = doc_result.single()
-            if not record:
-                raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
-                
-            document = {
-                "doc_id": record["doc_id"],
-                "title": record["title"],
-                "name": record["name"],
-                "is_indexed": record["is_indexed"],
-                "file_type": record["file_type"],
-                "description": record["description"],
-                "language": record["language"],
-                "size": record["size"],
-                "page_count": record["page_count"],
-                "chunk_count": record["chunk_count"],
-                "created_at": record["created_at"],
-                "indexed_at": record["indexed_at"],
-                "tags": record["tags"],
-                "category": record["category"],
-                "author": record["author"],
-                "status": record["status"]
-            }
-            
-            # Get chunk count
-            chunk_result = session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                RETURN count(c) as chunk_count
-                """,
-                doc_id=doc_id
-            )
-            
-            chunk_record = chunk_result.single()
-            document["chunk_count"] = chunk_record["chunk_count"] if chunk_record else 0
-            
-            return document
-            
-    except Exception as e:
-        logger.error(f"Error getting document {doc_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    finally:
-        neo4j_driver.close()
-
-
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: str, delete_from_index: bool = True):
     """Delete document and its chunks from Neo4j and optionally from vector store."""
     try:
         # Get dependencies
-        driver = await get_neo4j_driver()
         rag_system = await get_rag_system()
+        chunks_deleted = 0
+        index_message = ""
 
         # First try to delete from vector index if requested
         if delete_from_index:
@@ -747,261 +631,27 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
                 # Use RAG system to delete from index
                 logger.info(f"Deleting document {doc_id} from vector index")
                 rag_deleted = rag_system.delete_document(doc_id)
-                index_message = ", and deleted from vector index"
                 
-                if not rag_deleted:
+                if rag_deleted:
+                    # Get approximate count of chunks that were deleted
+                    # The actual chunk count is already deleted, so we can't query it directly
+                    # For UI purposes, we'll return a success message
+                    chunks_deleted = 1  # At minimum, one document was deleted
+                    index_message = ", and deleted from vector index"
+                else:
                     logger.warning(f"Document {doc_id} may not exist in vector index or encountered errors during deletion")
+                    index_message = ", but document may not exist in vector index"
             except Exception as e:
-                # Log error but continue - we still want to delete from Neo4j
+                # Log error but continue
                 logger.error(f"Error deleting document from vector index: {str(e)}")
                 index_message = f", but failed to delete from vector index: {str(e)}"
                 
-                # Don't raise exception here - continue with Neo4j deletion
-
-        # Then delete from Neo4j using a transaction to ensure atomicity
-        try:
-            with driver.session() as session:
-                # Check if document exists
-                doc_check = session.run(
-                    "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
-                    doc_id=doc_id
-                )
-
-                doc_exists = doc_check.single()["count"] > 0
-                
-                if not doc_exists:
-                    # Before raising a 404, check if there are orphaned chunks to clean up
-                    chunk_check = session.run(
-                        """
-                        MATCH (c:Chunk {doc_id: $doc_id})
-                        RETURN count(c) as chunk_count
-                        """,
-                        doc_id=doc_id
-                    )
-                    
-                    chunk_count = chunk_check.single()["chunk_count"]
-                    
-                    if chunk_count > 0:
-                        # We have orphaned chunks but no document - clean them up
-                        logger.warning(f"Document {doc_id} not found, but found {chunk_count} orphaned chunks to clean up")
-                        
-                        # Use a transaction to delete orphaned chunks
-                        tx = session.begin_transaction()
-                        try:
-                            # Delete relationships from chunks first
-                            tx.run(
-                                """
-                                MATCH (c:Chunk {doc_id: $doc_id})
-                                OPTIONAL MATCH (c)-[r]-()
-                                DELETE r
-                                """,
-                                doc_id=doc_id
-                            )
-                            
-                            # Then delete the chunks
-                            tx.run(
-                                """
-                                MATCH (c:Chunk {doc_id: $doc_id})
-                                DELETE c
-                                """,
-                                doc_id=doc_id
-                            )
-                            
-                            tx.commit()
-                            logger.info(f"Cleaned up {chunk_count} orphaned chunks for document {doc_id}")
-                            
-                            return {
-                                "doc_id": doc_id,
-                                "deleted": False,
-                                "document_found": False,
-                                "chunks_deleted": chunk_count,
-                                "message": f"Document not found but {chunk_count} orphaned chunks were cleaned up{locals().get('index_message', '')}"
-                            }
-                        except Exception as tx_error:
-                            tx.rollback()
-                            logger.error(f"Error cleaning up orphaned chunks: {str(tx_error)}")
-                            raise tx_error
-                    else:
-                        # No document and no chunks - nothing to do
-                        raise HTTPException(
-                            status_code=404,
-                            detail=f"Document not found: {doc_id}"
-                        )
-                
-                # First count the chunks that will be deleted
-                count_result = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                    RETURN count(c) as chunk_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                chunks_count = count_result.single()["chunk_count"]
-                if chunks_count is None:
-                    chunks_count = 0
-                
-                # Also look for chunks with the doc_id but missing the proper relationship
-                missing_rel_result = session.run(
-                    """
-                    MATCH (c:Chunk {doc_id: $doc_id})
-                    WHERE NOT EXISTS {
-                        MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
-                    }
-                    RETURN count(c) as orphan_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                orphan_count = missing_rel_result.single()["orphan_count"]
-                if orphan_count > 0:
-                    logger.warning(f"Found {orphan_count} chunks missing proper relationships to document {doc_id}")
-                
-                total_chunks = chunks_count + orphan_count
-                logger.info(f"Found {total_chunks} total chunks to delete for document {doc_id}")
-                
-                # Use a transaction for the deletion to ensure atomicity
-                tx = session.begin_transaction()
-                try:
-                    # First delete the relationships between document-connected chunks and other nodes
-                    if chunks_count > 0:
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            OPTIONAL MATCH (c)-[cr]-()
-                            DELETE cr
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        # Then delete the document-connected chunk nodes themselves
-                        tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                            DETACH DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
-                    
-                    # Delete any orphaned chunks with the same doc_id but missing relationships
-                    if orphan_count > 0:
-                        tx.run(
-                            """
-                            MATCH (c:Chunk {doc_id: $doc_id})
-                            WHERE NOT EXISTS {
-                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
-                            }
-                            OPTIONAL MATCH (c)-[r]-()
-                            DELETE r
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        tx.run(
-                            """
-                            MATCH (c:Chunk {doc_id: $doc_id})
-                            WHERE NOT EXISTS {
-                                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c)
-                            }
-                            DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
-                    
-                    # Delete document relationships
-                    tx.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        OPTIONAL MATCH (d)-[r]-()
-                        DELETE r
-                        """,
-                        doc_id=doc_id
-                    )
-                    
-                    # Finally delete the document node
-                    tx.run(
-                        """
-                        MATCH (d:Document {doc_id: $doc_id})
-                        DELETE d
-                        """,
-                        doc_id=doc_id
-                    )
-                    
-                    # Commit the transaction
-                    tx.commit()
-                    logger.info(f"Deleted document {doc_id} with {total_chunks} chunks from Neo4j")
-                    chunks_deleted = total_chunks
-                except Exception as tx_error:
-                    # Rollback on error
-                    tx.rollback()
-                    logger.error(f"Transaction error while deleting document from Neo4j: {str(tx_error)}")
-                    raise tx_error
-                
-                # Verify deletion was successful
-                verify_result = session.run(
-                    """
-                    MATCH (c:Chunk {doc_id: $doc_id})
-                    RETURN count(c) as remaining_chunks
-                    """,
-                    doc_id=doc_id
-                )
-                
-                remaining_chunks = verify_result.single()["remaining_chunks"]
-                if remaining_chunks > 0:
-                    logger.warning(f"Found {remaining_chunks} chunks still remaining after deletion")
-                    
-                    # Try one more direct deletion of any remaining chunks
-                    cleanup_tx = session.begin_transaction()
-                    try:
-                        cleanup_tx.run(
-                            """
-                            MATCH (c:Chunk {doc_id: $doc_id})
-                            OPTIONAL MATCH (c)-[r]-()
-                            DELETE r
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        cleanup_tx.run(
-                            """
-                            MATCH (c:Chunk {doc_id: $doc_id})
-                            DELETE c
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        cleanup_tx.commit()
-                        logger.info(f"Cleaned up {remaining_chunks} remaining chunks in verification step")
-                        chunks_deleted += remaining_chunks
-                    except Exception as cleanup_error:
-                        cleanup_tx.rollback()
-                        logger.error(f"Error in verification cleanup: {str(cleanup_error)}")
-                
-        except Exception as neo4j_error:
-            logger.error(f"Error deleting document from Neo4j: {str(neo4j_error)}")
-            # Check if another error handling has already set index_message
-            if not locals().get('index_message'):
-                index_message = ""
-                
-            # If we failed to delete from both vector store and Neo4j, that's a bigger problem
-            if "index_message" in locals() and "failed to delete from vector index" in index_message:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to delete document from both Neo4j and vector index. Neo4j error: {str(neo4j_error)}"
-                )
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error deleting document from Neo4j: {str(neo4j_error)}"
-                )
-
-        # If we get here, at least Neo4j deletion was successful
+        # If we get here, document deletion was successful
         return {
             "doc_id": doc_id,
             "deleted": True,
             "chunks_deleted": chunks_deleted,
-            "message": f"Document and {chunks_deleted} chunks deleted from database{locals().get('index_message', '')}"
+            "message": f"Document and metadata deleted from database{index_message}"
         }
 
     except HTTPException as he:
@@ -1015,104 +665,14 @@ async def delete_document(doc_id: str, delete_from_index: bool = True):
         )
 
 
-@router.post("/{doc_id}/update-language")
-async def update_document_language(doc_id: str, language_code: str = Form(...)):
-    """Update document language and re-index."""
-    try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
-        
-        # Get RAG system
-        rag_system = await get_rag_system()
-
-        with driver.session() as session:
-            # Check if document exists
-            doc_check = session.run(
-                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
-                doc_id=doc_id
-            )
-
-            if doc_check.single()["count"] == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document {doc_id} not found"
-                )
-                
-            # Update language
-            update_result = session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})
-                SET d.language = $language_code,
-                    d.is_indexed = false
-                RETURN d.title as title
-                """,
-                doc_id=doc_id,
-                language_code=language_code
-            )
-            
-            doc_title = update_result.single()["title"]
-            
-            # Also update chunks language
-            chunks_result = session.run(
-                """
-                MATCH (d:Document {doc_id: $doc_id})-[:CONTAINS]->(c:Chunk)
-                SET c.language = $language_code
-                RETURN count(c) as chunk_count
-                """,
-                doc_id=doc_id,
-                language_code=language_code
-            )
-            
-            chunk_count = chunks_result.single()["chunk_count"]
-            
-            # First, delete from current vector collection
-            delete_result = rag_system.delete_document(doc_id)
-            
-            # Then reindex with new language
-            index_result = rag_system.index_document(doc_id, force_reindex=True)
-            
-            return {
-                "doc_id": doc_id,
-                "title": doc_title,
-                "language": language_code,
-                "chunk_count": chunk_count,
-                "reindexed": True if index_result and index_result.get("vector_count", 0) > 0 else False,
-                "vector_count": index_result.get("vector_count", 0) if index_result else 0,
-                "message": f"Document language updated to {language_code} and document re-indexed"
-            }
-            
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error updating document language: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error updating document language: {str(e)}"
-        )
-
-
 @router.post("/index/{doc_id}", response_model=DocumentIndexStatus)
 async def index_document(doc_id: str, force_reindex: bool = False):
     """Index a document in the vector store."""
     try:
-        # First check if document exists
-        neo4j_driver = await get_neo4j_driver()
-        
-        with neo4j_driver.session() as session:
-            result = session.run(
-                "MATCH (d:Document {doc_id: $doc_id}) RETURN count(d) as count",
-                doc_id=doc_id
-            )
-            
-            if result.single()["count"] == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document {doc_id} not found"
-                )
-        
+                
         # Get RAG system and index document
         rag_system = await get_rag_system()
-        index_result = rag_system.index_document(doc_id, force_reindex=force_reindex)
+        index_result = rag_system.index_document(doc_id)
         
         # Check the result format
         if isinstance(index_result, dict):
@@ -1176,11 +736,10 @@ async def search_documents(request: DocumentSearchRequest):
 
         # Use RAG system to search
         try:
-            results = rag_system.retrieve(
+            results = rag_system.retrieve_context(
                 query=request.query,
                 top_k=request.limit,
-                filter_criteria=request.filters,
-                use_hybrid=hybrid
+                filters=request.filters
             )
         except Exception as retrieval_error:
             logger.error(f"Error during document retrieval: {str(retrieval_error)}")
@@ -1228,264 +787,407 @@ async def search_documents(request: DocumentSearchRequest):
         )
 
 
-@router.post("/maintenance/standardize-properties", response_model=Dict[str, Any])
-async def standardize_document_properties():
-    """
-    Maintenance endpoint to standardize document properties.
-    This ensures all documents have consistent property names.
-    """
+@router.get("/stats", response_model=DocumentStatsResponse)
+async def get_document_stats():
+    """Get document statistics."""
     try:
-        # Get neo4j driver
-        driver = await get_neo4j_driver()
-
-        with driver.session() as session:
-            # Standardize file_type property
-            file_type_result = session.run(
-                """
-                MATCH (d:Document)
-                WHERE d.filetype IS NOT NULL AND d.file_type IS NULL
-                SET d.file_type = d.filetype
-                RETURN count(d) as updated_count
-                """
-            )
-            updated_file_type = file_type_result.single()["updated_count"]
-
-            # Add other property standardizations here if needed
-
-            return {
-                "status": "success",
-                "message": f"Standardized document properties successfully",
-                "updated_file_type_count": updated_file_type
-            }
-
-    except Exception as e:
-        logger.error(f"Error standardizing document properties: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error standardizing document properties: {str(e)}"
-        )
-
-
-@router.post("/maintenance/cleanup-orphaned-chunks", response_model=Dict[str, Any])
-async def cleanup_orphaned_chunks():
-    """Maintenance endpoint to clean up orphaned chunks that have no associated document."""
-    try:
-        # Get Neo4j driver
-        driver = await get_neo4j_driver()
+        # Initialize counters
+        total_documents = 0
+        total_chunks = 0
+        total_storage_bytes = 0
+        documents_by_type = {}
+        documents_by_language = {}
+        recent_uploads = []
         
-        with driver.session() as session:
-            # First count all orphaned chunks
-            count_result = session.run(
-                """
-                MATCH (c:Chunk)
-                WHERE NOT EXISTS {
-                    MATCH (d:Document {doc_id: c.doc_id})
-                }
-                RETURN count(c) as orphan_count
-                """
-            )
-            
-            orphan_count = count_result.single()["orphan_count"]
-            
-            if orphan_count == 0:
-                return {
-                    "status": "success",
-                    "message": "No orphaned chunks found to clean up",
-                    "chunks_deleted": 0
-                }
-            
-            # Get the doc_ids of orphaned chunks for reporting
-            doc_ids_result = session.run(
-                """
-                MATCH (c:Chunk)
-                WHERE NOT EXISTS {
-                    MATCH (d:Document {doc_id: c.doc_id})
-                }
-                RETURN c.doc_id as doc_id, count(c) as chunk_count
-                """
-            )
-            
-            orphaned_docs = [{"doc_id": record["doc_id"], "chunk_count": record["chunk_count"]} 
-                            for record in doc_ids_result]
-            
-            # Start a transaction for deletion
-            tx = session.begin_transaction()
+        # Get documents from Qdrant metadata collection
+        rag_system = await get_rag_system()
+        if rag_system:
             try:
-                # Delete relationships from orphaned chunks first
-                rel_result = tx.run(
-                    """
-                    MATCH (c:Chunk)
-                    WHERE NOT EXISTS {
-                        MATCH (d:Document {doc_id: c.doc_id})
-                    }
-                    OPTIONAL MATCH (c)-[r]-()
-                    DELETE r
-                    RETURN count(r) as rel_count
-                    """
+                # Get document metadata
+                scroll_result = rag_system.qdrant_client.scroll(
+                    collection_name=rag_system.metadata_collection_name,
+                    limit=100,  # Limit to 100 documents for stats
+                    with_payload=True,
+                    with_vectors=False,
                 )
                 
-                rel_count = rel_result.single()["rel_count"]
+                metadata_points = scroll_result[0] if scroll_result and len(scroll_result) > 0 else []
                 
-                # Now delete the orphaned chunks
-                tx.run(
-                    """
-                    MATCH (c:Chunk)
-                    WHERE NOT EXISTS {
-                        MATCH (d:Document {doc_id: c.doc_id})
-                    }
-                    DELETE c
-                    """
-                )
+                # Collect stats from document metadata
+                for point in metadata_points:
+                    if not point.payload:
+                        continue
+                    
+                    total_documents += 1
+                    
+                    # Increment chunk count
+                    chunk_count = point.payload.get("chunk_count", 0)
+                    total_chunks += chunk_count
+                    
+                    # Track document size
+                    size = point.payload.get("size", 0)
+                    if size:
+                        total_storage_bytes += size
+                    else:
+                        # Log issue for debugging
+                        logger.warning(f"Document {point.payload.get('doc_id', 'unknown')} has no size")
+                    
+                    # Track document types
+                    file_type = point.payload.get("file_type", "unknown")
+                    if file_type in documents_by_type:
+                        documents_by_type[file_type] += 1
+                    else:
+                        documents_by_type[file_type] = 1
+                    
+                    # Track document languages
+                    language = point.payload.get("language", "unknown")
+                    if language in documents_by_language:
+                        documents_by_language[language] += 1
+                    else:
+                        documents_by_language[language] = 1
+                    
+                    # Add to recent uploads (limited to 5)
+                    if len(recent_uploads) < 5:
+                        recent_uploads.append({
+                            "doc_id": point.payload.get("doc_id", ""),
+                            "title": point.payload.get("title", ""),
+                            "file_type": file_type,
+                            "created": point.payload.get("created_at", ""),
+                            "indexed": point.payload.get("is_indexed", False),
+                            "size": size
+                        })
                 
-                tx.commit()
-                logger.info(f"Cleaned up {orphan_count} orphaned chunks with {rel_count} relationships")
+                # Convert total storage to MB
+                total_storage_mb = total_storage_bytes / (1024 * 1024)
+            except Exception as e:
+                logger.error(f"Error fetching document stats from Qdrant: {str(e)}")
                 
-                return {
-                    "status": "success",
-                    "message": f"Successfully cleaned up {orphan_count} orphaned chunks",
-                    "chunks_deleted": orphan_count,
-                    "relationships_deleted": rel_count,
-                    "affected_documents": orphaned_docs
-                }
-            except Exception as tx_error:
-                tx.rollback()
-                logger.error(f"Error in cleanup transaction: {str(tx_error)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Transaction error during cleanup: {str(tx_error)}"
-                )
-    
+        return {
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "documents_by_type": documents_by_type,
+            "documents_by_language": documents_by_language,
+            "recent_uploads": recent_uploads,
+            "total_storage_mb": round(total_storage_mb, 2) if 'total_storage_mb' in locals() else 0.0
+        }
     except Exception as e:
-        logger.error(f"Error in orphaned chunks cleanup: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error cleaning up orphaned chunks: {str(e)}"
-        )
+        logger.error(f"Error generating document statistics: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to generate document statistics")
 
 
-@router.delete("/maintenance/force-delete-chunks/{doc_id}", response_model=Dict[str, Any])
-async def force_delete_chunks(doc_id: str):
-    """Force delete all chunks with a given doc_id, even if the document itself doesn't exist."""
+@router.post("/repair-metadata", response_model=Dict[str, Any])
+async def repair_document_metadata(doc_id: Optional[str] = Query(None, description="Optional document ID to repair")):
+    """
+    Repair document metadata by creating default metadata for documents with missing metadata.
+    If doc_id is provided, repairs only that document, otherwise repairs all documents.
+    """
     try:
-        # Get Neo4j driver
-        driver = await get_neo4j_driver()
+        # Get RAG system
+        rag_system = await get_rag_system()
         
-        with driver.session() as session:
-            # First count the chunks to delete
-            count_result = session.run(
-                """
-                MATCH (c:Chunk {doc_id: $doc_id})
-                RETURN count(c) as chunk_count
-                """,
-                doc_id=doc_id
-            )
-            
-            chunk_count = count_result.single()["chunk_count"]
-            
-            if chunk_count == 0:
-                return {
-                    "status": "success",
-                    "message": f"No chunks found for document ID {doc_id}",
-                    "chunks_deleted": 0
-                }
-            
-            # Start a transaction for deletion
-            tx = session.begin_transaction()
-            try:
-                # Delete relationships from chunks first
-                rel_result = tx.run(
-                    """
-                    MATCH (c:Chunk {doc_id: $doc_id})
-                    OPTIONAL MATCH (c)-[r]-()
-                    DELETE r
-                    RETURN count(r) as rel_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                rel_count = rel_result.single()["rel_count"]
-                
-                # Now delete the chunks
-                tx.run(
-                    """
-                    MATCH (c:Chunk {doc_id: $doc_id})
-                    DELETE c
-                    """,
-                    doc_id=doc_id
-                )
-                
-                tx.commit()
-                logger.info(f"Force deleted {chunk_count} chunks for document {doc_id}")
-                
-                # Also check if document exists
-                doc_check = session.run(
-                    """
-                    MATCH (d:Document {doc_id: $doc_id})
-                    RETURN count(d) as doc_count
-                    """,
-                    doc_id=doc_id
-                )
-                
-                doc_exists = doc_check.single()["doc_count"] > 0
-                
-                # If document still exists and user wants to delete chunks, they probably
-                # want to delete the document too
-                if doc_exists:
-                    doc_tx = session.begin_transaction()
-                    try:
-                        # Delete document relationships
-                        doc_tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            OPTIONAL MATCH (d)-[r]-()
-                            DELETE r
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        # Delete document node
-                        doc_tx.run(
-                            """
-                            MATCH (d:Document {doc_id: $doc_id})
-                            DELETE d
-                            """,
-                            doc_id=doc_id
-                        )
-                        
-                        doc_tx.commit()
-                        logger.info(f"Also deleted document node for {doc_id}")
-                        
-                        return {
-                            "status": "success",
-                            "message": f"Successfully force deleted {chunk_count} chunks and document node for {doc_id}",
-                            "chunks_deleted": chunk_count,
-                            "relationships_deleted": rel_count,
-                            "document_deleted": True
-                        }
-                    except Exception as doc_error:
-                        doc_tx.rollback()
-                        logger.error(f"Error deleting document node: {str(doc_error)}")
-                        # Continue with just reporting chunk deletion
-                
-                return {
-                    "status": "success",
-                    "message": f"Successfully force deleted {chunk_count} chunks for document {doc_id}",
-                    "chunks_deleted": chunk_count,
-                    "relationships_deleted": rel_count,
-                    "document_deleted": False
-                }
-                
-            except Exception as tx_error:
-                tx.rollback()
-                logger.error(f"Error in force delete transaction: {str(tx_error)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Transaction error during force delete: {str(tx_error)}"
-                )
-    
+        if not rag_system:
+            raise HTTPException(status_code=500, detail="RAG system not available")
+        
+        # Call the repair function
+        result = rag_system.repair_document_metadata(doc_id)
+        return result
     except Exception as e:
-        logger.error(f"Error force deleting chunks: {str(e)}")
+        logger.error(f"Error repairing document metadata: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error force deleting chunks: {str(e)}"
+            detail=f"Error repairing document metadata: {str(e)}"
         )
+
+@router.post("/repair-sizes", response_model=Dict[str, Any])
+async def repair_document_sizes():
+    """
+    Repair document sizes by calculating them from document chunks.
+    """
+    try:
+        # Get RAG system and document metadata
+        rag_system = await get_rag_system()
+        if not rag_system:
+            raise HTTPException(status_code=500, detail="RAG system not available")
+        
+        # Get all documents
+        search_result = rag_system.qdrant_client.scroll(
+            collection_name=rag_system.metadata_collection_name,
+            limit=100,
+            with_payload=True
+        )
+        
+        metadata_points = search_result[0] if search_result and len(search_result) > 0 else []
+        
+        updated_count = 0
+        failed_count = 0
+        
+        # Process each document
+        for point in metadata_points:
+            if not point.payload or "doc_id" not in point.payload:
+                continue
+                
+            doc_id = point.payload["doc_id"]
+            
+            try:
+                # Get document chunks
+                chunks = rag_system.qdrant_client.search(
+                    collection_name=rag_system.collection_name,
+                    query_vector=[0.0] * rag_system.embedding_dim,
+                    query_filter=qdrant_models.Filter(
+                        must=[
+                            qdrant_models.FieldCondition(
+                                key="doc_id",
+                                match=qdrant_models.MatchValue(value=doc_id)
+                            )
+                        ]
+                    ),
+                    limit=1000,
+                    with_vectors=False
+                )
+                
+                # Calculate size from chunks
+                total_size_bytes = 0
+                
+                for chunk in chunks:
+                    if not chunk.payload:
+                        continue
+                        
+                    # Try to get text from payload
+                    if "text" in chunk.payload and isinstance(chunk.payload["text"], str):
+                        total_size_bytes += len(chunk.payload["text"].encode('utf-8'))
+                        
+                    # Try to extract from _node_content
+                    elif "_node_content" in chunk.payload and isinstance(chunk.payload["_node_content"], str):
+                        try:
+                            node_content = json.loads(chunk.payload["_node_content"])
+                            if "text" in node_content and isinstance(node_content["text"], str):
+                                total_size_bytes += len(node_content["text"].encode('utf-8'))
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                
+                # Update metadata with correct size
+                if total_size_bytes > 0:
+                    # Get point ID for metadata document
+                    metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                    
+                    # Update existing metadata
+                    metadata = point.payload.copy()
+                    metadata["size"] = total_size_bytes
+                    
+                    # Upsert updated metadata
+                    rag_system.qdrant_client.upsert(
+                        collection_name=rag_system.metadata_collection_name,
+                        points=[
+                            qdrant_models.PointStruct(
+                                id=metadata_point_id,
+                                vector=[1.0],  # Dummy vector for metadata
+                                payload=metadata
+                            )
+                        ]
+                    )
+                    
+                    logger.info(f"Updated size for document {doc_id} to {total_size_bytes} bytes ({total_size_bytes/1024:.2f} KB)")
+                    updated_count += 1
+                else:
+                    logger.warning(f"Could not find text content for document {doc_id}")
+                    failed_count += 1
+            
+            except Exception as e:
+                logger.error(f"Error updating size for document {doc_id}: {str(e)}")
+                failed_count += 1
+        
+        return {
+            "status": "success",
+            "updated": updated_count,
+            "failed": failed_count,
+            "message": f"Updated sizes for {updated_count} documents, {failed_count} failed"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error repairing document sizes: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error repairing document sizes: {str(e)}"
+        )
+
+@router.post("/repair-file-types", response_model=Dict[str, Any])
+async def repair_document_file_types():
+    """
+    Repair document file types by extracting them from filenames.
+    """
+    try:
+        # Get RAG system and document metadata
+        rag_system = await get_rag_system()
+        if not rag_system:
+            raise HTTPException(status_code=500, detail="RAG system not available")
+        
+        # Get all documents
+        search_result = rag_system.qdrant_client.scroll(
+            collection_name=rag_system.metadata_collection_name,
+            limit=100,
+            with_payload=True
+        )
+        
+        metadata_points = search_result[0] if search_result and len(search_result) > 0 else []
+        
+        updated_count = 0
+        failed_count = 0
+        
+        # Map common extensions to standardized file types
+        extension_to_type = {
+            # Documents
+            "pdf": "pdf",
+            "doc": "doc",
+            "docx": "docx",
+            "txt": "txt",
+            "md": "md",
+            "markdown": "md",
+            "rtf": "rtf",
+            "odt": "odt",
+            # Spreadsheets
+            "xls": "xls",
+            "xlsx": "xlsx",
+            "csv": "csv",
+            "ods": "ods",
+            # Presentations
+            "ppt": "ppt",
+            "pptx": "pptx",
+            "odp": "odp",
+            # Web
+            "html": "html",
+            "htm": "html",
+            "xml": "xml",
+            "json": "json",
+            # Images
+            "jpg": "jpg",
+            "jpeg": "jpg",
+            "png": "png",
+            "gif": "gif",
+            "bmp": "bmp",
+            "svg": "svg"
+        }
+        
+        # Process each document
+        for point in metadata_points:
+            if not point.payload or "doc_id" not in point.payload:
+                continue
+                
+            doc_id = point.payload["doc_id"]
+            
+            try:
+                # Get the filename
+                original_filename = point.payload.get("original_filename") or point.payload.get("name")
+                current_file_type = point.payload.get("file_type")
+                
+                # Skip if already has a valid file type
+                if current_file_type and current_file_type != "unknown":
+                    continue
+                    
+                # Extract file type from filename
+                file_type = "unknown"
+                if original_filename and "." in original_filename:
+                    extension = original_filename.split(".")[-1].lower()
+                    file_type = extension_to_type.get(extension, extension)
+                    
+                # Update only if we found a valid file type
+                if file_type != "unknown":
+                    # Get point ID for metadata document
+                    metadata_point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, doc_id))
+                    
+                    # Update existing metadata
+                    metadata = point.payload.copy()
+                    metadata["file_type"] = file_type
+                    
+                    # Upsert updated metadata
+                    rag_system.qdrant_client.upsert(
+                        collection_name=rag_system.metadata_collection_name,
+                        points=[
+                            qdrant_models.PointStruct(
+                                id=metadata_point_id,
+                                vector=[1.0],  # Dummy vector for metadata
+                                payload=metadata
+                            )
+                        ]
+                    )
+                    
+                    logger.info(f"Updated file type for document {doc_id} to {file_type}")
+                    updated_count += 1
+                else:
+                    logger.warning(f"Could not determine file type for document {doc_id}")
+                    failed_count += 1
+            
+            except Exception as e:
+                logger.error(f"Error updating file type for document {doc_id}: {str(e)}")
+                failed_count += 1
+        
+        return {
+            "status": "success",
+            "updated": updated_count,
+            "failed": failed_count,
+            "message": f"Updated file types for {updated_count} documents, {failed_count} failed"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error repairing document file types: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error repairing document file types: {str(e)}"
+        )
+
+@router.post("/reprocess/{doc_id}", response_model=Dict[str, Any])
+async def reprocess_document(doc_id: str):
+    """
+    Force reprocessing of a document that has parsing or indexing issues.
+    
+    Args:
+        doc_id: Document ID to reprocess
+        
+    Returns:
+        Dict with operation status
+    """
+    logger.info(f"Received request to reprocess document: {doc_id}")
+    
+    # Get RAG system
+    rag_system = await get_rag_system()
+    
+    if not rag_system:
+        raise HTTPException(
+            status_code=500,
+            detail="RAG system is not initialized"
+        )
+    
+    # Force reprocessing of the document
+    result = rag_system.force_reprocess_document(doc_id)
+    
+    if result.get("status") == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("message", "Unknown error reprocessing document")
+        )
+    
+    logger.info(f"Document {doc_id} marked for reprocessing: {result}")
+    
+    # Now trigger actual reprocessing using the document parser
+    try:
+        # Get the document parser
+        doc_parser = await get_document_parser()
+        
+        # Initiate reprocessing
+        reprocess_result = await doc_parser.reprocess_document(doc_id)
+        
+        return {
+            "status": "success",
+            "message": f"Document {doc_id} reprocessing initiated",
+            "doc_id": doc_id,
+            "reprocess_result": reprocess_result
+        }
+    except Exception as e:
+        logger.error(f"Error initiating document reprocessing: {str(e)}")
+        return {
+            "status": "partial_success",
+            "message": f"Document {doc_id} marked for reprocessing but reprocessing failed: {str(e)}",
+            "doc_id": doc_id,
+            "result": result
+        }
+
+

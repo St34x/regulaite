@@ -50,6 +50,7 @@ transformers>=4.51.3
 celery>=5.5.1
 redis>=5.2.1
 flower>=2.0.1
+nest_asyncio>=1.6.0  # For nested async event loops
 
 # Added for agent visualization and documentation
 graphviz>=0.20.0  # For decision tree visualization

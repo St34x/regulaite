@@ -59,7 +59,9 @@ RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore spacy lang
     python -c "from sentence_transformers import SentenceTransformer; \
                 SentenceTransformer('all-MiniLM-L6-v2'); \
                 SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); \
-                SentenceTransformer('LaBSE')"
+                SentenceTransformer('LaBSE'); \
+                from sentence_transformers import CrossEncoder; \
+                CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2')"
 
 
 # Install dependency scanning tools and scan dependencies

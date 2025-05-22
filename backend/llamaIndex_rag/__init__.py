@@ -1,9 +1,11 @@
-# plugins/regul_aite/backend/llamaIndex_rag/__init__.py
 """
-LlamaIndex RAG integration module for RegulAite.
-Provides document indexing and retrieval capabilities using Neo4j and Qdrant with FastEmbed.
+Production-ready LlamaIndex RAG implementation with hallucination prevention and detection.
+
+This package provides a reliable RAG (Retrieval-Augmented Generation) implementation
+using LlamaIndex with techniques to minimize and detect hallucinations.
 """
 
-from .rag import RAGSystem
+from llamaIndex_rag.rag import RAGSystem
+from llamaIndex_rag.query_engine import RAGQueryEngine
 
-__all__ = ["RAGSystem"]
+__all__ = ["RAGSystem", "RAGQueryEngine"] 

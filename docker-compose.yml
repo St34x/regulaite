@@ -1,31 +1,6 @@
 # plugins/regul_aite/docker-compose.yml
 # RegulAite docker-compose configuration
 services:
-  neo4j:
-    image: neo4j:2025-community-bullseye
-    container_name: regulaite-neo4j
-    pull_policy: always
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    environment:
-      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
-      - NEO4J_PLUGINS=["apoc"]
-    # volumes:
-    #   - neo4j_data:/data
-    #   - neo4j_logs:/logs
-    #   - neo4j_import:/import
-    #   - neo4j_plugins:/plugins
-    networks:
-      - regulaite_network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER}", "-p", "${NEO4J_PASSWORD}", "RETURN 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-
   mariadb:
     image: mariadb:lts
     container_name: regulaite-mariadb
@@ -39,6 +14,7 @@ services:
       - MARIADB_DISABLE_UNIX_SOCKET=1
     volumes:
       - ./backend/config/mariadb:/etc/mysql/conf.d:ro
+      - ./backend/config/mariadb/initdb:/docker-entrypoint-initdb.d:ro
     ports:
       - "3306:3306"
     networks:
@@ -100,8 +76,6 @@ services:
       - regulaite_network
     restart: on-failure
     depends_on:
-      neo4j:
-        condition: service_healthy
       qdrant:
         condition: service_healthy
 
@@ -116,9 +90,6 @@ services:
       - "50051:50051"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NEO4J_URI=${NEO4J_URI}
-      - NEO4J_USER=${NEO4J_USER}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - MARIADB_HOST=mariadb
       - MARIADB_PORT=3306
       - MARIADB_DATABASE=${MARIADB_DATABASE:-regulaite}
@@ -147,8 +118,6 @@ services:
       - regulaite_network
     restart: on-failure
     depends_on:
-      neo4j:
-        condition: service_healthy
       qdrant:
         condition: service_healthy
       redis:
@@ -180,9 +149,6 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NEO4J_URI=${NEO4J_URI}
-      - NEO4J_USER=${NEO4J_USER}
-      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - MARIADB_HOST=mariadb
       - MARIADB_PORT=3306
       - MARIADB_DATABASE=${MARIADB_DATABASE:-regulaite}
@@ -208,8 +174,6 @@ services:
       - regulaite_network
     depends_on:
       redis:
-        condition: service_healthy
-      neo4j:
         condition: service_healthy
       qdrant:
         condition: service_healthy
@@ -259,18 +223,3 @@ networks:
   regulaite_network:
     external: true
 
-volumes:
-  mariadb_data:
-    driver: local
-  qdrant_data:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
-    driver: local
-  neo4j_import:
-    driver: local
-  neo4j_plugins:
-    driver: local
-  node_modules:
-    driver: local

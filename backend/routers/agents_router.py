@@ -115,23 +115,19 @@ class AgentHealthCheck(BaseModel):
 # Dependency to get agent types from the main app
 async def get_agent_types():
     """Get agent types from Pyndantic agents."""
-    try:
-        from pyndantic_agents.agent_factory import get_agent_types
-        return get_agent_types()
-    except ImportError:
-        logger.warning("Could not import get_agent_types from pyndantic_agents")
-        return {}
+    # Since pyndantic_agents is removed, return default agent types
+    return {
+        "rag": "Retrieval-augmented generation agent",
+        "qa": "Question answering agent",
+        "summarization": "Document summarization agent"
+    }
 
 
 # Dependency to get decision trees from the main app
 async def get_decision_trees():
     """Get available decision trees."""
-    try:
-        from pyndantic_agents.decision_trees import get_available_trees
-        return get_available_trees()
-    except ImportError:
-        logger.warning("Could not import get_available_trees from pyndantic_agents")
-        return {}
+    # Since pyndantic_agents is removed, return an empty dict
+    return {}
 
 
 @router.get("/types", response_model=Dict[str, str])
@@ -155,29 +151,24 @@ async def get_agents_metadata():
         # Get agent types first
         agent_types = await get_agent_types()
 
-        # Load metadata from JSON file
-        metadata_path = os.path.join(os.path.dirname(__file__), '../pyndantic_agents/agent_metadata.json')
-
-        try:
-            with open(metadata_path, 'r') as f:
-                metadata_dict = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not load agent metadata from file: {str(e)}")
-            # Provide fallback metadata based on agent types
-            metadata_dict = {
-                agent_id: {
-                    "id": agent_id,
-                    "name": f"{agent_id.capitalize()} Agent",
-                    "description": description,
-                    "version": "1.0.0",
-                    "capabilities": [],
-                    "parameters": [],
-                    "model_requirements": {"recommended": "gpt-4"},
-                    "context_usage": "optional",
-                    "tags": [agent_id]
-                }
-                for agent_id, description in agent_types.items()
+        # Since pyndantic_agents is removed, provide default metadata
+        metadata_dict = {
+            agent_id: {
+                "id": agent_id,
+                "name": f"{agent_id.capitalize()} Agent",
+                "description": description,
+                "version": "1.0.0",
+                "capabilities": [],
+                "parameters": [],
+                "model_requirements": {"recommended": "gpt-4"},
+                "context_usage": "optional",
+                "author": "RegulAIte",
+                "documentation_url": None,
+                "icon": None,
+                "tags": [agent_id]
             }
+            for agent_id, description in agent_types.items()
+        }
 
         # Return metadata as list
         return [AgentMetadata(**metadata) for metadata in metadata_dict.values()]
@@ -223,49 +214,31 @@ async def get_agent_metadata(agent_id: str):
 async def get_agent_documentation(agent_id: str):
     """Get documentation for a specific agent."""
     try:
-        # Load documentation from JSON file
-        docs_path = os.path.join(os.path.dirname(__file__), '../pyndantic_agents/agent_documentation.json')
-
+        # Since pyndantic_agents is removed, create minimal documentation on the fly
         try:
-            with open(docs_path, 'r') as f:
-                docs_dict = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"Could not load agent documentation from file: {str(e)}")
-            # Get agent metadata to provide fallback documentation
-            try:
-                metadata = await get_agent_metadata(agent_id)
+            metadata = await get_agent_metadata(agent_id)
 
-                # Create minimal documentation
-                return AgentDocumentation(
-                    id=agent_id,
-                    name=metadata.name,
-                    description=metadata.description,
-                    long_description=f"Detailed documentation for {metadata.name} is not available yet.",
-                    usage_examples=[
-                        AgentUsageExample(
-                            query=f"Help me with {agent_id} analysis",
-                            description=f"Basic {agent_id} analysis request"
-                        )
-                    ],
-                    limitations=["Documentation is under development."],
-                    best_practices=["Refer to the general agent documentation for best practices."]
-                )
-            except HTTPException:
-                # If agent metadata is not found, raise 404
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Agent not found: {agent_id}"
-                )
-
-        # Check if documentation exists for the requested agent
-        if agent_id not in docs_dict:
+            # Create minimal documentation
+            return AgentDocumentation(
+                id=agent_id,
+                name=metadata.name,
+                description=metadata.description,
+                long_description=f"Detailed documentation for {metadata.name} is not available yet.",
+                usage_examples=[
+                    AgentUsageExample(
+                        query=f"Help me with {agent_id} analysis",
+                        description=f"Basic {agent_id} analysis request"
+                    )
+                ],
+                limitations=["Documentation is under development."],
+                best_practices=["Refer to the general agent documentation for best practices."]
+            )
+        except HTTPException:
+            # If agent metadata is not found, raise 404
             raise HTTPException(
                 status_code=404,
-                detail=f"Documentation not found for agent: {agent_id}"
+                detail=f"Agent not found: {agent_id}"
             )
-
-        # Return documentation
-        return AgentDocumentation(**docs_dict[agent_id])
 
     except HTTPException:
         # Re-raise HTTP exceptions
@@ -322,54 +295,11 @@ async def get_decision_tree(tree_id: str):
 @router.get("/visualize-tree/{tree_id}")
 async def visualize_decision_tree(tree_id: str, format: str = "svg"):
     """Visualize a decision tree."""
-    try:
-        # Import tree visualizer
-        try:
-            from pyndantic_agents.tree_visualizer import generate_tree_visualization
-        except ImportError:
-            raise HTTPException(
-                status_code=501,
-                detail="Tree visualization is not available"
-            )
-
-        # Get the tree
-        trees = await get_decision_trees()
-
-        # Check if the requested tree exists
-        if tree_id not in trees:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Decision tree not found: {tree_id}"
-            )
-
-        # Generate visualization
-        tree_data = trees[tree_id]
-        visualization = generate_tree_visualization(tree_data, format=format)
-
-        # Return response based on format
-        if format.lower() == "svg":
-            from fastapi.responses import Response
-            return Response(content=visualization, media_type="image/svg+xml")
-        elif format.lower() == "png":
-            from fastapi.responses import Response
-            return Response(content=visualization, media_type="image/png")
-        elif format.lower() == "json":
-            return json.loads(visualization)
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported format: {format}. Supported formats: svg, png, json"
-            )
-
-    except HTTPException:
-        # Re-raise HTTP exceptions
-        raise
-    except Exception as e:
-        logger.error(f"Error visualizing decision tree: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error visualizing decision tree: {str(e)}"
-        )
+    # Since pyndantic_agents is removed, this feature is not available
+    raise HTTPException(
+        status_code=501,
+        detail="Tree visualization is not available after removing pyndantic_agents module"
+    )
 
 
 @router.get("/capabilities", response_model=List[AgentCapability])

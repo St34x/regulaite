@@ -58,43 +58,6 @@ else
     echo -e "${GREEN}✅ Network '$NETWORK_NAME' already exists${NC}"
 fi
 
-sleep 1  # Wait for network to be created
-
-# Delete exitsting /data directory
-# echo -e "${YELLOW}Cleaning up existing data directories...${NC}"
-# sudo rm -fr "$PLUGIN_DIR/backend/data"
-# echo -e "${GREEN}✅ Existing data directories removed${NC}"
-
-# sleep 0.5  # Wait for directory to be removed
-
-# echo -e "${YELLOW}Creating data directories...${NC}"
-# mkdir -p "$PLUGIN_DIR/backend/data/neo4j/data"
-# sleep 0.5  # Wait for directory to be created
-# echo -e "${GREEN}✅ data/neo4j/data directory created${NC}"
-# mkdir -p "$PLUGIN_DIR/backend/data/neo4j/logs"
-# sleep 0.5  # Wait for directory to be created
-# echo -e "${GREEN}✅ data/neo4j/logs directory created${NC}"
-# mkdir -p "$PLUGIN_DIR/backend/data/neo4j/import"
-# sleep 0.5  # Wait for directory to be created
-# echo -e "${GREEN}✅ data/neo4j/import directory created${NC}"
-# mkdir -p "$PLUGIN_DIR/backend/data/neo4j/plugins"
-# sleep 0.5  # Wait for directory to be created
-# echo -e "${GREEN}✅ data/neo4j/plugins directory created${NC}"
-# mkdir -p "$PLUGIN_DIR/backend/data/regulaite-files"
-# echo -e "${GREEN}✅ data/regulaite-files directory created${NC}"
-# sleep 0.5  # Wait for directory to be created
-# mkdir -p "$PLUGIN_DIR/backend/data/mariadb"
-# echo -e "${GREEN}✅ $PLUGIN_DIR/backend/data/mariadb directory created${NC}"
-# Create directory for Weaviate data
-# mkdir -p "$PLUGIN_DIR/backend/data/qdrant"
-# echo -e "${GREEN}✅ data/qdrant directory created${NC}"
-# sleep 0.5  # Wait for directory to be created
-# echo -e "${GREEN}✅ All directories created${NC}"
-
-
-# Change data directory permissions (mysql user has UID 999 in the container)
-# sudo chown -R 999:999 "$PLUGIN_DIR/backend/data/mariadb"
-
 # Step 4: Update .env file - Using localhost configuration
 echo -e "${YELLOW}Configuring environment variables...${NC}"
 
@@ -178,42 +141,6 @@ if [ -z "$MARIADB_DATABASE" ]; then
     if [ -z "$MARIADB_DATABASE" ]; then
         echo -e "${YELLOW}Using default database name 'regulaite'${NC}"
         MARIADB_DATABASE="regulaite"
-    fi
-fi
-
-# Prompt for Neo4j password if not in .env
-NEO4J_PASSWORD=""
-if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    NEO4J_PASSWORD="${NEO4J_PASSWORD:-}"
-fi
-
-if [ -z "$NEO4J_PASSWORD" ]; then
-    echo -n "Enter a password for Neo4j (required for database): "
-    read -r NEO4J_PASSWORD
-
-    if [ -z "$NEO4J_PASSWORD" ]; then
-        echo -e "${RED}No password provided. Using default password 'password'${NC}"
-        NEO4J_PASSWORD="password"
-    fi
-fi
-
-# Prompt for Neo4j username if not in .env
-NEO4J_USER="neo4j"
-if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    NEO4J_USER="${NEO4J_USER:-}"
-fi
-
-if [ -z "$NEO4J_USER" ]; then
-    echo -n "Enter a username for Neo4j (required for database, leave blank for default 'neo4j'): "
-    read -r NEO4J_USER
-
-    if [ -z "$NEO4J_USER" ]; then
-        echo -e "${RED}No username provided. Using default username 'neo4j'${NC}"
-        NEO4J_USER="neo4j"
     fi
 fi
 
@@ -338,12 +265,6 @@ MARIADB_PASSWORD=$MARIADB_PASSWORD
 QDRANT_URL=http://qdrant:6333
 QDRANT_GRPC_URL=http://qdrant:6334
 
-# Neo4j Configuration
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_EXTERNAL_URI=bolt://neo4j:7687
-NEO4J_USER=$NEO4J_USER
-NEO4J_PASSWORD=$NEO4J_PASSWORD
-
 # Unstructured Configuration
 UNSTRUCTURED_API_URL=http://unstructured:8000/general/v0/general
 UNSTRUCTURED_CLOUD_API_URL=https://api.unstructured.io/general/v0/general
@@ -373,7 +294,7 @@ EOL
 
 echo -e "${GREEN}✅ Environment configuration completed${NC}"
 
-# Step 6: Build the Pyndantic Docker image (Neo4j moved to external container only)
+# Step 6: Build the Pyndantic Docker image 
 echo -e "${YELLOW}Building AI Backend Docker image...${NC}"
 
 # Verfy if dockerfile exists for AI_BACKEND
@@ -423,28 +344,6 @@ docker-compose -f "$DOCKER_COMPOSE_FILE" up -d --remove-orphans
 # Step 7: Wait for services to start
 echo -e "${YELLOW}Waiting for services to initialize...${NC}"
 
-# Wait for Neo4j to be ready
-MAX_WAIT=60  # seconds
-echo -e "${YELLOW}Waiting for Neo4j to start (this can take up to $MAX_WAIT seconds)...${NC}"
-for i in $(seq 1 $MAX_WAIT); do
-    if docker ps | grep -q "regulaite-neo4j" && docker logs regulaite-neo4j 2>&1 | grep -q "Remote interface available at"; then
-        echo -e "${GREEN}✅ Neo4j is ready${NC}"
-        break
-    fi
-
-    # Show progress
-    if [ $((i % 5)) -eq 0 ]; then
-        echo -ne "${YELLOW}Still waiting for Neo4j... ${i}s/$MAX_WAIT\r${NC}"
-    fi
-
-    # If we've reached max wait, show a message but continue
-    if [ "$i" -eq $MAX_WAIT ]; then
-        echo -e "${YELLOW}⚠️ Max wait time reached for Neo4j. Continuing anyway...${NC}"
-    fi
-
-    sleep 1
-done
-
 # Wait for MariaDB to be ready
 echo -e "${YELLOW}Waiting for MariaDB to start...${NC}"
 for i in $(seq 1 $MAX_WAIT); do
@@ -465,77 +364,6 @@ for i in $(seq 1 $MAX_WAIT); do
 
     sleep 1
 done
-
-# Step 8: Initialize Neo4j Schema
-# Show progress
-for i in $(seq 1 $MAX_WAIT); do
-    echo -ne "${YELLOW}Waiting for Neo4j to be fully operational... ${i}s\r${NC}"
-    docker exec regulaite-neo4j bash -c "echo 'RETURN 1;' | cypher-shell -u \"$NEO4J_USER\" -p \"$NEO4J_PASSWORD\"" > /dev/null 2>&1 && break
-    sleep 1
-done
-
-# Wait a bit longer to ensure Neo4j has properly initialized
-echo -e "${YELLOW}Waiting for Neo4j to be fully operational...${NC}"
-
-# Run the Cypher commands directly in the container
-echo -e "${YELLOW}Running Neo4j schema initialization commands...${NC}"
-
-docker exec regulaite-neo4j bash -c "
-# Test authentication first
-MAX_RETRIES=5
-RETRY_COUNT=0
-SUCCESS=false
-
-while [ \$RETRY_COUNT -lt \$MAX_RETRIES ] && [ \$SUCCESS = false ]; do
-  if echo 'RETURN 1;' | cypher-shell -u \"$NEO4J_USER\" -p \"$NEO4J_PASSWORD\" > /dev/null 2>&1; then
-    SUCCESS=true
-    echo 'Authentication successful, proceeding with schema initialization.'
-  else
-    RETRY_COUNT=\$((RETRY_COUNT+1))
-    echo \"Authentication failed, attempt \$RETRY_COUNT of \$MAX_RETRIES. Waiting 20 seconds...\"
-    sleep 20
-  fi
-done
-
-if [ \$SUCCESS = false ]; then
-  echo 'Failed to authenticate after multiple attempts. Aborting schema initialization.'
-  exit 1
-fi
-
-# If authentication succeeded, run schema initialization
-echo '
-// Entity constraints
-CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE;
-CREATE INDEX IF NOT EXISTS FOR (e:Entity) ON (e.name);
-
-// Concept constraints
-CREATE CONSTRAINT IF NOT EXISTS FOR (c:Concept) REQUIRE c.name IS UNIQUE;
-
-// Document nodes
-CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE;
-CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.doc_id IS UNIQUE;
-CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.content);
-CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.name);
-
-// Section nodes
-CREATE CONSTRAINT IF NOT EXISTS FOR (s:Section) REQUIRE s.section_id IS UNIQUE;
-CREATE INDEX IF NOT EXISTS FOR (s:Section) ON (s.title);
-
-// File nodes
-CREATE CONSTRAINT IF NOT EXISTS FOR (f:File) REQUIRE f.id IS UNIQUE;
-
-// Create knowledge graph schema
-MERGE (sc:SchemaInit {id: \"regulaite-schema\"})
-SET sc.created = datetime(), sc.version = \"1.0\";
-' | cypher-shell -u $NEO4J_USER -p \"$NEO4J_PASSWORD\"
-"
-
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✅ Neo4j schema initialized successfully${NC}"
-else
-    echo -e "${RED}Error initializing Neo4j schema${NC}"
-    echo -e "${YELLOW}You may need to initialize the schema manually through the Neo4j Browser.${NC}"
-fi
 
 # Initialize MariaDB schema
 echo -e "${YELLOW}Checking MariaDB schema status...${NC}"
@@ -677,8 +505,6 @@ echo ""
 echo -e "${BLUE}Environment: ${BUILD_TARGET^^}${NC}"
 echo ""
 echo -e "${BLUE}All services should be accessible at:${NC}"
-echo -e "  Neo4j Browser: http://localhost:7474${NC}"
-echo -e "  Neo4j Bolt: bolt://localhost:7687${NC}"
 echo -e "  MariaDB: localhost:3306${NC}"
 echo -e "  AI_BACKEND API: http://localhost:8090${NC}"
 echo -e "  Unstructured Healthcheck: http://localhost:9900/healthcheck${NC}"
@@ -687,10 +513,6 @@ echo -e "  Qdrant Healthcheck: http://localhost:6333/healthz${NC}"
 echo -e "  Qdrant URL: http://localhost:6333/${NC}"
 echo -e "  Qdrant gRPC URL: http://localhost:6334${NC}"
 echo ""
-echo -e "${YELLOW}Neo4j credentials:${NC}"
-echo -e "  Username: $NEO4J_USER"
-echo -e "  Password: $NEO4J_PASSWORD"
-echo ""
 echo -e "${YELLOW}MariaDB credentials:${NC}"
 echo -e "  Database: $MARIADB_DATABASE"
 echo -e "  Root Password: $MARIADB_ROOT_PASSWORD"
@@ -698,7 +520,6 @@ echo -e "  Username: $MARIADB_USER"
 echo -e "  Password: $MARIADB_PASSWORD"
 echo ""
 echo -e "${YELLOW}If any services failed to start, check their logs:${NC}"
-echo -e "  docker logs regulaite-neo4j"
 echo -e "  docker logs regulaite-mariadb"
 echo -e "  docker logs regulaite-ai-backend"
 echo -e "  docker logs regulaite-qdrant"

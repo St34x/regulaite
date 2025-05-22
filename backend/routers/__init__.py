@@ -9,5 +9,6 @@ __all__ = [
     'config_router',
     'agents_router',
     'welcome_router',
-    'base_router'
+    'base_router',
+    'rag_router'
 ]

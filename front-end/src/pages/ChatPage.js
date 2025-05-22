@@ -34,22 +34,6 @@ const ChatPage = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [error, setError] = useState(null);
-  const [advancedSettings, setAdvancedSettings] = useState({
-    agent: {
-      use_agent: false,
-      agent_type: null,
-      use_tree_reasoning: false,
-      tree_template: 'default'
-    },
-    llm: {
-      model: 'gpt-4',
-      temperature: 0.7,
-      max_tokens: 2048,
-      top_p: 1.0,
-      frequency_penalty: 0.0,
-      presence_penalty: 0.0
-    }
-  });
   const [reasoningNodeId, setReasoningNodeId] = useState(null);
   const [agentProgress, setAgentProgress] = useState(null);
   
@@ -254,128 +238,94 @@ const ChatPage = () => {
   };
 
   const handleSendMessage = async (content) => {
-    // Don't proceed if already loading
-    if (isLoading) return;
+    if (!content.trim() || isLoading) return;
+    
+    setIsLoading(true);
+    setError(null);
     
     try {
-      setError(null);
-      setIsLoading(true);
-      setReasoningNodeId(null);
-      setAgentProgress(null);
-
-      // Create a session if none exists
-      if (!activeSessionId) {
-        const sessionId = await handleNewSession();
-        setActiveSessionId(sessionId);
-      }
-
-      // Add user message immediately to UI
-      const userMessage = { role: "user", content };
+      // Create a new user message
+      const userMessage = {
+        role: "user",
+        content: content
+      };
+      
+      // Add to UI immediately
       const updatedMessages = [...messages, userMessage];
       setMessages(updatedMessages);
-
-      // Prepare options with agent and LLM settings
-      const options = {
-        ...advancedSettings.llm,
-        includeContext: true,
-        agent: advancedSettings.agent.use_agent ? {
-          agent_type: advancedSettings.agent.agent_type,
-          use_tree_reasoning: advancedSettings.agent.use_tree_reasoning,
-          tree_template: advancedSettings.agent.use_tree_reasoning ? advancedSettings.agent.tree_template : null
-        } : null
-      };
-
-      // Stream the assistant's response
-      let assistantContent = '';
-      const assistantMessage = { role: "assistant", content: '' };
       
-      // Add placeholder message that will be updated
-      const messagesWithPlaceholder = [...updatedMessages, assistantMessage];
-      setMessages(messagesWithPlaceholder);
-
-      try {
-        // Pass the full conversation history to maintain context
-        const response = await chatService.sendMessageStreaming(
-          activeSessionId,
-          content,
-          (chunk) => {
-            assistantContent += chunk;
-            // Create a new message object each time to ensure React detects the change
-            const updatedAssistantMessage = { 
-              role: "assistant", 
-              content: assistantContent 
-            };
-            // Create a new array to ensure React state update
-            setMessages([...updatedMessages, updatedAssistantMessage]);
-          },
-          options,
-          updatedMessages  // Pass all messages to maintain conversation context
+      // Update the session with the user message
+      if (activeSessionId) {
+        updateSessionWithMessages(activeSessionId, updatedMessages);
+      }
+      
+      // Prepare request payload - Always use RAG
+      const payload = {
+        messages: updatedMessages.map(msg => ({
+          role: msg.role,
+          content: msg.content
+        })),
+        use_rag: true, // Always use RAG
+        session_id: activeSessionId
+      };
+      
+      // Send request to API
+      const response = await chatService.sendChatMessage(payload);
+      
+      // Handle response
+      if (response && response.message) {
+        // Add assistant's response to messages
+        const newMessages = [...updatedMessages, {
+          role: "assistant",
+          content: response.message,
+          timestamp: new Date().toISOString(),
+          model: response.model,
+          metadata: {
+            sources: response.sources || [],
+            context_quality: response.context_quality,
+            hallucination_risk: response.hallucination_risk,
+            context_used: response.context_used
+          }
+        }];
+        
+        setMessages(newMessages);
+        
+        // Update the session
+        if (activeSessionId) {
+          updateSessionWithMessages(activeSessionId, newMessages);
+          
+          // If the session title is "New Conversation" and this is the first user message,
+          // update the title with a summary based on the user's first message
+          const session = sessions.find(s => s.id === activeSessionId);
+          if (session && session.title === "New Conversation" && newMessages.filter(m => m.role === "user").length === 1) {
+            const title = generateSessionTitle(content);
+            updateSessionTitle(activeSessionId, title);
+          }
+        }
+        
+        // Update sessions list with new preview data
+        setSessions(prevSessions => 
+          prevSessions.map(session => 
+            session.id === activeSessionId 
+              ? { 
+                  ...session, 
+                  preview: content.substring(0, 60) + (content.length > 60 ? '...' : ''),
+                  date: new Date().toLocaleString()
+                }
+              : session
+          )
         );
-        
-        // Handle agent progress information if returned
-        if (response && response.agent_execution_id) {
-          setAgentProgress({
-            execution_id: response.agent_execution_id,
-            status: 'running'
-          });
-        }
-
-        // Final update to make sure we have the complete message
-        const finalAssistantMessage = { 
-          role: "assistant", 
-          content: assistantContent 
-        };
-        
-        // Set with complete message to ensure we have the full response
-        setMessages([...updatedMessages, finalAssistantMessage]);
-
-        // Update session in state with the new messages
-        updateSessionWithMessages(activeSessionId, [...updatedMessages, finalAssistantMessage]);
-      } catch (streamError) {
-        console.error('Streaming error:', streamError);
-        
-        // Fall back to non-streaming API if streaming fails
-        try {
-          // Pass the full conversation history to maintain context
-          const response = await chatService.sendMessage(
-            activeSessionId, 
-            content, 
-            options,
-            updatedMessages  // Pass all messages to maintain conversation context
-          );
-          const fallbackMessage = { role: "assistant", content: response.message };
-          setMessages([...updatedMessages, fallbackMessage]);
-          updateSessionWithMessages(activeSessionId, [...updatedMessages, fallbackMessage]);
-        } catch (fallbackError) {
-          console.error('Fallback error:', fallbackError);
-          setError('Failed to send message. Please try again.');
-          // Remove the placeholder message
-          setMessages(updatedMessages);
-        }
+      } else {
+        throw new Error('Unexpected response format');
       }
     } catch (err) {
-      console.error('Chat error:', err);
-      let errorMessage = 'An error occurred while sending your message. Please try again.';
+      console.error('Failed to send message:', err);
+      const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
+      setError(`Failed to send message: ${errorMsg}`);
       
-      if (err.response) {
-        const status = err.response.status;
-        if (status === 401) {
-          errorMessage = 'Your session has expired. Please log in again.';
-          navigate('/login');
-          return;
-        } else if (status === 429) {
-          errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
-        } else if (err.response.data && err.response.data.detail) {
-          errorMessage = err.response.data.detail;
-        }
-      } else if (err.request) {
-        errorMessage = 'Network error. Please check your connection and try again.';
-      }
-      
-      setError(errorMessage);
       toast({
-        title: 'Chat Error',
-        description: errorMessage,
+        title: 'Error',
+        description: `Failed to send message: ${errorMsg}`,
         status: 'error',
         duration: 5000,
         isClosable: true,
@@ -713,126 +663,221 @@ const ChatPage = () => {
     setSessions(updatedSessions);
   };
 
+  const generateSessionTitle = (message) => {
+    // Create a title from the user's message
+    // Truncate long messages, capitalize first letter
+    if (!message) return "New Conversation";
+    
+    // Clean up message - remove excess whitespace
+    const cleanMessage = message.trim().replace(/\s+/g, ' ');
+    
+    // Truncate if too long
+    const truncated = cleanMessage.length > 50 
+      ? cleanMessage.substring(0, 47) + '...'
+      : cleanMessage;
+      
+    // Capitalize first letter
+    return truncated.charAt(0).toUpperCase() + truncated.slice(1);
+  };
+  
+  const updateSessionTitle = (sessionId, title) => {
+    // Update the title of a session
+    setSessions(prevSessions => 
+      prevSessions.map(session => 
+        session.id === sessionId 
+          ? { ...session, title }
+          : session
+      )
+    );
+    
+    // If this is a real session (not a fallback), update on the server too
+    const session = sessions.find(s => s.id === sessionId);
+    if (session && !session.is_fallback) {
+      try {
+        // This could be implemented with a real API call if backend supports it
+        console.log(`Updating session title on server: ${sessionId} => "${title}"`);
+        // Async function to update title on server could go here
+        // e.g., chatService.updateSessionTitle(sessionId, title);
+      } catch (err) {
+        console.error('Failed to update session title on server:', err);
+        // Continue anyway as this is not critical
+      }
+    }
+  };
+
   const handleSuggestedQuestion = (question) => {
     handleSendMessage(question);
   };
 
-  // New handler for settings changes
-  const handleSettingsChange = (newSettings) => {
-    console.log('Settings changed:', newSettings);
-    // Make sure we have all the required properties to avoid issues
-    const validatedSettings = {
-      agent: {
-        use_agent: newSettings.agent?.use_agent || false,
-        agent_type: newSettings.agent?.agent_type || null,
-        use_tree_reasoning: newSettings.agent?.use_tree_reasoning || false,
-        tree_template: newSettings.agent?.tree_template || 'default'
-      },
-      llm: {
-        model: newSettings.llm?.model || 'gpt-4',
-        temperature: newSettings.llm?.temperature || 0.7,
-        max_tokens: newSettings.llm?.max_tokens || 2048,
-        top_p: newSettings.llm?.top_p || 1.0,
-        frequency_penalty: newSettings.llm?.frequency_penalty || 0.0,
-        presence_penalty: newSettings.llm?.presence_penalty || 0.0
-      }
-    };
-    setAdvancedSettings(validatedSettings);
-  };
-
   return (
-    <Box h="100vh" display="flex" flexDir="column">
-      {/* Main layout */}
+    <Flex h="100vh" flexDirection="column">
+      {/* Header */}
+      <Box 
+        py={3} 
+        px={6} 
+        borderBottomWidth="1px" 
+        borderColor={borderColor}
+        bg={headerBg}
+        zIndex="1"
+      >
+        <Flex justify="space-between" align="center">
+          <Heading 
+            size="md" 
+            fontWeight="600"
+            color={accentColor}
+            display="flex"
+            alignItems="center"
+          >
+            <Shield size={20} style={{ marginRight: '8px' }} />
+            RegulaIte
+          </Heading>
+          
+          {/* Mobile sidebar toggle */}
+          {isMobile && (
+            <IconButton
+              icon={isSidebarOpen ? <X size={18} /> : <PanelLeft size={18} />}
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              variant="ghost"
+              aria-label="Toggle Sidebar"
+              size="sm"
+            />
+          )}
+        </Flex>
+      </Box>
+      
       <Flex flex="1" overflow="hidden">
-        {/* Sidebar */}
+        {/* Chat history sidebar */}
         <Box
+          w={isSidebarOpen ? { base: "full", md: "300px" } : "0px"}
+          h="full"
           bg={sidebarBg}
           borderRightWidth="1px"
           borderRightColor={borderColor}
-          display="flex"
-          flexDir="column"
-          w="64"
-          transition="all 0.3s"
-          transform={isSidebarOpen ? "translateX(0)" : "translateX(-100%)"}
-          position={isMobile ? "absolute" : "relative"}
-          zIndex={isMobile ? "10" : "auto"}
-          h={isMobile ? "full" : "auto"}
+          position={{ base: isSidebarOpen ? "absolute" : "static", md: "static" }}
+          zIndex="2"
+          transition="width 0.3s"
+          overflow="hidden"
+          display={isSidebarOpen ? "block" : "none"}
+          boxShadow={isMobile && isSidebarOpen ? "0 0 15px rgba(0,0,0,0.2)" : "none"}
         >
-          <Box flex="1" overflowY="auto">
-            <ChatHistory
-              sessions={sessions}
-              activeSessionId={activeSessionId}
-              onSelectSession={handleSelectSession}
-              onNewSession={handleNewSession}
-              onDeleteSession={handleDeleteSession}
-            />
-          </Box>
+          <ChatHistory
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            onSelectSession={handleSelectSession}
+            onNewSession={handleNewSession}
+            onDeleteSession={handleDeleteSession}
+          />
         </Box>
-
-        {/* Main content */}
-        <Box flex="1" display="flex" flexDir="column" overflow="hidden">
-          {/* Chat Messages */}
-          <Box flex="1" overflowY="auto" bg={chatBg} p="4">
-            {error && error.trim() !== '' && (
-              <Box bg={errorBg} borderWidth="1px" borderColor={errorBorderColor} color={errorColor} px="4" py="2" borderRadius="md" mb="4">
-                <Text>{error}</Text>
-              </Box>
-            )}
-
-            {messages.length === 0 ? (
-              <Box textAlign="center" color={secondaryTextColor} mt="8">
-                <Text mb="4">No messages yet. Start a conversation!</Text>
-                <Box display="grid" gridTemplateColumns={{base: "1fr", md: "1fr 1fr"}} gap="2" maxW="2xl" mx="auto">
+        
+        {/* Main chat area */}
+        <Flex 
+          flex="1" 
+          flexDirection="column" 
+          h="100%" 
+          overflow="hidden"
+          bg={chatBg}
+        >
+          {/* Error notification */}
+          {error && (
+            <Box 
+              bg={errorBg} 
+              color={errorColor} 
+              p={3} 
+              borderBottomWidth="1px" 
+              borderBottomColor={errorBorderColor}
+            >
+              <Flex align="center" justify="space-between">
+                <Text fontSize="sm">{error}</Text>
+                <Button 
+                  size="xs" 
+                  leftIcon={<RefreshCw size={12} />} 
+                  onClick={() => setError(null)}
+                  colorScheme="red"
+                  variant="outline"
+                >
+                  Dismiss
+                </Button>
+              </Flex>
+            </Box>
+          )}
+          
+          {/* Message area */}
+          <VStack 
+            spacing={4} 
+            flex="1" 
+            overflowY="auto" 
+            p={4} 
+            align="stretch"
+          >
+            {/* Welcome header for new chats */}
+            {messages.length <= 1 && (
+              <Box textAlign="center" my={8}>
+                <Heading as="h1" size="lg" mb={4} color={textColor}>
+                  How can I help with GRC today?
+                </Heading>
+                <Text color={secondaryTextColor} mb={6}>
+                  Ask me anything about governance, risk, and compliance
+                </Text>
+                
+                {/* Suggested questions */}
+                <HStack justify="center" spacing={2} wrap="wrap" mb={6}>
                   {suggestedQuestions.map((question, index) => (
                     <Button
                       key={index}
-                      bg={questionButtonBg}
-                      p="3"
-                      textAlign="left"
-                      borderWidth="1px"
+                      size="sm"
                       borderColor={questionButtonBorder}
-                      borderRadius="lg"
-                      _hover={{ borderColor: buttonHoverBorderColor, bg: buttonHoverBg }}
-                      transition="colors 0.2s"
-                      h="auto"
+                      bg={questionButtonBg}
+                      variant="outline"
+                      px={4}
                       onClick={() => handleSuggestedQuestion(question)}
+                      _hover={{
+                        bg: buttonHoverBg,
+                        borderColor: buttonHoverBorderColor
+                      }}
+                      m={1}
                     >
                       {question}
                     </Button>
                   ))}
-                </Box>
+                </HStack>
               </Box>
-            ) : (
-              <VStack spacing="4" align="stretch" maxW="3xl" mx="auto">
-                {messages.map((message, index) => (
-                  <ChatMessage
-                    key={index}
-                    message={message}
-                    isLoading={isLoading && index === messages.length - 1}
-                    previousMessage={index > 0 ? messages[index - 1] : null}
-                    agentInfo={message.role === 'assistant' && advancedSettings.agent.use_agent ? {
-                      agent_type: advancedSettings.agent.agent_type,
-                      reasoning_path: message.reasoning_path || null,
-                      source_documents: message.source_documents || null,
-                    } : null}
-                  />
-                ))}
-                <Box ref={messagesEndRef} />
-              </VStack>
             )}
-          </Box>
-
-          {/* Input area */}
-          <ChatControls
+            
+            {/* Messages */}
+            {messages.map((message, index) => (
+              <ChatMessage 
+                key={index} 
+                message={message} 
+                isLast={index === messages.length - 1}
+              />
+            ))}
+            
+            {/* Loading indicator */}
+            {isLoading && (
+              <Flex justify="center" pt={4} pb={2}>
+                <Spinner 
+                  thickness="3px"
+                  speed="0.65s"
+                  emptyColor="gray.200"
+                  color={accentColor}
+                  size="md"
+                />
+              </Flex>
+            )}
+            
+            {/* Invisible element to scroll to */}
+            <Box ref={messagesEndRef} />
+          </VStack>
+          
+          {/* Chat input area */}
+          <ChatControls 
             onSendMessage={handleSendMessage}
             disabled={isLoading}
-            onSettingsChange={handleSettingsChange}
-            initialSettings={advancedSettings}
             reasoningNodeId={reasoningNodeId}
           />
-        </Box>
+        </Flex>
       </Flex>
-    </Box>
+    </Flex>
   );
 };
 
