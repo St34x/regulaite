@@ -80,6 +80,7 @@ class ChatResponse(BaseModel):
     sources: Optional[List[SourceInfo]] = Field(None, description="Sources used in the response")
     context_quality: Optional[str] = Field(None, description="Quality assessment of the context")
     hallucination_risk: Optional[float] = Field(None, description="Risk of hallucination in the response")
+    internal_thoughts: Optional[str] = Field(None, description="Internal thoughts and reasoning process")
 
 
 class ChatHistoryEntry(BaseModel):
@@ -641,6 +642,18 @@ Your task is to analyze the request and provide a comprehensive response."""
                     # Extract result
                     assistant_message = response.choices[0].message.content
                     
+                    # Extract internal thoughts if present
+                    internal_thoughts = None
+                    internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_message, re.DOTALL)
+                    if internal_thoughts_match:
+                        internal_thoughts = internal_thoughts_match.group(1).strip()
+                        # Remove internal thoughts from the message
+                        assistant_message = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_message, flags=re.DOTALL).strip()
+                        # Log successful extraction
+                        logger.info(f"Successfully extracted internal thoughts: {internal_thoughts[:50]}...")
+                    else:
+                        logger.info("No internal thoughts found in response")
+                    
                     # Track token usage
                     if response.usage:
                         token_usage = {
@@ -654,10 +667,10 @@ Your task is to analyze the request and provide a comprehensive response."""
                         cursor.execute(
                             """
                             UPDATE agent_progress SET
-                                progress_percent = 100.0, status = 'completed', status_message = ?
+                                progress_percent = ?, status_message = ?
                             WHERE execution_id = ?
                             """,
-                            ("Reasoning task completed", execution_id)
+                            (100.0, "Reasoning task completed", execution_id)
                         )
                         conn.commit()
                         
@@ -705,6 +718,25 @@ Your task is to analyze the request and provide a comprehensive response."""
 
             # Convert messages for OpenAI API
             openai_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
+            
+            # Add system message with instruction to include internal thoughts
+            openai_messages.insert(0, {
+                "role": "system", 
+                "content": """You are a helpful assistant specializing in regulatory analysis.
+                
+When responding, include your internal thoughts and reasoning process wrapped in <internal_thoughts> tags. 
+These thoughts should explain your approach to answering the question and any key insights.
+For example:
+
+<internal_thoughts>
+First, I need to understand what regulations apply to this scenario.
+I should check if there are any specific compliance frameworks mentioned.
+The key considerations seem to be X, Y, and Z.
+</internal_thoughts>
+
+Then provide your actual response to the user without these tags.
+"""
+            })
 
             # Get chat completion
             if request.stream:
@@ -718,16 +750,71 @@ Your task is to analyze the request and provide a comprehensive response."""
                     
                     # Stream token by token
                     collected_tokens = []
-                    async for token in client.chat.completions.create(
+                    internal_thought_tokens = []
+                    in_internal_thoughts = False
+                    
+                    # Send initial processing state
+                    yield json.dumps({
+                        "type": "processing",
+                        "state": "Starting to process your query",
+                        "timestamp": datetime.now().isoformat()
+                    }) + "\n"
+                    
+                    # Create streaming completion
+                    stream = client.chat.completions.create(
                         model=request.model,
                         messages=openai_messages,
                         temperature=request.temperature,
                         max_tokens=request.max_tokens,
                         stream=True
-                    ):
-                        if token.choices and token.choices[0].delta.content:
-                            content = token.choices[0].delta.content
-                            collected_tokens.append(content)
+                    )
+                    
+                    # Process the stream (non-async iteration)
+                    for chunk in stream:
+                        if hasattr(chunk.choices[0], 'delta') and hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
+                            content = chunk.choices[0].delta.content
+                            
+                            # Track if we're inside internal thoughts tags
+                            if "<internal_thoughts>" in content:
+                                in_internal_thoughts = True
+                                # Split at the tag and add the part before to normal tokens
+                                parts = content.split("<internal_thoughts>", 1)
+                                if parts[0]:
+                                    collected_tokens.append(parts[0])
+                                content = parts[1] if len(parts) > 1 else ""
+                            
+                            if "</internal_thoughts>" in content and in_internal_thoughts:
+                                parts = content.split("</internal_thoughts>", 1)
+                                if parts[0]:
+                                    internal_thought_tokens.append(parts[0])
+                                if len(parts) > 1 and parts[1]:
+                                    collected_tokens.append(parts[1])
+                                in_internal_thoughts = False
+                                
+                                # Send processing update with current internal thoughts
+                                current_thoughts = "".join(internal_thought_tokens)
+                                yield json.dumps({
+                                    "type": "processing",
+                                    "state": "Thinking through your query",
+                                    "internal_thoughts": current_thoughts,
+                                    "timestamp": datetime.now().isoformat()
+                                }) + "\n"
+                            elif in_internal_thoughts:
+                                internal_thought_tokens.append(content)
+                                
+                                # Periodically send processing updates with current internal thoughts
+                                if len(internal_thought_tokens) % 10 == 0:  # Send every ~10 tokens
+                                    current_thoughts = "".join(internal_thought_tokens)
+                                    yield json.dumps({
+                                        "type": "processing",
+                                        "state": "Thinking through your query",
+                                        "internal_thoughts": current_thoughts,
+                                        "timestamp": datetime.now().isoformat()
+                                    }) + "\n"
+                            else:
+                                collected_tokens.append(content)
+                            
+                            # Always emit the token
                             yield json.dumps({
                                 "type": "token",
                                 "content": content
@@ -735,6 +822,18 @@ Your task is to analyze the request and provide a comprehensive response."""
                     
                     # Combine tokens to get the full response
                     assistant_response = "".join(collected_tokens)
+                    
+                    # Final internal thoughts
+                    internal_thoughts = "".join(internal_thought_tokens) if internal_thought_tokens else None
+                    
+                    if not internal_thoughts:
+                        # If no internal thoughts were extracted via streaming, try regex extraction
+                        internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_response, re.DOTALL)
+                        if internal_thoughts_match:
+                            internal_thoughts = internal_thoughts_match.group(1).strip()
+                            # Remove internal thoughts from the message
+                            assistant_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_response, flags=re.DOTALL).strip()
+                            logger.info(f"Extracted internal thoughts via regex: {internal_thoughts[:50]}...")
                     
                     # Store the response in chat history
                     try:
@@ -750,9 +849,9 @@ Your task is to analyze the request and provide a comprehensive response."""
                         logger.error(f"Error storing assistant message in chat history: {str(e)}")
                     
                     # Calculate token usage for billing/analytics
-                    total_tokens = sum(len(m.content.split()) for m in openai_messages) + len(assistant_response.split())
+                    total_tokens = sum(len(m["content"].split()) for m in openai_messages) + len(assistant_response.split())
                     token_usage = {
-                        "prompt_tokens": sum(len(m.content.split()) for m in openai_messages),
+                        "prompt_tokens": sum(len(m["content"].split()) for m in openai_messages),
                         "completion_tokens": len(assistant_response.split()),
                         "total_tokens": total_tokens
                     }
@@ -764,7 +863,8 @@ Your task is to analyze the request and provide a comprehensive response."""
                         "model": request.model,
                         "session_id": session_id,
                         "token_usage": token_usage,
-                        "context_used": context_used
+                        "context_used": context_used,
+                        "internal_thoughts": internal_thoughts
                     }
                     
                     # Include source information if available
@@ -786,6 +886,18 @@ Your task is to analyze the request and provide a comprehensive response."""
 
                 # Extract assistant message
                 assistant_message = response.choices[0].message.content
+                
+                # Extract internal thoughts if present
+                internal_thoughts = None
+                internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_message, re.DOTALL)
+                if internal_thoughts_match:
+                    internal_thoughts = internal_thoughts_match.group(1).strip()
+                    # Remove internal thoughts from the message
+                    assistant_message = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_message, flags=re.DOTALL).strip()
+                    # Log successful extraction
+                    logger.info(f"Successfully extracted internal thoughts: {internal_thoughts[:50]}...")
+                else:
+                    logger.info("No internal thoughts found in response")
                 
                 # Get token usage
                 if hasattr(response, 'usage'):
@@ -827,7 +939,8 @@ Your task is to analyze the request and provide a comprehensive response."""
                 execution_id=str(execution_id) if execution_id else None,
                 sources=context_result.get("sources") if context_result else None,
                 context_quality=context_result.get("context_quality") if context_result else None,
-                hallucination_risk=context_result.get("hallucination_risk") if context_result else None
+                hallucination_risk=context_result.get("hallucination_risk") if context_result else None,
+                internal_thoughts=internal_thoughts
             )
         # For streaming responses, we've already returned a StreamingResponse
 

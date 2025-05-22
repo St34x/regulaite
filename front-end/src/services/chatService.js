@@ -13,6 +13,41 @@ const api = axios.create({
   },
 });
 
+// Helper function to get authentication headers
+const getAuthHeaders = () => {
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  
+  const token = localStorage.getItem('token');
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+    
+    // Add user ID from auth token if available
+    const userData = authService.getCurrentUserData();
+    if (userData) {
+      // Try to find user ID in various possible locations
+      const userId = userData.user_id || userData.sub || userData.id || userData.userId;
+      
+      if (userId) {
+        headers['X-User-ID'] = userId;
+      } else {
+        // If no explicit user ID, try to extract from the token subject
+        try {
+          const decoded = jwtDecode(token);
+          if (decoded && decoded.sub) {
+            headers['X-User-ID'] = decoded.sub;
+          }
+        } catch (e) {
+          console.warn('Could not extract user ID from token', e);
+        }
+      }
+    }
+  }
+  
+  return headers;
+};
+
 // Add interceptor to include auth token
 api.interceptors.request.use(
   (config) => {
@@ -567,6 +602,95 @@ const chatService = {
     } catch (error) {
       console.error('Error fetching LLM config:', error);
       return {};
+    }
+  },
+
+  /**
+   * Stream a chat message to get real-time responses including internal thoughts
+   * @param {Object} payload - Chat message payload
+   * @param {Object} callbacks - Callback functions for streaming events
+   * @returns {Promise} - Promise that resolves when streaming is complete
+   */
+  streamChatMessage: async (payload, callbacks = {}) => {
+    try {
+      // Always ensure streaming is enabled
+      payload.stream = true;
+      
+      // Make sure the callbacks are defined
+      const {
+        onToken = () => {},
+        onProcessing = () => {},
+        onComplete = () => {},
+        onError = () => {}
+      } = callbacks;
+
+      // Fetch with streaming response
+      const response = await fetch(`${API_URL}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to send message');
+      }
+
+      // Get the reader for the streaming response
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completeData = {};
+
+      // Process the stream
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+        
+        // Decode the chunk and add to buffer
+        buffer += decoder.decode(value, { stream: true });
+        
+        // Process any complete lines in the buffer
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep the last incomplete line in the buffer
+        
+        // Process each complete line
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          
+          try {
+            const data = JSON.parse(line);
+            
+            // Handle different event types
+            if (data.type === 'token' && data.content) {
+              onToken(data.content);
+            } 
+            else if (data.type === 'processing') {
+              onProcessing(data);
+            }
+            else if (data.type === 'end') {
+              // Save complete data for final callback
+              completeData = data;
+            }
+          } catch (e) {
+            console.error('Error parsing streaming response:', e, line);
+          }
+        }
+      }
+      
+      // Call the complete callback with the final data
+      onComplete(completeData);
+      return completeData;
+    } catch (error) {
+      console.error('Error in streamChatMessage:', error);
+      callbacks.onError?.(error);
+      throw error;
     }
   }
 };

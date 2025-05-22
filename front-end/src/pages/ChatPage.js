@@ -252,7 +252,20 @@ const ChatPage = () => {
       
       // Add to UI immediately
       const updatedMessages = [...messages, userMessage];
-      setMessages(updatedMessages);
+      
+      // Create a temporary assistant message that will show processing state
+      const tempAssistantMessage = {
+        role: "assistant",
+        content: "",
+        isGenerating: true,
+        processingState: "Starting to process your query...",
+        metadata: {
+          internal_thoughts: ""
+        }
+      };
+      
+      // Add both messages to the UI
+      setMessages([...updatedMessages, tempAssistantMessage]);
       
       // Update the session with the user message
       if (activeSessionId) {
@@ -265,73 +278,161 @@ const ChatPage = () => {
           role: msg.role,
           content: msg.content
         })),
-        use_rag: true, // Always use RAG
+        use_rag: true,
+        stream: true, // Enable streaming for internal thoughts
         session_id: activeSessionId
       };
       
-      // Send request to API
-      const response = await chatService.sendChatMessage(payload);
-      
-      // Handle response
-      if (response && response.message) {
-        // Add assistant's response to messages
-        const newMessages = [...updatedMessages, {
-          role: "assistant",
-          content: response.message,
-          timestamp: new Date().toISOString(),
-          model: response.model,
-          metadata: {
-            sources: response.sources || [],
-            context_quality: response.context_quality,
-            hallucination_risk: response.hallucination_risk,
-            context_used: response.context_used
-          }
-        }];
-        
-        setMessages(newMessages);
-        
-        // Update the session
-        if (activeSessionId) {
-          updateSessionWithMessages(activeSessionId, newMessages);
+      // Send request to API with streaming
+      const response = await chatService.streamChatMessage(payload, {
+        onToken: (token) => {
+          // Update the assistant message with each new token
+          setMessages(currentMessages => {
+            const updatedMessages = [...currentMessages];
+            const lastMessage = updatedMessages[updatedMessages.length - 1];
+            
+            if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+              lastMessage.content += token;
+            }
+            
+            return updatedMessages;
+          });
+        },
+        onProcessing: (processingData) => {
+          // Update internal thoughts and processing state
+          setMessages(currentMessages => {
+            const updatedMessages = [...currentMessages];
+            const lastMessage = updatedMessages[updatedMessages.length - 1];
+            
+            if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+              lastMessage.processingState = processingData.state || "Processing your query...";
+              
+              if (processingData.internal_thoughts) {
+                lastMessage.metadata.internal_thoughts = processingData.internal_thoughts;
+              }
+            }
+            
+            return updatedMessages;
+          });
+        },
+        onComplete: (completeData) => {
+          // Finalize the message when streaming is complete
+          setMessages(currentMessages => {
+            const updatedMessages = [...currentMessages];
+            const lastMessage = updatedMessages[updatedMessages.length - 1];
+            
+            if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+              // Update with final data
+              lastMessage.isGenerating = false;
+              lastMessage.model = completeData.model;
+              lastMessage.timestamp = new Date().toISOString();
+              
+              // Update metadata
+              lastMessage.metadata = {
+                sources: completeData.sources || [],
+                context_quality: completeData.context_quality,
+                hallucination_risk: completeData.hallucination_risk,
+                context_used: completeData.context_used,
+                internal_thoughts: completeData.internal_thoughts || lastMessage.metadata.internal_thoughts
+              };
+            }
+            
+            return updatedMessages;
+          });
           
-          // If the session title is "New Conversation" and this is the first user message,
-          // update the title with a summary based on the user's first message
-          const session = sessions.find(s => s.id === activeSessionId);
-          if (session && session.title === "New Conversation" && newMessages.filter(m => m.role === "user").length === 1) {
-            const title = generateSessionTitle(content);
-            updateSessionTitle(activeSessionId, title);
+          // Update the session with new messages
+          if (activeSessionId) {
+            const finalMessages = messages.map(msg => {
+              if (msg.isGenerating) {
+                return {
+                  ...msg,
+                  isGenerating: false
+                };
+              }
+              return msg;
+            });
+            updateSessionWithMessages(activeSessionId, finalMessages);
           }
+          
+          setIsLoading(false);
         }
-        
-        // Update sessions list with new preview data
-        setSessions(prevSessions => 
-          prevSessions.map(session => 
-            session.id === activeSessionId 
-              ? { 
-                  ...session, 
-                  preview: content.substring(0, 60) + (content.length > 60 ? '...' : ''),
-                  date: new Date().toLocaleString()
-                }
-              : session
-          )
-        );
-      } else {
-        throw new Error('Unexpected response format');
+      });
+      
+      // If we got here without streaming working, just use the regular method
+      if (!response) {
+        throw new Error('Streaming failed, falling back to regular method');
       }
     } catch (err) {
-      console.error('Failed to send message:', err);
-      const errorMsg = err.response?.data?.detail || err.message || 'Unknown error';
-      setError(`Failed to send message: ${errorMsg}`);
+      console.error('Failed to send streaming message, falling back to regular method:', err);
       
-      toast({
-        title: 'Error',
-        description: `Failed to send message: ${errorMsg}`,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
-    } finally {
-      setIsLoading(false);
+      // Fall back to non-streaming method
+      try {
+        // Remove the temporary message if it exists
+        setMessages(currentMessages => {
+          const lastMessage = currentMessages[currentMessages.length - 1];
+          if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+            return currentMessages.slice(0, -1);
+          }
+          return currentMessages;
+        });
+        
+        // Create updated messages without the temp message
+        const cleanMessages = messages.filter(msg => !msg.isGenerating);
+        
+        // Prepare request payload without streaming
+        const payload = {
+          messages: cleanMessages.map(msg => ({
+            role: msg.role,
+            content: msg.content
+          })),
+          use_rag: true,
+          stream: false,
+          session_id: activeSessionId
+        };
+        
+        // Send request to API
+        const response = await chatService.sendChatMessage(payload);
+        
+        // Handle response
+        if (response && response.message) {
+          // Add assistant's response to messages
+          const newMessages = [...cleanMessages, {
+            role: "assistant",
+            content: response.message,
+            timestamp: new Date().toISOString(),
+            model: response.model,
+            metadata: {
+              sources: response.sources || [],
+              context_quality: response.context_quality,
+              hallucination_risk: response.hallucination_risk,
+              context_used: response.context_used,
+              internal_thoughts: response.internal_thoughts
+            }
+          }];
+          
+          setMessages(newMessages);
+          
+          // Update the session
+          if (activeSessionId) {
+            updateSessionWithMessages(activeSessionId, newMessages);
+          }
+        } else {
+          throw new Error('Unexpected response format');
+        }
+      } catch (fallbackErr) {
+        console.error('Both streaming and fallback methods failed:', fallbackErr);
+        setError(`Failed to send message: ${fallbackErr.message || 'Unknown error'}`);
+        
+        toast({
+          title: 'Error',
+          description: `Failed to send message: ${fallbackErr.message || 'Unknown error'}`,
+          status: 'error',
+          duration: 5000,
+          isClosable: true,
+        });
+      } finally {
+        setIsLoading(false);
+      }
     }
   };
 
