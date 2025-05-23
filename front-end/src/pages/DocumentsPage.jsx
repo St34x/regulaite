@@ -39,7 +39,7 @@ import {
   Divider,
   ButtonGroup
 } from '@chakra-ui/react';
-import { FiUpload, FiSearch, FiFilter, FiMoreVertical, FiFile, FiTrash2, FiDownload, FiInfo, FiSettings, FiRefreshCw } from 'react-icons/fi';
+import { FiUpload, FiSearch, FiFilter, FiMoreVertical, FiFile, FiTrash2, FiDownload, FiInfo } from 'react-icons/fi';
 import { getDocuments, uploadDocument, deleteDocument, getDocumentStats, getParserTypes, repairDocumentMetadata, repairDocumentSizes, repairDocumentFileTypes } from '../services/documentService';
 
 const DocumentsPage = () => {

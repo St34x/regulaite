@@ -49,7 +49,9 @@ class HyPERagSystem:
         hypothetical_questions_per_chunk: int = 5,
         vector_weight: float = 0.75,
         semantic_weight: float = 0.25,
-        max_workers: int = 4
+        max_workers: int = 4,
+        qdrant_batch_size: int = 50,
+        qdrant_timeout: float = 120.0
     ):
         """
         Initialize the HyPE RAG System
@@ -65,6 +67,8 @@ class HyPERagSystem:
         self.vector_weight = vector_weight
         self.semantic_weight = semantic_weight
         self.max_workers = max_workers
+        self.qdrant_batch_size = qdrant_batch_size
+        self.qdrant_timeout = qdrant_timeout
         
         # Set OpenAI API key from environment if not provided
         self.openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
@@ -82,7 +86,12 @@ class HyPERagSystem:
         
         # Initialize Qdrant client
         logger.info(f"Connecting to Qdrant at {qdrant_url}")
-        self.qdrant_client = QdrantClient(url=qdrant_url)
+        self.qdrant_client = QdrantClient(
+            url=qdrant_url,
+            timeout=self.qdrant_timeout,
+            grpc_port=6334,
+            prefer_grpc=True
+        )
         
         # Create vector store
         self._ensure_collection_exists()
@@ -136,6 +145,58 @@ class HyPERagSystem:
         self.question_chain = self.question_gen_prompt | self.llm | StrOutputParser()
         
         logger.info("HyPE RAG System initialized successfully")
+    
+    def _batch_upsert_with_retry(self, collection_name: str, points: List[PointStruct], batch_size: int = 100, max_retries: int = 3) -> int:
+        """
+        Upsert points in batches with retry logic to handle timeouts.
+        
+        Args:
+            collection_name: Name of the collection to upsert to
+            points: List of points to upsert
+            batch_size: Number of points to upsert in each batch
+            max_retries: Maximum number of retries per batch
+            
+        Returns:
+            Number of successfully upserted points
+        """
+        total_upserted = 0
+        total_points = len(points)
+        
+        logger.info(f"Starting batch upsert of {total_points} points in batches of {batch_size}")
+        
+        for i in range(0, total_points, batch_size):
+            batch_points = points[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            total_batches = (total_points + batch_size - 1) // batch_size
+            
+            logger.info(f"Processing batch {batch_num}/{total_batches}: {len(batch_points)} points")
+            
+            for attempt in range(max_retries):
+                try:
+                    start_time = time.time()
+                    self.qdrant_client.upsert(
+                        collection_name=collection_name,
+                        points=batch_points
+                    )
+                    
+                    upsert_time = time.time() - start_time
+                    total_upserted += len(batch_points)
+                    logger.info(f"Batch {batch_num}/{total_batches} completed successfully in {upsert_time:.2f}s ({len(batch_points)} points)")
+                    break  # Success, move to next batch
+                    
+                except Exception as e:
+                    attempt_num = attempt + 1
+                    if attempt_num < max_retries:
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        logger.warning(f"Batch {batch_num}/{total_batches} failed on attempt {attempt_num}/{max_retries}: {str(e)}. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Batch {batch_num}/{total_batches} failed after {max_retries} attempts: {str(e)}")
+                        # Continue with next batch instead of failing completely
+                        continue
+        
+        logger.info(f"Batch upsert completed: {total_upserted}/{total_points} points successfully upserted")
+        return total_upserted
     
     def _ensure_collection_exists(self):
         """Ensure that the collection exists in Qdrant, or create it with the correct dimension"""
@@ -534,11 +595,12 @@ class HyPERagSystem:
             
             # Insert all points directly into Qdrant
             if points_to_add:
-                self.qdrant_client.upsert(
+                num_vectors_added_for_chunk = self._batch_upsert_with_retry(
                     collection_name=self.collection_name,
-                    points=points_to_add
+                    points=points_to_add,
+                    batch_size=self.qdrant_batch_size,
+                    max_retries=3
                 )
-                num_vectors_added_for_chunk = len(points_to_add)
                 logger.info(f"Added {num_vectors_added_for_chunk} points (1 chunk, {questions_indexed_for_chunk} questions) to Qdrant for chunk {node_id}")
             else:
                 logger.info(f"No points to add to Qdrant for chunk {node_id}")
@@ -749,13 +811,16 @@ class HyPERagSystem:
             
             # Store all question points in Qdrant
             if question_points:
-                self.qdrant_client.upsert(
+                num_stored = self._batch_upsert_with_retry(
                     collection_name=self.collection_name,
-                    points=question_points
+                    points=question_points,
+                    batch_size=self.qdrant_batch_size,
+                    max_retries=3
                 )
-                logger.info(f"Stored {len(question_points)} questions for chunk {chunk_id}")
+                logger.info(f"Stored {num_stored} questions for chunk {chunk_id}")
+                return num_stored
                 
-            return len(question_points)
+            return 0
             
         except Exception as e:
             logger.error(f"Error generating questions for chunk {chunk_id}: {str(e)}")
@@ -1423,11 +1488,12 @@ class HyPERagSystem:
             
             # Batch insert all points
             if points_to_add:
-                self.qdrant_client.upsert(
+                total_vectors_indexed = self._batch_upsert_with_retry(
                     collection_name=self.collection_name,
-                    points=points_to_add
+                    points=points_to_add,
+                    batch_size=self.qdrant_batch_size,
+                    max_retries=3
                 )
-                total_vectors_indexed = len(points_to_add)
                 logger.info(f"Stored {total_vectors_indexed} vectors for document {doc_id}")
             
             # Store document metadata in the metadata collection for frontend display

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Box, Flex, Center, Container, useColorModeValue } from '@chakra-ui/react';
+import { Box, Center, Container, useColorModeValue } from '@chakra-ui/react';
 import RegisterForm from '../components/auth/RegisterForm';
 import { useAuth } from '../contexts/AuthContext';
 

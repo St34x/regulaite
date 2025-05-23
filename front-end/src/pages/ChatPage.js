@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Shield, PanelLeft, X, RefreshCw } from 'lucide-react';
 import ChatMessage from '../components/chat/ChatMessage';
 import ChatHistory from '../components/chat/ChatHistory';
@@ -61,6 +61,12 @@ const ChatPage = () => {
   const buttonHoverBorderColor = useColorModeValue('purple.300', 'purple.600');
   const questionButtonBg = useColorModeValue('white', 'gray.700');
   const questionButtonBorder = useColorModeValue('gray.200', 'gray.600');
+  const loadingBg = useColorModeValue('blue.50', 'blue.900');
+  const loadingBorderColor = useColorModeValue('blue.200', 'blue.700');
+  const loadingTextColor = useColorModeValue('blue.700', 'blue.200');
+
+  // Add ref for tracking accumulated content to prevent stale closures
+  const messageContentRef = useRef(new Map());
 
   // Close sidebar on mobile by default
   useEffect(() => {
@@ -120,19 +126,12 @@ const ChatPage = () => {
     };
   }, [agentProgress]);
 
-  // Cleanup active requests on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       console.log('🧹 ChatPage unmounting, cleaning up');
-      // Temporarily disabled cancel functionality
-      // if (currentRequestId) {
-      //   console.log(`🛑 Cancelling active request on unmount: ${currentRequestId}`);
-      //   chatService.cancelRequest(currentRequestId);
-      // }
-      // // Cancel all requests when component unmounts
-      // chatService.cancelAllRequests();
     };
-  }, [currentRequestId]);
+  }, []);
 
   const fetchSessions = async () => {
     setError(null);
@@ -253,49 +252,6 @@ const ChatPage = () => {
     }
   };
 
-  const handleCancelRequest = () => {
-    console.log('⚠️ Cancel request functionality temporarily disabled');
-    // Temporarily disabled
-    // if (currentRequestId) {
-    //   console.log(`🛑 Cancelling request: ${currentRequestId}`);
-    //   chatService.cancelRequest(currentRequestId);
-    //   setCurrentRequestId(null);
-    //   setIsLoading(false);
-    //   
-    //   // Remove the temporary generating message
-    //   setMessages(currentMessages => {
-    //     const lastMessage = currentMessages[currentMessages.length - 1];
-    //     if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-    //       // Update the message to show it was cancelled instead of removing it
-    //       const updatedMessages = [...currentMessages];
-    //       updatedMessages[updatedMessages.length - 1] = {
-    //         ...lastMessage,
-    //         isGenerating: false,
-    //         processingState: "Cancelled by user",
-    //         content: "🚫 Request cancelled by user.",
-    //         metadata: {
-    //           ...lastMessage.metadata,
-    //           cancelled: true,
-    //           cancelledAt: new Date().toISOString()
-    //         }
-    //       };
-    //       return updatedMessages;
-    //     }
-    //     return currentMessages;
-    //   });
-    //   
-    //   toast({
-    //     title: 'Request Cancelled',
-    //     description: 'The chat request has been cancelled successfully.',
-    //     status: 'info',
-    //     duration: 3000,
-    //     isClosable: true,
-    //   });
-    // } else {
-    //   console.log('⚠️ No active request to cancel');
-    // }
-  };
-
   const handleSendMessage = async (content) => {
     console.log('🎯 handleSendMessage called with content:', content);
     console.log('🔄 Current isLoading state:', isLoading);
@@ -369,11 +325,19 @@ const ChatPage = () => {
             const lastMessage = updatedMessages[updatedMessages.length - 1];
             
             if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+              // Create a unique key for this message
+              const messageKey = `${lastMessage.id || 'temp'}_${lastMessage.timestamp}`;
+              
               if (chunkData.type === 'start') {
-                // Streaming started
+                // Streaming started - initialize the content accumulator
                 lastMessage.processingState = "Connection established, starting processing...";
                 lastMessage.metadata.streamStarted = true;
                 lastMessage.metadata.backendRequestId = chunkData.request_id;
+                
+                // Initialize content accumulator for this message
+                if (!messageContentRef.current.has(messageKey)) {
+                  messageContentRef.current.set(messageKey, '');
+                }
               } else if (chunkData.type === 'processing') {
                 // Processing update
                 lastMessage.processingState = chunkData.state || "Processing...";
@@ -440,17 +404,29 @@ const ChatPage = () => {
                   lastMessage.metadata.timeoutWarning = true;
                 }
               } else if (chunkData.type === 'token' && chunkData.content) {
-                // Response token
-                lastMessage.content += chunkData.content;
+                // Response token - FIXED ACCUMULATION TO PREVENT DUPLICATION
+                const currentContent = messageContentRef.current.get(messageKey) || '';
+                const newContent = currentContent + chunkData.content;
+                
+                // Update the ref with accumulated content
+                messageContentRef.current.set(messageKey, newContent);
+                
+                // Update the message content from ref to prevent stale closures
+                lastMessage.content = newContent;
                 lastMessage.processingState = "Generating response...";
               } else if (chunkData.type === 'end') {
                 // Streaming completed
                 lastMessage.isGenerating = false;
                 lastMessage.processingState = "Complete";
                 
-                // Update final message content if provided
-                if (chunkData.message && chunkData.message.length > lastMessage.content.length) {
-                  lastMessage.content = chunkData.message;
+                // Use the final content from the backend or the accumulated content
+                const accumulatedContent = messageContentRef.current.get(messageKey) || lastMessage.content;
+                const finalContent = chunkData.message || accumulatedContent;
+                
+                // Update final message content if provided from backend is longer
+                if (finalContent && finalContent.length >= lastMessage.content.length) {
+                  lastMessage.content = finalContent;
+                  messageContentRef.current.set(messageKey, finalContent);
                 }
                 
                 // Store final metadata
@@ -471,6 +447,9 @@ const ChatPage = () => {
                     }
                   });
                 }
+                
+                // Clean up the content accumulator for this message
+                messageContentRef.current.delete(messageKey);
               } else if (chunkData.type === 'error') {
                 // Handle streaming errors
                 lastMessage.isGenerating = false;
@@ -495,6 +474,9 @@ const ChatPage = () => {
                     lastMessage.metadata.processingSteps[currentStepIndex].status = 'failed';
                   }
                 }
+                
+                // Clean up content accumulator on error
+                messageContentRef.current.delete(messageKey);
               } else if (chunkData.type === 'agent_progress') {
                 // Agent progress update
                 lastMessage.metadata.agentProgress = chunkData.data;
@@ -593,10 +575,11 @@ const ChatPage = () => {
   };
 
   const handleSelectSession = async (sessionId) => {
-    if (sessionId === activeSessionId) return;
-    
     setError(null);
     setIsLoading(true);
+    
+    // Clean up any accumulated content from previous conversations
+    messageContentRef.current.clear();
     
     try {
       // Fetch messages for this session
@@ -649,6 +632,9 @@ const ChatPage = () => {
   const handleNewSession = async (force = false) => {
     setError(null);
     setIsLoading(true);
+    
+    // Clean up any accumulated content from previous conversations
+    messageContentRef.current.clear();
     
     // Check if there's already an empty conversation we can reuse
     if (!force) {
@@ -1004,9 +990,9 @@ const ChatPage = () => {
 
   return (
     <Box h="100vh" flexDirection="column">
-      {/* Header */}
+      {/* Header - Simplified */}
       <Box 
-        py={3} 
+        py={4} 
         px={6} 
         borderBottomWidth="1px" 
         borderColor={borderColor}
@@ -1015,14 +1001,11 @@ const ChatPage = () => {
       >
         <Flex justify="space-between" align="center">
           <Heading 
-            size="md" 
+            size="lg" 
             fontWeight="600"
             color={accentColor}
-            display="flex"
-            alignItems="center"
           >
-            <Shield size={20} style={{ marginRight: '8px' }} />
-            RegulaIte
+            RegulAIte Chat
           </Heading>
           
           {/* Mobile sidebar toggle */}
@@ -1070,30 +1053,25 @@ const ChatPage = () => {
           overflow="hidden"
           bg={chatBg}
         >
-          {/* Global Loading Indicator */}
+          {/* Simplified Loading Indicator */}
           {isLoading && (
             <Box 
-              bg="blue.50" 
+              bg={loadingBg} 
               borderBottom="1px solid" 
-              borderBottomColor="blue.200" 
+              borderBottomColor={loadingBorderColor} 
               px={4} 
               py={2}
             >
               <HStack spacing={2}>
-                <Spinner size="sm" color={accentColor} thickness="2px" />
-                <Text fontSize="sm" color="blue.700" fontWeight="medium">
-                  Processing your request...
+                <Spinner size="sm" color={accentColor} />
+                <Text fontSize="sm" color={loadingTextColor}>
+                  Processing...
                 </Text>
-                {currentRequestId && (
-                  <Text fontSize="xs" color="blue.600">
-                    Request ID: {currentRequestId.slice(-8)}
-                  </Text>
-                )}
               </HStack>
             </Box>
           )}
           
-          {/* Error notification */}
+          {/* Error notification - Simplified */}
           {error && (
             <Box 
               bg={errorBg} 
@@ -1106,12 +1084,11 @@ const ChatPage = () => {
                 <Text fontSize="sm">{error}</Text>
                 <Button 
                   size="xs" 
-                  leftIcon={<RefreshCw size={12} />} 
                   onClick={() => setError(null)}
-                  colorScheme="red"
-                  variant="outline"
+                  variant="ghost"
+                  color={errorColor}
                 >
-                  Dismiss
+                  ×
                 </Button>
               </Flex>
             </Box>
@@ -1122,40 +1099,35 @@ const ChatPage = () => {
             spacing={4} 
             flex="1" 
             overflowY="auto" 
-            p={4} 
+            p={6} 
             align="stretch"
           >
-            {/* Welcome header for new chats */}
+            {/* Welcome header for new chats - Simplified */}
             {messages.length <= 1 && (
               <Box textAlign="center" my={8}>
-                <Heading as="h1" size="lg" mb={4} color={textColor}>
-                  How can I help with GRC today?
+                <Heading as="h2" size="lg" mb={4} color={textColor}>
+                  How can I help you today?
                 </Heading>
                 <Text color={secondaryTextColor} mb={6}>
-                  Ask me anything about governance, risk, and compliance
+                  Ask me about governance, risk, and compliance
                 </Text>
                 
-                {/* Suggested questions */}
-                <HStack justify="center" spacing={2} wrap="wrap" mb={6}>
-                  {suggestedQuestions.map((question, index) => (
+                {/* Suggested questions - Simplified */}
+                <VStack spacing={2} maxW="md" mx="auto">
+                  {suggestedQuestions.slice(0, 3).map((question, index) => (
                     <Button
                       key={index}
                       size="sm"
-                      borderColor={questionButtonBorder}
-                      bg={questionButtonBg}
                       variant="outline"
-                      px={4}
+                      width="full"
                       onClick={() => handleSuggestedQuestion(question)}
-                      _hover={{
-                        bg: buttonHoverBg,
-                        borderColor: buttonHoverBorderColor
-                      }}
-                      m={1}
+                      textAlign="left"
+                      justifyContent="flex-start"
                     >
                       {question}
                     </Button>
                   ))}
-                </HStack>
+                </VStack>
               </Box>
             )}
             
@@ -1164,22 +1136,9 @@ const ChatPage = () => {
               <ChatMessage 
                 key={index} 
                 message={message} 
-                isLast={index === messages.length - 1}
+                isLoading={isLoading && index === messages.length - 1}
               />
             ))}
-            
-            {/* Loading indicator */}
-            {isLoading && (
-              <Flex justify="center" pt={4} pb={2}>
-                <Spinner 
-                  thickness="3px"
-                  speed="0.65s"
-                  emptyColor="gray.200"
-                  color={accentColor}
-                  size="md"
-                />
-              </Flex>
-            )}
             
             {/* Invisible element to scroll to */}
             <Box ref={messagesEndRef} />
@@ -1188,7 +1147,6 @@ const ChatPage = () => {
           {/* Chat input area */}
           <ChatControls 
             onSendMessage={handleSendMessage}
-            onCancelRequest={handleCancelRequest}
             disabled={isLoading}
             reasoningNodeId={reasoningNodeId}
           />
@@ -1200,7 +1158,6 @@ const ChatPage = () => {
         isVisible={isLoading && !currentRequestId} // Show for session operations, not chat messages
         message="Setting up your session..."
         subMessage="Please wait while we prepare your chat environment."
-        showCancel={false}
       />
     </Box>
   );

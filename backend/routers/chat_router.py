@@ -669,7 +669,7 @@ You will be provided with context information from various sources. When answeri
 
             # Get chat completion
             if request.stream:
-                # Handle streaming response
+                # Handle streaming response - IMPROVED VERSION BASED ON BEST PRACTICES
                 async def generate():
                     try:
                         # Start streaming response with request tracking
@@ -680,262 +680,175 @@ You will be provided with context information from various sources. When answeri
                             "request_id": f"stream_{int(request_start)}_{uuid.uuid4().hex[:8]}"
                         }) + "\n"
                         
-                        # Enhanced processing steps for transparency (with minimal delays)
+                        # Simplified processing steps
                         processing_steps = [
-                            {
-                                "step": "query_analysis", 
-                                "message": "Analyzing your query and understanding the intent",
-                                "details": "Parsing natural language, identifying key concepts, and determining query complexity"
-                            },
-                            {
-                                "step": "intent_classification", 
-                                "message": "Classifying query intent and domain",
-                                "details": "Determining if this is a compliance question, policy inquiry, or general guidance request"
-                            },
-                            {
-                                "step": "knowledge_search", 
-                                "message": "Searching knowledge base for relevant information",
-                                "details": "Performing hybrid vector + semantic search across regulatory documents and guidelines"
-                            },
-                            {
-                                "step": "context_retrieval", 
-                                "message": "Retrieving and ranking relevant documents",
-                                "details": "Evaluating document relevance scores and filtering most pertinent information"
-                            },
-                            {
-                                "step": "reasoning_preparation", 
-                                "message": "Preparing reasoning framework",
-                                "details": "Organizing information hierarchy and establishing logical reasoning paths"
-                            },
-                            {
-                                "step": "response_generation", 
-                                "message": "Generating comprehensive response",
-                                "details": "Synthesizing information with domain expertise to create accurate, helpful answer"
-                            }
+                            "Analyzing your query...",
+                            "Searching knowledge base...", 
+                            "Retrieving relevant context...",
+                            "Generating response..."
                         ]
                         
-                        # Send enhanced processing updates with minimal delays
-                        for i, step in enumerate(processing_steps):
+                        # Send processing updates quickly
+                        for i, step_message in enumerate(processing_steps):
                             yield json.dumps({
                                 "type": "processing",
-                                "state": step["message"],
-                                "step": step["step"],
+                                "state": step_message,
+                                "step": f"step_{i+1}",
                                 "step_number": i + 1,
                                 "total_steps": len(processing_steps),
-                                "details": step["details"],
                                 "timestamp": datetime.now().isoformat()
                             }) + "\n"
                             
-                            # Minimal delay only for context retrieval to show real work
-                            if step["step"] in ["knowledge_search"]:
-                                await asyncio.sleep(0.1)  # Further reduced from 0.2s
-                            elif step["step"] in ["context_retrieval"]:
-                                await asyncio.sleep(0.05)  # Minimal delay to show progress
+                            # Only add minimal delay for context retrieval step
+                            if i == 2:  # Context retrieval step
+                                await asyncio.sleep(0.1)
                         
-                        # Before generating, provide context insights
+                        # Context insights if available
                         if context_used and context_result:
                             source_count = len(context_result.get("sources", []))
-                            context_quality = context_result.get("context_quality", "unknown")
-                            
                             yield json.dumps({
                                 "type": "processing",
-                                "state": f"Found {source_count} relevant sources with {context_quality} quality context",
-                                "step": "context_evaluation",
-                                "step_number": 5,
-                                "total_steps": len(processing_steps),
-                                "details": f"Successfully retrieved {source_count} documents with {context_quality}-quality relevance scores",
+                                "state": f"Found {source_count} relevant sources",
+                                "step": "context_ready",
                                 "context_metadata": {
                                     "source_count": source_count,
-                                    "context_quality": context_quality,
-                                    "hallucination_risk": context_result.get("hallucination_risk")
+                                    "context_quality": context_result.get("context_quality")
                                 },
                                 "timestamp": datetime.now().isoformat()
                             }) + "\n"
                         
-                        # Final processing state before generation
-                        yield json.dumps({
-                            "type": "processing",
-                            "state": "Starting response generation",
-                            "step": "response_generation", 
-                            "step_number": len(processing_steps),
-                            "total_steps": len(processing_steps),
-                            "timestamp": datetime.now().isoformat()
-                        }) + "\n"
-                        
-                        # Initialize token collection
-                        collected_tokens = []
-                        internal_thought_tokens = []
-                        in_internal_thoughts = False
-                        
+                        # IMPROVED STREAMING WITH REAL-TIME DEDUPLICATION
                         try:
-                            # Create async streaming completion with timeout protection
-                            logger.info("Starting OpenAI streaming request")
+                            logger.info("Starting improved OpenAI streaming with deduplication")
                             
-                            # Add timeout protection for OpenAI call
-                            openai_timeout = 120  # 2 minutes for OpenAI call
-                            
-                            # Create the OpenAI stream with timeout
-                            stream_task = asyncio.create_task(
-                                client.chat.completions.create(
-                                    model=request.model,
-                                    messages=openai_messages,
-                                    temperature=request.temperature,
-                                    max_tokens=request.max_tokens,
-                                    stream=True,
-                                    timeout=openai_timeout
-                                )
+                            # Create the stream
+                            stream = await client.chat.completions.create(
+                                model=request.model,
+                                messages=openai_messages,
+                                temperature=request.temperature,
+                                max_tokens=request.max_tokens,
+                                stream=True
                             )
                             
-                            timeout_task = asyncio.create_task(asyncio.sleep(openai_timeout))
+                            # Advanced token collection with real-time deduplication
+                            collected_tokens = []
+                            full_response = ""  # Track full accumulated response
+                            internal_thought_content = []
+                            in_internal_thoughts = False
+                            last_sent_content = ""  # Track what we've already sent to prevent duplication
                             
-                            # Wait for either the stream creation or timeout
-                            done, pending = await asyncio.wait(
-                                [stream_task, timeout_task],
-                                return_when=asyncio.FIRST_COMPLETED
-                            )
-                            
-                            # Cancel any pending tasks
-                            for task in pending:
-                                task.cancel()
-                                try:
-                                    await task
-                                except asyncio.CancelledError:
-                                    pass
-                            
-                            if stream_task not in done:
-                                # OpenAI call timed out
-                                logger.error("OpenAI stream creation timed out")
-                                yield json.dumps({
-                                    "type": "error",
-                                    "message": "OpenAI request timed out. Please try again with a shorter question.",
-                                    "error_code": "OPENAI_TIMEOUT"
-                                }) + "\n"
-                                return
-                            
-                            # Get the stream
-                            stream = await stream_task
-                            logger.info("OpenAI stream created successfully, processing chunks")
-                            
-                            # Track chunk processing time
-                            last_chunk_time = time.time()
-                            chunk_timeout = 30  # 30 seconds between chunks
-                            heartbeat_interval = 10  # Send heartbeat every 10 seconds
-                            last_heartbeat = time.time()
-                            
-                            # Process the async stream with chunk timeout protection
+                            # Process stream chunks with improved logic
                             async for chunk in stream:
-                                try:
-                                    # Update last chunk time
-                                    current_time = time.time()
+                                if (hasattr(chunk, 'choices') and 
+                                    len(chunk.choices) > 0 and 
+                                    hasattr(chunk.choices[0], 'delta') and 
+                                    hasattr(chunk.choices[0].delta, 'content') and 
+                                    chunk.choices[0].delta.content is not None):
                                     
-                                    # Send periodic heartbeat to show we're still processing
-                                    if current_time - last_heartbeat > heartbeat_interval:
-                                        yield json.dumps({
-                                            "type": "processing",
-                                            "state": "Generating response... (receiving data from AI)",
-                                            "step": "generation_active",
-                                            "timestamp": datetime.now().isoformat()
-                                        }) + "\n"
-                                        last_heartbeat = current_time
+                                    content = chunk.choices[0].delta.content
                                     
-                                    # Check if too much time passed since last chunk
-                                    if current_time - last_chunk_time > chunk_timeout:
-                                        logger.warning(f"Chunk timeout detected ({current_time - last_chunk_time:.2f}s)")
-                                        yield json.dumps({
-                                            "type": "processing",
-                                            "state": "Response generation taking longer than expected...",
-                                            "step": "generation_delay",
-                                            "timestamp": datetime.now().isoformat()
-                                        }) + "\n"
+                                    # Skip empty content
+                                    if not content:
+                                        continue
                                     
-                                    last_chunk_time = current_time
+                                    # Accumulate all content for full tracking
+                                    full_response += content
+                                    collected_tokens.append(content)
                                     
-                                    if (hasattr(chunk, 'choices') and 
-                                        len(chunk.choices) > 0 and 
-                                        hasattr(chunk.choices[0], 'delta') and 
-                                        hasattr(chunk.choices[0].delta, 'content') and 
-                                        chunk.choices[0].delta.content is not None):
-                                        
-                                        content = chunk.choices[0].delta.content
-                                        
-                                        # Track if we're inside internal thoughts tags
-                                        if "<internal_thoughts>" in content:
-                                            in_internal_thoughts = True
-                                            # Split at the tag and add the part before to normal tokens
-                                            parts = content.split("<internal_thoughts>", 1)
-                                            if parts[0]:
-                                                collected_tokens.append(parts[0])
-                                                # Send the visible token
+                                    # Real-time internal thoughts detection
+                                    if "<internal_thoughts>" in content:
+                                        in_internal_thoughts = True
+                                        # Split content at the tag
+                                        parts = content.split("<internal_thoughts>", 1)
+                                        if parts[0]:
+                                            # Send the part before the tag
+                                            new_content = parts[0]
+                                            # Check for duplication against last sent content
+                                            if not last_sent_content or not new_content.startswith(last_sent_content[-min(len(last_sent_content), 50):]):
                                                 yield json.dumps({
                                                     "type": "token",
-                                                    "content": parts[0]
+                                                    "content": new_content
                                                 }) + "\n"
-                                            content = parts[1] if len(parts) > 1 else ""
+                                                last_sent_content += new_content
                                         
-                                        if "</internal_thoughts>" in content and in_internal_thoughts:
-                                            parts = content.split("</internal_thoughts>", 1)
-                                            if parts[0]:
-                                                internal_thought_tokens.append(parts[0])
-                                            if len(parts) > 1 and parts[1]:
-                                                collected_tokens.append(parts[1])
-                                                # Send the visible token
-                                                yield json.dumps({
-                                                    "type": "token", 
-                                                    "content": parts[1]
-                                                }) + "\n"
-                                            in_internal_thoughts = False
-                                            
-                                            # Send processing update with current internal thoughts
-                                            current_thoughts = "".join(internal_thought_tokens)
+                                        # Start collecting internal thoughts
+                                        if len(parts) > 1:
+                                            internal_thought_content.append(parts[1])
+                                        continue
+                                    
+                                    elif "</internal_thoughts>" in content and in_internal_thoughts:
+                                        # End of internal thoughts
+                                        parts = content.split("</internal_thoughts>", 1)
+                                        if parts[0]:
+                                            internal_thought_content.append(parts[0])
+                                        
+                                        # Send internal thoughts as processing update
+                                        if internal_thought_content:
+                                            thoughts_text = "".join(internal_thought_content)
                                             yield json.dumps({
                                                 "type": "processing",
                                                 "state": "Processing internal reasoning",
                                                 "step": "reasoning",
-                                                "internal_thoughts": current_thoughts,
+                                                "internal_thoughts": thoughts_text,
                                                 "timestamp": datetime.now().isoformat()
                                             }) + "\n"
-                                        elif in_internal_thoughts:
-                                            internal_thought_tokens.append(content)
-                                            
-                                            # Periodically send processing updates with current internal thoughts (reduced frequency)
-                                            if len(internal_thought_tokens) % 30 == 0:  # Even less frequent
-                                                current_thoughts = "".join(internal_thought_tokens)
+                                        
+                                        in_internal_thoughts = False
+                                        
+                                        # Send content after the closing tag
+                                        if len(parts) > 1 and parts[1]:
+                                            new_content = parts[1]
+                                            # Check for duplication
+                                            if not last_sent_content or not new_content.startswith(last_sent_content[-min(len(last_sent_content), 50):]):
                                                 yield json.dumps({
-                                                    "type": "processing",
-                                                    "state": "Developing reasoning and analysis",
-                                                    "step": "reasoning", 
-                                                    "internal_thoughts": current_thoughts,
-                                                    "timestamp": datetime.now().isoformat()
+                                                    "type": "token",
+                                                    "content": new_content
                                                 }) + "\n"
-                                        else:
-                                            collected_tokens.append(content)
-                                            # Send the visible token immediately
-                                            yield json.dumps({
-                                                "type": "token",
-                                                "content": content
-                                            }) + "\n"
+                                                last_sent_content += new_content
+                                        continue
+                                    
+                                    elif in_internal_thoughts:
+                                        # Accumulate internal thoughts content
+                                        internal_thought_content.append(content)
+                                        continue
+                                    
+                                    else:
+                                        # Normal content - apply real-time deduplication
+                                        # Check if this content would create a duplication
+                                        if last_sent_content:
+                                            # Look for duplications where the new content starts with the end of the last sent content
+                                            overlap_check_length = min(len(last_sent_content), 100)
+                                            recent_content = last_sent_content[-overlap_check_length:] if overlap_check_length > 0 else ""
                                             
-                                except Exception as chunk_error:
-                                    logger.error(f"Error processing chunk: {str(chunk_error)}")
-                                    # Send error notification but continue processing
-                                    yield json.dumps({
-                                        "type": "processing",
-                                        "state": "Recovering from chunk processing error...",
-                                        "step": "error_recovery",
-                                        "timestamp": datetime.now().isoformat()
-                                    }) + "\n"
-                                    continue
+                                            # If the new content is a repetition of recent content, skip it
+                                            if recent_content and content in recent_content:
+                                                logger.debug(f"Skipping duplicate content: '{content}'")
+                                                continue
+                                                
+                                            # Check for partial overlaps at word boundaries
+                                            words_recent = recent_content.split()
+                                            words_new = content.split()
+                                            
+                                            # If new content starts with the same words as recent content ends, it might be a duplication
+                                            if (len(words_recent) > 0 and len(words_new) > 0 and 
+                                                len(words_recent) >= 2 and len(words_new) >= 2):
+                                                
+                                                # Check if last 2-3 words of recent content match start of new content
+                                                for check_len in [3, 2]:
+                                                    if (len(words_recent) >= check_len and len(words_new) >= check_len and
+                                                        words_recent[-check_len:] == words_new[:check_len]):
+                                                        logger.debug(f"Skipping overlapping duplicate: '{content}'")
+                                                        continue
+                                        
+                                        # Content passes deduplication checks - send it
+                                        yield json.dumps({
+                                            "type": "token",
+                                            "content": content
+                                        }) + "\n"
+                                        last_sent_content += content
                             
-                            logger.info(f"OpenAI streaming completed successfully in {time.time() - request_start:.2f}s")
+                            logger.info(f"OpenAI streaming completed successfully")
                             
-                        except asyncio.TimeoutError:
-                            logger.error("OpenAI streaming timed out")
-                            yield json.dumps({
-                                "type": "error",
-                                "message": "Response generation timed out. Please try again with a shorter question.",
-                                "error_code": "GENERATION_TIMEOUT"
-                            }) + "\n"
-                            return
                         except Exception as e:
                             logger.error(f"Error in OpenAI streaming: {str(e)}")
                             yield json.dumps({
@@ -945,20 +858,56 @@ You will be provided with context information from various sources. When answeri
                             }) + "\n"
                             return
                         
-                        # Combine tokens to get the full response
-                        assistant_response = "".join(collected_tokens)
+                        # Process the final accumulated response
+                        final_response = full_response
+                        final_internal_thoughts = None
                         
-                        # Final internal thoughts
-                        internal_thoughts = "".join(internal_thought_tokens) if internal_thought_tokens else None
-                        
-                        if not internal_thoughts:
-                            # If no internal thoughts were extracted via streaming, try regex extraction
-                            internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_response, re.DOTALL)
+                        # Extract internal thoughts from full response if any were missed
+                        if internal_thought_content:
+                            final_internal_thoughts = "".join(internal_thought_content)
+                        else:
+                            # Fallback: extract from full response
+                            internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', final_response, re.DOTALL)
                             if internal_thoughts_match:
-                                internal_thoughts = internal_thoughts_match.group(1).strip()
-                                # Remove internal thoughts from the message
-                                assistant_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_response, flags=re.DOTALL).strip()
-                                logger.info(f"Extracted internal thoughts via regex: {internal_thoughts[:50]}...")
+                                final_internal_thoughts = internal_thoughts_match.group(1).strip()
+                        
+                        # Clean the final response (remove internal thoughts tags)
+                        cleaned_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', final_response, flags=re.DOTALL).strip()
+                        cleaned_response = re.sub(r'</?internal[^>]*thoughts[^>]*>', '', cleaned_response).strip()
+                        
+                        # Advanced deduplication on the final response
+                        # This handles any remaining issues that real-time deduplication missed
+                        words = cleaned_response.split()
+                        deduplicated_words = []
+                        i = 0
+                        
+                        while i < len(words):
+                            current_word = words[i]
+                            
+                            # Look ahead for potential duplications
+                            skip_count = 0
+                            
+                            # Check for immediate word repetition
+                            if i + 1 < len(words) and words[i] == words[i + 1]:
+                                skip_count = 1
+                            
+                            # Check for phrase repetitions (2-3 words)
+                            elif i + 3 < len(words):
+                                # Check 2-word phrase repetition
+                                if (words[i:i+2] == words[i+2:i+4]):
+                                    skip_count = 2
+                                # Check 3-word phrase repetition
+                                elif i + 5 < len(words) and words[i:i+3] == words[i+3:i+6]:
+                                    skip_count = 3
+                            
+                            deduplicated_words.append(current_word)
+                            i += 1 + skip_count
+                        
+                        cleaned_response = ' '.join(deduplicated_words).strip()
+                        
+                        # Additional cleanup for punctuation duplications
+                        cleaned_response = re.sub(r'([.!?])\s*\1+', r'\1', cleaned_response)  # Remove repeated punctuation
+                        cleaned_response = re.sub(r'\s+', ' ', cleaned_response).strip()  # Clean excessive whitespace
                         
                         # Store the response in chat history
                         try:
@@ -967,12 +916,11 @@ You will be provided with context information from various sources. When answeri
                                 INSERT INTO chat_history (user_id, session_id, message_text, message_role)
                                 VALUES (?, ?, ?, ?)
                                 """,
-                                (user_id, session_id, assistant_response, "assistant")
+                                (user_id, session_id, cleaned_response, "assistant")
                             )
                             conn.commit()
                         except Exception as e:
                             logger.error(f"Error storing assistant message in chat history: {str(e)}")
-                            # Continue anyway, as this is not critical
                         
                         # Extract sources from context result if available
                         sources = []
@@ -982,7 +930,7 @@ You will be provided with context information from various sources. When answeri
                         # Send completion event
                         yield json.dumps({
                             "type": "end",
-                            "message": assistant_response,
+                            "message": cleaned_response,
                             "model": request.model,
                             "context_used": context_used,
                             "session_id": session_id,
@@ -990,7 +938,7 @@ You will be provided with context information from various sources. When answeri
                             "sources": sources,
                             "context_quality": context_result.get("context_quality") if context_result else None,
                             "hallucination_risk": context_result.get("hallucination_risk") if context_result else None,
-                            "internal_thoughts": internal_thoughts
+                            "internal_thoughts": final_internal_thoughts
                         }) + "\n"
                         
                         logger.info("Streaming response completed successfully")

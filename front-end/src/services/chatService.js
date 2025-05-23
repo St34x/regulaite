@@ -14,9 +14,6 @@ const api = axios.create({
   timeout: 600000, // 10 minutes timeout (increased from 5 minutes)
 });
 
-// Global abort controllers for request cancellation
-let activeRequests = new Map();
-
 // Utility function to ensure we always have proper Error objects
 const createSafeError = (err, defaultMessage = 'An unexpected error occurred') => {
   if (!err) {
@@ -77,63 +74,6 @@ api.interceptors.request.use(
  * Service to handle interactions with the chat API
  */
 const chatService = {
-  /**
-   * Cancel an active request
-   * @param {string} requestId - ID of the request to cancel
-   */
-  cancelRequest: (requestId) => {
-    console.log(`⚠️ Cancel request functionality temporarily disabled for: ${requestId}`);
-    // Temporarily disabled to prevent issues
-    // const controller = activeRequests.get(requestId);
-    // if (controller) {
-    //   try {
-    //     if (!controller.signal.aborted) {
-    //       controller.abort('User cancelled request');
-    //       console.log(`✅ Cancelled request: ${requestId}`);
-    //     } else {
-    //       console.log(`⚠️ Request ${requestId} was already cancelled`);
-    //     }
-    //   } catch (error) {
-    //     // Silently handle abort errors - these are expected when cancelling requests
-    //     console.log(`✅ Request ${requestId} was aborted successfully`);
-    //   } finally {
-    //     // Always remove from active requests map
-    //     activeRequests.delete(requestId);
-    //   }
-    // } else {
-    //   console.log(`⚠️ Request ${requestId} not found in active requests`);
-    // }
-  },
-
-  /**
-   * Cancel all active requests
-   */
-  cancelAllRequests: () => {
-    console.log(`⚠️ Cancel all requests functionality temporarily disabled`);
-    // Temporarily disabled to prevent issues
-    // console.log(`Cancelling ${activeRequests.size} active requests...`);
-    // 
-    // // Create a copy of the keys to avoid modification during iteration
-    // const requestIds = Array.from(activeRequests.keys());
-    // 
-    // requestIds.forEach((requestId) => {
-    //   try {
-    //     const controller = activeRequests.get(requestId);
-    //     if (controller && !controller.signal.aborted) {
-    //       controller.abort('User cancelled all requests');
-    //       console.log(`✅ Cancelled request: ${requestId}`);
-    //     }
-    //   } catch (error) {
-    //     // All abort-related errors are expected and should be handled silently
-    //     console.log(`✅ Request ${requestId} was aborted successfully`);
-    //   }
-    // });
-    // 
-    // // Clear all requests regardless of success/failure
-    // activeRequests.clear();
-    // console.log('🧹 All active requests cleared');
-  },
-
   /**
    * Get chat sessions for the current user
    * @param {string} userId - Optional user ID
@@ -274,10 +214,6 @@ const chatService = {
     let timeoutId = null;
     
     try {
-      // Temporarily disable abort controller to prevent cancellation issues
-      // const abortController = new AbortController();
-      // activeRequests.set(reqId, abortController);
-      
       // Log message length for debugging
       const messageLength = message.trim().length;
       console.log(`Streaming message with length: ${messageLength}, Request ID: ${reqId}`);
@@ -352,16 +288,12 @@ const chatService = {
       const timeoutMs = options.timeout || 600000; // 10 minutes default
       timeoutId = setTimeout(() => {
         console.warn(`Request ${reqId} timed out after ${timeoutMs}ms`);
-        // Don't abort for now, just log
-        // abortController.abort('Request timeout');
       }, timeoutMs);
       
       const response = await fetch(`${API_URL}/chat/rag`, {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(requestParams),
-        // Temporarily disable abort signal
-        // signal: abortController.signal,
       });
 
       // Clear timeout since we got a response
@@ -385,9 +317,6 @@ const chatService = {
       
       // Set up heartbeat to detect if streaming stalls
       heartbeatInterval = setInterval(() => {
-        // Skip abort check for now
-        // if (abortController.signal.aborted) return;
-        
         const now = Date.now();
         if (now - lastProgressTime > progressTimeout) {
           console.warn(`No progress in ${progressTimeout}ms, request may be stalled`);
@@ -408,9 +337,6 @@ const chatService = {
       // Connection health monitoring
       let connectionHealthy = true;
       connectionCheckInterval = setInterval(() => {
-        // Skip abort check for now
-        // if (abortController.signal.aborted) return;
-        
         const now = Date.now();
         const timeSinceLastProgress = now - lastProgressTime;
         
@@ -445,12 +371,6 @@ const chatService = {
       
       try {
         while (true) {
-          // Skip abort check for now
-          // if (abortController.signal.aborted) {
-          //   console.log('Stream aborted, breaking read loop');
-          //   break;
-          // }
-          
           const { done, value } = await reader.read();
           
           if (done) {
@@ -626,27 +546,6 @@ const chatService = {
       }
       
       throw safeError;
-    } finally {
-      // Final cleanup
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-      if (heartbeatInterval) {
-        clearInterval(heartbeatInterval);
-      }
-      if (connectionCheckInterval) {
-        clearInterval(connectionCheckInterval);
-      }
-      if (reader) {
-        try {
-          await reader.cancel();
-          reader.releaseLock();
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-      }
-      // Don't delete from activeRequests since we're not using it
-      // activeRequests.delete(reqId);
     }
   },
 
@@ -963,10 +862,6 @@ const chatService = {
     console.log('🔑 Request ID:', reqId);
     
     try {
-      // Create abort controller for this request
-      const abortController = new AbortController();
-      activeRequests.set(reqId, abortController);
-      
       // Always ensure streaming is enabled
       payload.stream = true;
       
@@ -989,7 +884,6 @@ const chatService = {
           'Cache-Control': 'no-cache'
         },
         body: JSON.stringify(payload),
-        signal: abortController.signal
       });
       
       console.log('📨 Response received:', {
@@ -1104,12 +998,6 @@ const chatService = {
             }
           }
         } catch (readError) {
-          // Check if this is an abort error - these are expected during cleanup
-          if (readError.name === 'AbortError' || readError instanceof DOMException) {
-            console.log('✅ Stream reading was cancelled (AbortError)');
-            return; // Exit gracefully
-          }
-          
           console.error('❌ Error reading stream:', readError);
           throw readError;
         }
@@ -1127,25 +1015,13 @@ const chatService = {
       }
       
     } catch (error) {
-      // Check if this is an abort error - these are expected during cleanup
-      if (error.name === 'AbortError' || error instanceof DOMException) {
-        console.log('✅ Request was cancelled:', error.message);
-        return; // Exit gracefully without calling error callback
-      }
-      
       console.error('❌ streamChatMessage error:', error);
-      
-      // Clean up
-      activeRequests.delete(reqId);
       
       // Call error callback for unexpected errors only
       const { onError = () => {} } = callbacks;
       onError(error);
       
       throw error;
-    } finally {
-      // Ensure cleanup
-      activeRequests.delete(reqId);
     }
   }
 };

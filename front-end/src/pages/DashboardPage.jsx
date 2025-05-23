@@ -7,14 +7,12 @@ import {
   Text, 
   Button, 
   Grid, 
-  GridItem,
   Card, 
   CardHeader, 
   CardBody, 
   CardFooter,
   Spinner,
   Stat,
-  StatLabel,
   StatNumber,
   StatHelpText,
   useColorModeValue
@@ -22,13 +20,6 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import UserProfile from '../components/auth/UserProfile';
 import { getDocumentStats } from '../services/documentService';
-
-// Import our custom dashboard widgets
-import ComplianceDonutChart from '../components/dashboard/ComplianceDonutChart';
-import RiskTrendChart from '../components/dashboard/RiskTrendChart';
-import FrameworkComplianceChart from '../components/dashboard/FrameworkComplianceChart';
-import RiskRadarChart from '../components/dashboard/RiskRadarChart';
-import RecentAlertsWidget from '../components/dashboard/RecentAlertsWidget';
 
 const DashboardPage = () => {
   const { currentUser } = useAuth();
@@ -96,14 +87,14 @@ const DashboardPage = () => {
           gap={4}
         >
           <Box>
-            <Heading as="h1" size="xl">Dashboard</Heading>
+            <Heading as="h1" size="xl" mb={2}>Dashboard</Heading>
             <Text color="gray.500">
               Welcome back, {currentUser?.full_name || 'User'}!
             </Text>
           </Box>
-          <Flex gap={2}>
+          <Flex gap={3}>
             <Button as={RouterLink} to="/chat" variant="outline">
-              Chat
+              Start Chat
             </Button>
             <Button 
               as={RouterLink} 
@@ -117,32 +108,29 @@ const DashboardPage = () => {
           </Flex>
         </Flex>
 
-        {/* Original widgets */}
+        {/* Main dashboard cards */}
         <Grid 
           templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
           gap={6}
-          mb={8}
         >
           <Card bg={cardBg} boxShadow="md" borderRadius="lg">
             <CardHeader>
               <Heading size="md">Documents</Heading>
-              <Text fontSize="sm" color="gray.500">View your regulatory documents</Text>
+              <Text fontSize="sm" color="gray.500">Your regulatory document library</Text>
             </CardHeader>
             <CardBody>
               <Stat>
-                <StatNumber fontSize="3xl">{dashboardData?.documentCount || 0}</StatNumber>
-                <StatHelpText>Total documents in your repository</StatHelpText>
+                <StatNumber fontSize="3xl" color={accentColor}>
+                  {dashboardData?.documentCount || 0}
+                </StatNumber>
+                <StatHelpText>Total documents</StatHelpText>
               </Stat>
               {dashboardData?.totalStorageMb > 0 && (
-                <Stat mt={2}>
-                  <StatNumber fontSize="xl">{dashboardData.totalStorageMb.toFixed(2)} MB</StatNumber>
-                  <StatHelpText>Total storage used</StatHelpText>
-                </Stat>
-              )}
-              {dashboardData?.totalChunks > 0 && (
-                <Stat mt={2}>
-                  <StatNumber fontSize="xl">{dashboardData.totalChunks}</StatNumber>
-                  <StatHelpText>Total document chunks</StatHelpText>
+                <Stat mt={3}>
+                  <StatNumber fontSize="lg">
+                    {dashboardData.totalStorageMb.toFixed(1)} MB
+                  </StatNumber>
+                  <StatHelpText>Storage used</StatHelpText>
                 </Stat>
               )}
             </CardBody>
@@ -160,20 +148,23 @@ const DashboardPage = () => {
 
           <Card bg={cardBg} boxShadow="md" borderRadius="lg">
             <CardHeader>
-              <Heading size="md">AI Chat</Heading>
-              <Text fontSize="sm" color="gray.500">Chat with your regulatory AI assistant</Text>
+              <Heading size="md">AI Assistant</Heading>
+              <Text fontSize="sm" color="gray.500">Get instant answers to compliance questions</Text>
             </CardHeader>
             <CardBody>
-              <Text fontSize="sm" color="gray.500">
-                Ask questions about your documents and get instant answers
+              <Text fontSize="sm" color="gray.600">
+                Ask questions about your documents and get AI-powered insights on governance, 
+                risk, and compliance topics.
               </Text>
             </CardBody>
             <CardFooter>
               <Button 
                 as={RouterLink} 
                 to="/chat"
-                variant="outline"
+                bg={accentColor}
+                color="white"
                 width="full"
+                _hover={{ bg: '#3a1296' }}
               >
                 Start Chatting
               </Button>
@@ -182,45 +173,13 @@ const DashboardPage = () => {
 
           <Card bg={cardBg} boxShadow="md" borderRadius="lg">
             <CardHeader>
-              <Heading size="md">User Profile</Heading>
-              <Text fontSize="sm" color="gray.500">Your account information</Text>
+              <Heading size="md">Account</Heading>
+              <Text fontSize="sm" color="gray.500">Your profile and settings</Text>
             </CardHeader>
             <CardBody>
               <UserProfile />
             </CardBody>
           </Card>
-        </Grid>
-
-        {/* New visualization widgets */}
-        <Heading as="h2" size="lg" mb={4}>Compliance & Risk Analytics</Heading>
-        <Grid 
-          templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
-          gap={6}
-          mb={8}
-        >
-          <GridItem colSpan={{ base: 1, lg: 1 }}>
-            <ComplianceDonutChart />
-          </GridItem>
-          <GridItem colSpan={{ base: 1, lg: 2 }}>
-            <RiskTrendChart />
-          </GridItem>
-          <GridItem colSpan={{ base: 1, lg: 2 }}>
-            <FrameworkComplianceChart />
-          </GridItem>
-          <GridItem colSpan={{ base: 1, lg: 1 }}>
-            <RecentAlertsWidget />
-          </GridItem>
-        </Grid>
-        
-        {/* Additional widget section */}
-        <Heading as="h2" size="lg" mb={4}>Risk Assessment</Heading>
-        <Grid 
-          templateColumns={{ base: '1fr', md: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}
-          gap={6}
-        >
-          <GridItem colSpan={{ base: 1, lg: 3 }}>
-            <RiskRadarChart />
-          </GridItem>
         </Grid>
       </Box>
     </Box>

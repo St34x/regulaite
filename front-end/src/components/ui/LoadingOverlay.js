@@ -5,10 +5,8 @@ import {
   Spinner,
   Text,
   VStack,
-  Button,
   useColorModeValue
 } from '@chakra-ui/react';
-import { StopCircle } from 'lucide-react';
 
 /**
  * Loading overlay component to prevent interactions during critical operations
@@ -17,8 +15,6 @@ const LoadingOverlay = ({
   isVisible = false,
   message = "Processing...",
   subMessage = null,
-  showCancel = false,
-  onCancel = null,
   zIndex = 1000
 }) => {
   const bgColor = useColorModeValue('rgba(255, 255, 255, 0.9)', 'rgba(0, 0, 0, 0.9)');
@@ -66,19 +62,6 @@ const LoadingOverlay = ({
           >
             {subMessage}
           </Text>
-        )}
-        
-        {showCancel && onCancel && (
-          <Button
-            leftIcon={<StopCircle size={16} />}
-            onClick={onCancel}
-            colorScheme="red"
-            variant="outline"
-            size="sm"
-            mt={2}
-          >
-            Cancel Request
-          </Button>
         )}
       </VStack>
     </Box>

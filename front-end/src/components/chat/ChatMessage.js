@@ -1,78 +1,77 @@
 import React, { useState, useEffect } from 'react';
-import { User, Bot, Info, Cpu, ArrowDownRight, FileText, AlertTriangle, ChevronDown, ChevronUp, BrainCircuit } from 'lucide-react';
+import { User, Bot, FileText, ChevronDown, ChevronUp } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip, Progress, Button, Collapse, VStack, HStack } from '@chakra-ui/react';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Button, Collapse, VStack } from '@chakra-ui/react';
 import ProcessingStatus from './ProcessingStatus';
-import AIReasoningPanel from './AIReasoningPanel';
 
 /**
- * Renders a single chat message
- * @param {Object} props
- * @param {Object} props.message - Message object with role and content
- * @param {boolean} props.isLoading - Whether this message is still loading
- * @param {Object} props.agentInfo - Optional agent information
- * @param {Object} props.previousMessage - Previous message in the conversation (helps with context)
+ * Renders a single chat message with clean, professional styling
  */
 const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMessage = null }) => {
-  const [expandedSources, setExpandedSources] = useState({});
+  const [showSources, setShowSources] = useState(false);
   const [showAllSources, setShowAllSources] = useState(false);
-  const [agentInfoExpanded, setAgentInfoExpanded] = useState(false);
-  const [internalThoughtsExpanded, setInternalThoughtsExpanded] = useState(false);
   
   const isUser = message.role === 'user';
-  const isShortUserMessage = isUser && message.content.trim().length <= 20;
-  const showContextIndicator = isShortUserMessage && previousMessage && previousMessage.role === 'user';
   
   // Check if message has sources
   const hasSources = !isUser && message.metadata && message.metadata.sources && message.metadata.sources.length > 0;
-  const hasHallucinationRisk = !isUser && message.metadata && message.metadata.hallucination_risk !== undefined;
   const hasInternalThoughts = !isUser && message.metadata && message.metadata.internal_thoughts;
   const isProcessing = isLoading && !isUser && message.processingState;
   
-  // Auto-expand internal thoughts when they're being generated
-  useEffect(() => {
-    if (isProcessing) {
-      setInternalThoughtsExpanded(true);
-    }
-  }, [isProcessing]);
-  
-  // Toggle a specific source's expanded state
-  const toggleSource = (idx) => {
-    setExpandedSources(prev => ({
-      ...prev,
-      [idx]: !prev[idx]
-    }));
-  };
-
-  // Theme colors
-  const accentColor = useColorModeValue("#4415b6", "#6c45e7");
-  const accentColorLight = useColorModeValue("rgba(68, 21, 182, 0.1)", "rgba(108, 69, 231, 0.15)");
-  const accentColorLighter = useColorModeValue("rgba(68, 21, 182, 0.05)", "rgba(108, 69, 231, 0.08)");
-  const userBgColor = useColorModeValue('blue.50', 'blue.900');
-  const assistantBgColor = useColorModeValue('white', 'gray.800');
+  // Theme colors - simplified and cleaner
+  const accentColor = '#4415b6';
+  const userBg = useColorModeValue('blue.50', 'blue.900');
+  const assistantBg = useColorModeValue('white', 'gray.800');
   const borderColor = useColorModeValue('gray.200', 'gray.600');
-  const userIconBg = useColorModeValue('blue.100', 'blue.800');
-  const botIconBg = useColorModeValue(accentColorLight, 'rgba(108, 69, 231, 0.3)');
   const textColor = useColorModeValue('gray.800', 'gray.100');
   const mutedTextColor = useColorModeValue('gray.600', 'gray.400');
-  const dividerColor = useColorModeValue('gray.200', 'gray.600');
-  const userMessageShadow = "0 2px 4px rgba(0, 0, 0, 0.05)";
-  const assistantMessageShadow = "0 2px 6px rgba(68, 21, 182, 0.08)";
-  const agentInfoBg = useColorModeValue('gray.50', 'gray.700');
-  const contextIndicatorColor = useColorModeValue('gray.400', 'gray.500');
-  const warningColor = useColorModeValue('orange.500', 'orange.300');
-  const sourceContentBg = useColorModeValue('white', 'gray.900');
-  const internalThoughtsBg = useColorModeValue('purple.50', 'purple.900');
-  const internalThoughtsColor = useColorModeValue('purple.800', 'purple.200');
-  const processingStateBg = useColorModeValue('blue.50', 'blue.900');
-  const processingStateColor = useColorModeValue('blue.700', 'blue.300');
+  const iconBg = useColorModeValue('gray.100', 'gray.700');
+  const codeBg = useColorModeValue('gray.100', 'gray.700');
+  const sourceBg = useColorModeValue('gray.50', 'gray.700');
   
-  // Clean message content to remove any internal thoughts that might have been included
+  // Clean message content
   const cleanMessageContent = () => {
     if (isUser || !message.content) return message.content;
     
-    // Remove any <internal_thoughts> tags and their content
-    return message.content.replace(/<internal_thoughts>[\s\S]*?<\/internal_thoughts>/g, '');
+    let cleanedContent = message.content;
+    
+    // Remove any internal thoughts tags that might have leaked through
+    cleanedContent = cleanedContent.replace(/<internal_thoughts>[\s\S]*?<\/internal_thoughts>/g, '');
+    
+    // Remove malformed internal thoughts patterns
+    cleanedContent = cleanedContent.replace(/<internal[^>]*thoughts[^>]*>/g, '');
+    cleanedContent = cleanedContent.replace(/<\/internal[^>]*thoughts[^>]*>/g, '');
+    
+    // Remove any orphaned internal_thoughts text
+    cleanedContent = cleanedContent.replace(/internal_thoughts/g, '');
+    
+    // Clean up duplication patterns that can occur during streaming
+    
+    // Pattern 1: Immediate word duplication "word word" -> "word"
+    cleanedContent = cleanedContent.replace(/(\b\w+)\s+\1\b/g, '$1');
+    
+    // Pattern 2: Character-level duplication within words "D'D'après" -> "D'après"  
+    cleanedContent = cleanedContent.replace(/(\w+)('\w+)\1\2/g, '$1$2');
+    
+    // Pattern 3: Partial word duplication "aprèsaprès" -> "après"
+    cleanedContent = cleanedContent.replace(/(\w{3,})\1/g, '$1');
+    
+    // Pattern 4: Complex pattern like "Les risLes risques" -> "Les risques"
+    cleanedContent = cleanedContent.replace(/(\w{3,})\s+\1(\w+)/g, '$1$2');
+    
+    // Pattern 5: Syllable duplication like "sontques sont" -> "sont"
+    cleanedContent = cleanedContent.replace(/(\w+)(\w{3,})\s+\1\s+\2/g, '$1 $2');
+    
+    // Pattern 6: Number duplication like "15 à15 à 25 25" -> "15 à 25"
+    cleanedContent = cleanedContent.replace(/(\d+)\s+à\1\s+à\s+(\d+)\s+\2/g, '$1 à $2');
+    
+    // Pattern 7: Phrase duplication "dans la dans la" -> "dans la"
+    cleanedContent = cleanedContent.replace(/(\w+\s+\w+)\s+\1/g, '$1');
+    
+    // Clean up excessive whitespace
+    cleanedContent = cleanedContent.replace(/\s+/g, ' ').trim();
+    
+    return cleanedContent;
   };
 
   return (
@@ -80,363 +79,156 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
       display="flex"
       width="full"
       alignItems="flex-start"
-      gap={4}
+      gap={3}
       p={4}
-      rounded="lg"
       mb={4}
-      bg={isUser ? userBgColor : assistantBgColor}
+      bg={isUser ? userBg : assistantBg}
       borderWidth={1}
-      borderColor={isUser ? 'blue.200' : borderColor}
-      boxShadow={isUser ? userMessageShadow : assistantMessageShadow}
-      transition="all 0.2s ease"
-      _hover={{
-        boxShadow: isUser ? "0 3px 6px rgba(0, 0, 0, 0.08)" : "0 3px 8px rgba(108, 69, 231, 0.12)",
-        borderColor: isUser ? 'blue.300' : accentColorLighter,
-      }}
+      borderColor={borderColor}
+      borderRadius="lg"
+      boxShadow="sm"
     >
+      {/* Avatar */}
       <Flex
-        h="40px"
-        w="40px"
+        h="32px"
+        w="32px"
         alignItems="center"
         justifyContent="center"
         rounded="full"
-        bg={isUser ? userIconBg : botIconBg}
+        bg={iconBg}
         color={isUser ? 'blue.600' : accentColor}
-        boxShadow="0 2px 4px rgba(0, 0, 0, 0.1)"
-        transition="all 0.2s ease"
-        _hover={{
-          transform: "scale(1.05)",
-          boxShadow: "0 3px 5px rgba(0, 0, 0, 0.15)"
-        }}
+        flexShrink={0}
       >
-        {isUser ? (
-          <Icon as={User} boxSize={5} />
-        ) : (
-          <Icon as={Bot} boxSize={5} />
-        )}
+        <Icon as={isUser ? User : Bot} boxSize={4} />
       </Flex>
       
-      <Box flex="1" mt={0.5}>
-        {/* Message Header */}
-        <Flex alignItems="center" gap={2} mb={2} flexWrap="wrap">
-          <Text fontSize="sm" fontWeight="semibold" color={isUser ? 'blue.600' : accentColor}>
-            {isUser ? 'You' : 'RegulAIte Assistant'}
+      <Box flex="1" minW={0}>
+        {/* Header */}
+        <Flex alignItems="center" gap={2} mb={2}>
+          <Text fontSize="sm" fontWeight="medium" color={isUser ? 'blue.600' : accentColor}>
+            {isUser ? 'You' : 'RegulAIte'}
           </Text>
-          
-          {showContextIndicator && (
-            <Tooltip 
-              label={`In context of: "${previousMessage.content}"`} 
-              placement="top" 
-              hasArrow
-            >
-              <Flex 
-                alignItems="center" 
-                fontSize="xs" 
-                color={contextIndicatorColor}
-                cursor="help"
-              >
-                <Icon as={ArrowDownRight} boxSize={3} mr={1} />
-                <Text>context</Text>
-              </Flex>
-            </Tooltip>
-          )}
           
           {!isUser && agentInfo && agentInfo.agent_used && (
             <Badge 
               bg={accentColor} 
               color="white" 
-              variant="solid" 
-              fontSize="xs"
+              size="sm"
               borderRadius="full"
-              px={2}
-              boxShadow="0 1px 2px rgba(68, 21, 182, 0.3)"
             >
-              Autonomous Agent
-            </Badge>
-          )}
-          
-          {/* Model Badge */}
-          {!isUser && (message.model || (agentInfo && agentInfo.model)) && (
-            <Badge
-              bg="gray.100"
-              color="gray.700"
-              variant="subtle"
-              fontSize="xs"
-              borderRadius="full"
-              px={2}
-              display="flex"
-              alignItems="center"
-              gap={1}
-            >
-              <Icon as={Cpu} boxSize={3} />
-              <Text>{message.model || (agentInfo && agentInfo.model)}</Text>
-            </Badge>
-          )}
-          
-          {/* Context Quality Badge */}
-          {!isUser && message.metadata && message.metadata.context_quality && (
-            <Badge
-              bg={message.metadata.context_quality === 'insufficient' ? 'yellow.100' : 'green.100'}
-              color={message.metadata.context_quality === 'insufficient' ? 'yellow.800' : 'green.800'}
-              variant="subtle"
-              fontSize="xs"
-              borderRadius="full"
-              px={2}
-            >
-              {message.metadata.context_quality === 'insufficient' ? 'Limited Context' : 'Good Context'}
+              AI Agent
             </Badge>
           )}
           
           {isLoading && (
-            <Spinner size="xs" color={accentColor} ml={2} thickness="2px" speed="0.8s" />
+            <Spinner size="xs" color={accentColor} />
           )}
         </Flex>
         
-        {/* Message Content - Using cleaned content */}
+        {/* Message Content */}
         <Box 
-          className="prose-sm prose max-w-none" 
           color={textColor}
-          px={1}
-          lineHeight="1.6"
           fontSize="sm"
+          lineHeight="1.6"
+          sx={{
+            '& p': { mb: 2 },
+            '& p:last-child': { mb: 0 },
+            '& ul, & ol': { pl: 4, mb: 2 },
+            '& li': { mb: 1 },
+            '& h1, & h2, & h3': { fontWeight: 'semibold', mb: 2, mt: 3 },
+            '& h1:first-child, & h2:first-child, & h3:first-child': { mt: 0 },
+            '& code': { 
+              bg: codeBg, 
+              px: 1, 
+              py: 0.5, 
+              borderRadius: 'sm',
+              fontSize: 'xs'
+            },
+            '& pre': { 
+              bg: codeBg, 
+              p: 3, 
+              borderRadius: 'md',
+              overflow: 'auto',
+              fontSize: 'xs'
+            }
+          }}
         >
           <ReactMarkdown>{cleanMessageContent()}</ReactMarkdown>
         </Box>
         
-        {/* Enhanced Processing Status - Show when processing or has internal thoughts */}
-        {(isProcessing || hasInternalThoughts) && (
+        {/* Processing Status - Simplified */}
+        {isProcessing && (
           <ProcessingStatus
             processingState={message.processingState}
-            internalThoughts={message.metadata?.internal_thoughts}
             isProcessing={isProcessing}
-            expanded={internalThoughtsExpanded}
-            processingSteps={message.metadata?.processingSteps || []}
-            currentStep={message.metadata?.currentStep || 0}
-            totalSteps={message.metadata?.totalSteps || 7}
-            startTime={message.metadata?.startTime || (isProcessing ? Date.now() : null)}
-            contextMetadata={message.metadata?.contextMetadata}
-            isConnected={true}
-            requestId={message.requestId || message.metadata?.requestId}
+            startTime={message.metadata?.startTime}
           />
         )}
         
-        {/* AI Reasoning Panel - Show detailed insights when response is complete */}
-        {!isUser && !isProcessing && (message.metadata?.contextMetadata || message.metadata?.sources) && (
-          <AIReasoningPanel
-            contextMetadata={message.metadata?.contextMetadata}
-            processingMetrics={{
-              responseTime: message.metadata?.processingTime,
-              tokenCount: message.metadata?.tokenCount
-            }}
-            confidenceScore={message.metadata?.confidence_score || 
-              (message.metadata?.context_quality === 'high' ? 0.9 : 
-               message.metadata?.context_quality === 'medium' ? 0.75 : 0.6)}
-            isVisible={true}
-          />
-        )}
-        
-        {/* Hallucination Risk */}
-        {hasHallucinationRisk && message.metadata.hallucination_risk > 0.5 && (
-          <Box mt={3} mb={3}>
-            <Flex alignItems="center" mb={1}>
-              <Icon as={AlertTriangle} boxSize={4} color={warningColor} mr={2} />
-              <Text fontSize="sm" fontWeight="medium" color={warningColor}>
-                Information may be incomplete or uncertain
-              </Text>
-            </Flex>
-            <Progress 
-              value={(1 - message.metadata.hallucination_risk) * 100}
-              size="sm"
-              colorScheme={message.metadata.hallucination_risk > 0.7 ? "red" : "yellow"}
-              borderRadius="full"
-              mt={1}
-            />
-          </Box>
-        )}
-        
-        {/* Sources Information - Redesigned for compact view */}
+        {/* Sources - Simplified */}
         {hasSources && (
-          <Box 
-            mt={3} 
-            pt={2} 
-            borderTop="1px solid" 
-            borderColor={dividerColor} 
-            fontSize="xs" 
-            color={mutedTextColor}
-          >
-            <Flex align="center" justify="space-between" mb={2}>
-              <Flex align="center">
-                <Icon as={FileText} boxSize={3} mr={1} color={accentColor} />
-                <Text fontWeight="medium" color={accentColor}>
-                  Sources ({message.metadata.sources.length})
-                </Text>
-              </Flex>
-              <Button 
-                size="xs" 
-                variant="ghost" 
-                onClick={() => setShowAllSources(!showAllSources)}
-                rightIcon={<Icon as={showAllSources ? ChevronUp : ChevronDown} boxSize={3} />}
-                color={accentColor}
-              >
-                {showAllSources ? "Hide All" : "Show All"}
-              </Button>
-            </Flex>
-            
-            <Box>
-              {message.metadata.sources.map((source, idx) => (
-                <Box 
-                  key={idx} 
-                  ml={0} 
-                  mb={2} 
-                  borderRadius="md" 
-                  bg={agentInfoBg} 
-                  borderLeft="3px solid" 
-                  borderLeftColor={accentColor}
-                  overflow="hidden"
-                >
-                  {/* Source Header - Always visible */}
-                  <Flex 
-                    justify="space-between" 
-                    align="center" 
-                    p={2} 
-                    cursor="pointer"
-                    onClick={() => toggleSource(idx)}
-                    _hover={{ bg: sourceContentBg }}
-                    transition="background 0.2s"
-                  >
-                    <Flex align="center" flex="1">
-                      <Icon as={FileText} boxSize={3} mr={1} color={accentColor} />
-                      <Text fontWeight="bold" fontSize="sm" color={textColor} noOfLines={1}>
-                        {source.title || (source.doc_id && source.doc_id.split('/').pop()) || 'Document'}
-                      </Text>
-                    </Flex>
-                    <Flex align="center">
-                      <Badge 
-                        colorScheme={source.score > 0.7 ? "green" : source.score > 0.5 ? "yellow" : "red"}
-                        fontSize="xs"
-                        mr={2}
-                      >
-                        {Math.max(0, Math.round(source.score * 100))}%
-                      </Badge>
-                      <Icon as={expandedSources[idx] || showAllSources ? ChevronUp : ChevronDown} boxSize={3} />
-                    </Flex>
-                  </Flex>
-                  
-                  {/* Collapsible Source Details */}
-                  <Collapse in={expandedSources[idx] || showAllSources}>
-                    <Box p={2} borderTop="1px dashed" borderTopColor={dividerColor}>
-                      {/* Extracted Content Chunk */}
-                      {source.content && (
-                        <Box 
-                          bg={sourceContentBg}
-                          p={2} 
-                          borderRadius="md" 
-                          borderWidth="1px" 
-                          borderColor={dividerColor}
-                          mb={2}
-                          fontSize="xs"
-                          color={textColor}
-                          maxH="100px"
-                          overflowY="auto"
-                          whiteSpace="pre-wrap"
-                        >
-                          <Text>{source.content}</Text>
-                        </Box>
-                      )}
-                      
-                      {/* Document Metadata */}
-                      <Flex flexWrap="wrap" gap={2} mt={1}>
-                        {source.doc_id && (
-                          <Badge variant="outline" fontSize="xs">
-                            ID: {source.doc_id.split('/').pop()}
-                          </Badge>
-                        )}
-                        {source.page_number && (
-                          <Badge variant="outline" fontSize="xs">
-                            Page: {source.page_number}
-                          </Badge>
-                        )}
-                        {source.file_type && (
-                          <Badge variant="outline" fontSize="xs" colorScheme="blue">
-                            {source.file_type.toUpperCase()}
-                          </Badge>
-                        )}
-                        {source.retrieval_method && (
-                          <Tooltip label={`Retrieval method used to find this source`} placement="top" hasArrow>
-                            <Badge variant="outline" fontSize="xs" cursor="help" colorScheme="purple">
-                              Method: {source.retrieval_method.replace(/_/g, ' ')}
-                            </Badge>
-                          </Tooltip>
-                        )}
-                        {source.original_score && (
-                          <Tooltip label="Original retrieval score before any adjustments" placement="top" hasArrow>
-                            <Badge variant="outline" fontSize="xs" cursor="help">
-                              Base Score: {Math.round(source.original_score * 100)}%
-                            </Badge>
-                          </Tooltip>
-                        )}
-                      </Flex>
-                    </Box>
-                  </Collapse>
-                </Box>
-              ))}
-            </Box>
-          </Box>
-        )}
-        
-        {/* Agent Information - Updated to be collapsible */}
-        {!isUser && agentInfo && (
-          <Box 
-            mt={3} 
-            pt={2} 
-            borderTop="1px solid" 
-            borderColor={dividerColor} 
-            fontSize="xs" 
-            color={mutedTextColor}
-          >
-            <Flex 
-              align="center" 
-              justify="space-between" 
-              mb={2}
-              cursor="pointer"
-              onClick={() => setAgentInfoExpanded(!agentInfoExpanded)}
-              _hover={{ bg: agentInfoBg }}
-              borderRadius="md"
-              p={1}
+          <Box mt={3} pt={3} borderTop="1px solid" borderColor={borderColor}>
+            <Button
+              size="sm"
+              variant="ghost"
+              leftIcon={<Icon as={FileText} />}
+              rightIcon={<Icon as={showSources ? ChevronUp : ChevronDown} />}
+              onClick={() => setShowSources(!showSources)}
+              color={accentColor}
+              fontSize="xs"
             >
-              <Flex align="center">
-                <Icon as={Info} boxSize={3} mr={1} color={accentColor} />
-                <Text fontWeight="medium" color={accentColor}>Agent Information</Text>
-              </Flex>
-              <Icon as={agentInfoExpanded ? ChevronUp : ChevronDown} boxSize={3} />
-            </Flex>
+              {message.metadata.sources.length} source{message.metadata.sources.length !== 1 ? 's' : ''}
+            </Button>
             
-            <Collapse in={agentInfoExpanded}>
-              <Box
-                bg={agentInfoBg}
-                p={3}
-                borderRadius="md"
-                boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)"
-                borderLeft="3px solid"
-                borderLeftColor={accentColor}
-              >
-                {agentInfo.reasoning_path && (
-                  <Flex align="center" mb={1}>
-                    <Icon as={Info} boxSize={3} mr={1} color={accentColor} />
-                    <Text fontWeight="medium">Reasoning:</Text>
-                    <Text ml={1}>{agentInfo.reasoning_path.join(' > ')}</Text>
-                  </Flex>
+            <Collapse in={showSources}>
+              <VStack align="stretch" spacing={2} mt={2}>
+                {(showAllSources ? message.metadata.sources : message.metadata.sources.slice(0, 3)).map((source, idx) => (
+                  <Box 
+                    key={idx}
+                    p={2}
+                    bg={sourceBg}
+                    borderRadius="md"
+                    fontSize="xs"
+                  >
+                    <Text fontWeight="medium" mb={1} color={textColor}>
+                      {source.title || 'Document'}
+                    </Text>
+                    {source.content && (
+                      <Text 
+                        color={mutedTextColor} 
+                        noOfLines={2}
+                        fontSize="xs"
+                      >
+                        {source.content}
+                      </Text>
+                    )}
+                  </Box>
+                ))}
+                {message.metadata.sources.length > 3 && !showAllSources && (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    color={accentColor}
+                    fontSize="xs"
+                    onClick={() => setShowAllSources(true)}
+                    _hover={{ bg: 'transparent', textDecoration: 'underline' }}
+                  >
+                    +{message.metadata.sources.length - 3} more sources
+                  </Button>
                 )}
-                
-                {agentInfo.source_documents && agentInfo.source_documents.length > 0 && (
-                  <Flex direction="column">
-                    <Text fontWeight="medium" mb={1} color={accentColor}>Sources:</Text>
-                    {agentInfo.source_documents.map((doc, idx) => (
-                      <Text key={idx} ml={2} mb={0.5}>• {doc.title || doc.source}</Text>
-                    ))}
-                  </Flex>
+                {showAllSources && message.metadata.sources.length > 3 && (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    color={accentColor}
+                    fontSize="xs"
+                    onClick={() => setShowAllSources(false)}
+                    _hover={{ bg: 'transparent', textDecoration: 'underline' }}
+                  >
+                    Show fewer sources
+                  </Button>
                 )}
-              </Box>
+              </VStack>
             </Collapse>
           </Box>
         )}

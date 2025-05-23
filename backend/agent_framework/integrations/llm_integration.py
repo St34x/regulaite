@@ -90,7 +90,7 @@ class LLMIntegration:
     
     def __init__(self, 
                 provider: str = "openai", 
-                model: str = "gpt-4", 
+                model: str = "gpt-4.1", 
                 api_key: Optional[str] = None,
                 max_tokens: int = 1024,
                 temperature: float = 0.7):
