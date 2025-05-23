@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Shield, PanelLeft, X, RefreshCw } from 'lucide-react';
 import ChatMessage from '../components/chat/ChatMessage';
 import ChatHistory from '../components/chat/ChatHistory';
+import LoadingOverlay from '../components/ui/LoadingOverlay';
 import useMediaQuery from '../hooks/useMediaQuery';
 import chatService from '../services/chatService';
 import { useNavigate } from 'react-router-dom';
@@ -36,6 +37,7 @@ const ChatPage = () => {
   const [error, setError] = useState(null);
   const [reasoningNodeId, setReasoningNodeId] = useState(null);
   const [agentProgress, setAgentProgress] = useState(null);
+  const [currentRequestId, setCurrentRequestId] = useState(null);
   
   const messagesEndRef = useRef(null);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -117,6 +119,20 @@ const ChatPage = () => {
       if (timer) clearInterval(timer);
     };
   }, [agentProgress]);
+
+  // Cleanup active requests on unmount
+  useEffect(() => {
+    return () => {
+      console.log('🧹 ChatPage unmounting, cleaning up');
+      // Temporarily disabled cancel functionality
+      // if (currentRequestId) {
+      //   console.log(`🛑 Cancelling active request on unmount: ${currentRequestId}`);
+      //   chatService.cancelRequest(currentRequestId);
+      // }
+      // // Cancel all requests when component unmounts
+      // chatService.cancelAllRequests();
+    };
+  }, [currentRequestId]);
 
   const fetchSessions = async () => {
     setError(null);
@@ -237,11 +253,66 @@ const ChatPage = () => {
     }
   };
 
+  const handleCancelRequest = () => {
+    console.log('⚠️ Cancel request functionality temporarily disabled');
+    // Temporarily disabled
+    // if (currentRequestId) {
+    //   console.log(`🛑 Cancelling request: ${currentRequestId}`);
+    //   chatService.cancelRequest(currentRequestId);
+    //   setCurrentRequestId(null);
+    //   setIsLoading(false);
+    //   
+    //   // Remove the temporary generating message
+    //   setMessages(currentMessages => {
+    //     const lastMessage = currentMessages[currentMessages.length - 1];
+    //     if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
+    //       // Update the message to show it was cancelled instead of removing it
+    //       const updatedMessages = [...currentMessages];
+    //       updatedMessages[updatedMessages.length - 1] = {
+    //         ...lastMessage,
+    //         isGenerating: false,
+    //         processingState: "Cancelled by user",
+    //         content: "🚫 Request cancelled by user.",
+    //         metadata: {
+    //           ...lastMessage.metadata,
+    //           cancelled: true,
+    //           cancelledAt: new Date().toISOString()
+    //         }
+    //       };
+    //       return updatedMessages;
+    //     }
+    //     return currentMessages;
+    //   });
+    //   
+    //   toast({
+    //     title: 'Request Cancelled',
+    //     description: 'The chat request has been cancelled successfully.',
+    //     status: 'info',
+    //     duration: 3000,
+    //     isClosable: true,
+    //   });
+    // } else {
+    //   console.log('⚠️ No active request to cancel');
+    // }
+  };
+
   const handleSendMessage = async (content) => {
-    if (!content.trim() || isLoading) return;
+    console.log('🎯 handleSendMessage called with content:', content);
+    console.log('🔄 Current isLoading state:', isLoading);
+    
+    if (!content.trim() || isLoading) {
+      console.log('❌ Message rejected - empty content or already loading');
+      return;
+    }
     
     setIsLoading(true);
     setError(null);
+    
+    // Generate request ID for this message
+    const requestId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    setCurrentRequestId(requestId);
+    
+    console.log('✅ Starting message processing with requestId:', requestId);
     
     try {
       // Create a new user message
@@ -258,9 +329,16 @@ const ChatPage = () => {
         role: "assistant",
         content: "",
         isGenerating: true,
-        processingState: "Starting to process your query...",
+        processingState: "Initializing request...",
+        requestId: requestId,
         metadata: {
-          internal_thoughts: ""
+          internal_thoughts: "",
+          processingSteps: [],
+          currentStep: 0,
+          totalSteps: 6,
+          startTime: Date.now(),
+          requestId: requestId,
+          isConnected: true
         }
       };
       
@@ -272,167 +350,245 @@ const ChatPage = () => {
         updateSessionWithMessages(activeSessionId, updatedMessages);
       }
       
-      // Prepare request payload - Always use RAG
-      const payload = {
-        messages: updatedMessages.map(msg => ({
-          role: msg.role,
-          content: msg.content
-        })),
-        use_rag: true,
-        stream: true, // Enable streaming for internal thoughts
-        session_id: activeSessionId
-      };
+      // Prepare messages for the API call
+      const messagesForAPI = updatedMessages.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
       
-      // Send request to API with streaming
-      const response = await chatService.streamChatMessage(payload, {
-        onToken: (token) => {
-          // Update the assistant message with each new token
+      console.log('📞 Starting streaming request to /chat/rag');
+      
+      // Use the enhanced streaming API
+      const result = await chatService.sendMessageStreaming(
+        activeSessionId,
+        content,
+        (chunkData) => {
+          // Handle different types of streaming data
           setMessages(currentMessages => {
             const updatedMessages = [...currentMessages];
             const lastMessage = updatedMessages[updatedMessages.length - 1];
             
             if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-              lastMessage.content += token;
-            }
-            
-            return updatedMessages;
-          });
-        },
-        onProcessing: (processingData) => {
-          // Update internal thoughts and processing state
-          setMessages(currentMessages => {
-            const updatedMessages = [...currentMessages];
-            const lastMessage = updatedMessages[updatedMessages.length - 1];
-            
-            if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-              lastMessage.processingState = processingData.state || "Processing your query...";
-              
-              if (processingData.internal_thoughts) {
-                lastMessage.metadata.internal_thoughts = processingData.internal_thoughts;
-              }
-            }
-            
-            return updatedMessages;
-          });
-        },
-        onComplete: (completeData) => {
-          // Finalize the message when streaming is complete
-          setMessages(currentMessages => {
-            const updatedMessages = [...currentMessages];
-            const lastMessage = updatedMessages[updatedMessages.length - 1];
-            
-            if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-              // Update with final data
-              lastMessage.isGenerating = false;
-              lastMessage.model = completeData.model;
-              lastMessage.timestamp = new Date().toISOString();
-              
-              // Update metadata
-              lastMessage.metadata = {
-                sources: completeData.sources || [],
-                context_quality: completeData.context_quality,
-                hallucination_risk: completeData.hallucination_risk,
-                context_used: completeData.context_used,
-                internal_thoughts: completeData.internal_thoughts || lastMessage.metadata.internal_thoughts
-              };
-            }
-            
-            return updatedMessages;
-          });
-          
-          // Update the session with new messages
-          if (activeSessionId) {
-            const finalMessages = messages.map(msg => {
-              if (msg.isGenerating) {
-                return {
-                  ...msg,
-                  isGenerating: false
+              if (chunkData.type === 'start') {
+                // Streaming started
+                lastMessage.processingState = "Connection established, starting processing...";
+                lastMessage.metadata.streamStarted = true;
+                lastMessage.metadata.backendRequestId = chunkData.request_id;
+              } else if (chunkData.type === 'processing') {
+                // Processing update
+                lastMessage.processingState = chunkData.state || "Processing...";
+                
+                if (chunkData.internal_thoughts) {
+                  lastMessage.metadata.internal_thoughts = chunkData.internal_thoughts;
+                }
+                
+                // Update step information
+                if (chunkData.step_number && chunkData.total_steps) {
+                  lastMessage.metadata.currentStep = chunkData.step_number;
+                  lastMessage.metadata.totalSteps = chunkData.total_steps;
+                  
+                  // Initialize processingSteps if not exists
+                  if (!lastMessage.metadata.processingSteps) {
+                    lastMessage.metadata.processingSteps = [];
+                  }
+                  
+                  // Update or add the current step
+                  const stepData = {
+                    step: chunkData.step,
+                    stepNumber: chunkData.step_number,
+                    totalSteps: chunkData.total_steps,
+                    message: chunkData.state,
+                    details: chunkData.details,
+                    contextMetadata: chunkData.context_metadata,
+                    status: 'in_progress',
+                    timestamp: chunkData.timestamp
+                  };
+                  
+                  const existingStepIndex = lastMessage.metadata.processingSteps.findIndex(
+                    step => step.step === chunkData.step
+                  );
+                  
+                  if (existingStepIndex >= 0) {
+                    lastMessage.metadata.processingSteps[existingStepIndex] = stepData;
+                  } else {
+                    lastMessage.metadata.processingSteps.push(stepData);
+                  }
+                  
+                  // Mark previous steps as completed
+                  lastMessage.metadata.processingSteps.forEach((step) => {
+                    if (step.stepNumber < chunkData.step_number) {
+                      step.status = 'completed';
+                    }
+                  });
+                }
+                
+                // Store context metadata
+                if (chunkData.context_metadata) {
+                  lastMessage.metadata.contextMetadata = chunkData.context_metadata;
+                }
+                
+                // Handle special processing steps
+                if (chunkData.step === 'generation_active') {
+                  // This is a heartbeat during AI generation - show activity indicator
+                  lastMessage.metadata.isGeneratingActive = true;
+                  lastMessage.metadata.lastGenerationHeartbeat = Date.now();
+                } else if (chunkData.step === 'generation_delay') {
+                  // Generation is taking longer than expected
+                  lastMessage.metadata.generationDelayed = true;
+                } else if (chunkData.step === 'timeout_warning') {
+                  // Request may be stalled
+                  lastMessage.metadata.timeoutWarning = true;
+                }
+              } else if (chunkData.type === 'token' && chunkData.content) {
+                // Response token
+                lastMessage.content += chunkData.content;
+                lastMessage.processingState = "Generating response...";
+              } else if (chunkData.type === 'end') {
+                // Streaming completed
+                lastMessage.isGenerating = false;
+                lastMessage.processingState = "Complete";
+                
+                // Update final message content if provided
+                if (chunkData.message && chunkData.message.length > lastMessage.content.length) {
+                  lastMessage.content = chunkData.message;
+                }
+                
+                // Store final metadata
+                if (chunkData.metadata) {
+                  lastMessage.metadata = {
+                    ...lastMessage.metadata,
+                    ...chunkData.metadata,
+                    completed: true,
+                    endTime: Date.now()
+                  };
+                }
+                
+                // Mark all steps as completed
+                if (lastMessage.metadata.processingSteps) {
+                  lastMessage.metadata.processingSteps.forEach(step => {
+                    if (step.status === 'in_progress') {
+                      step.status = 'completed';
+                    }
+                  });
+                }
+              } else if (chunkData.type === 'error') {
+                // Handle streaming errors
+                lastMessage.isGenerating = false;
+                lastMessage.processingState = "Error occurred";
+                lastMessage.metadata.error = {
+                  message: chunkData.message,
+                  error_code: chunkData.error_code,
+                  request_id: chunkData.request_id
                 };
+                
+                // Show error message in content if no content was generated
+                if (!lastMessage.content.trim()) {
+                  lastMessage.content = `❌ ${chunkData.message}`;
+                }
+                
+                // Mark current step as failed
+                if (lastMessage.metadata.processingSteps && lastMessage.metadata.processingSteps.length > 0) {
+                  const currentStepIndex = lastMessage.metadata.processingSteps.findIndex(
+                    step => step.status === 'in_progress'
+                  );
+                  if (currentStepIndex >= 0) {
+                    lastMessage.metadata.processingSteps[currentStepIndex].status = 'failed';
+                  }
+                }
+              } else if (chunkData.type === 'agent_progress') {
+                // Agent progress update
+                lastMessage.metadata.agentProgress = chunkData.data;
               }
-              return msg;
-            });
-            updateSessionWithMessages(activeSessionId, finalMessages);
-          }
-          
-          setIsLoading(false);
-        }
-      });
+              
+              // Update connection status based on activity
+              lastMessage.metadata.isConnected = true;
+              lastMessage.metadata.lastActivity = Date.now();
+            }
+            
+            return updatedMessages;
+          });
+        },
+        {
+          model: 'gpt-4',
+          temperature: 0.7,
+          max_tokens: 2048,
+          includeContext: true,
+          use_agent: false, // Disable agent by default to prevent hanging
+          timeout: 300000 // 5 minutes
+        },
+        messagesForAPI,
+        requestId
+      );
       
-      // If we got here without streaming working, just use the regular method
-      if (!response) {
-        throw new Error('Streaming failed, falling back to regular method');
-      }
-    } catch (err) {
-      console.error('Failed to send streaming message, falling back to regular method:', err);
+      console.log('✅ Streaming completed successfully:', result);
       
-      // Fall back to non-streaming method
-      try {
-        // Remove the temporary message if it exists
+      // Final cleanup and session update
+      if (activeSessionId) {
         setMessages(currentMessages => {
-          const lastMessage = currentMessages[currentMessages.length - 1];
-          if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-            return currentMessages.slice(0, -1);
-          }
+          updateSessionWithMessages(activeSessionId, currentMessages);
           return currentMessages;
         });
-        
-        // Create updated messages without the temp message
-        const cleanMessages = messages.filter(msg => !msg.isGenerating);
-        
-        // Prepare request payload without streaming
-        const payload = {
-          messages: cleanMessages.map(msg => ({
-            role: msg.role,
-            content: msg.content
-          })),
-          use_rag: true,
-          stream: false,
-          session_id: activeSessionId
-        };
-        
-        // Send request to API
-        const response = await chatService.sendChatMessage(payload);
-        
-        // Handle response
-        if (response && response.message) {
-          // Add assistant's response to messages
-          const newMessages = [...cleanMessages, {
-            role: "assistant",
-            content: response.message,
-            timestamp: new Date().toISOString(),
-            model: response.model,
-            metadata: {
-              sources: response.sources || [],
-              context_quality: response.context_quality,
-              hallucination_risk: response.hallucination_risk,
-              context_used: response.context_used,
-              internal_thoughts: response.internal_thoughts
-            }
-          }];
-          
-          setMessages(newMessages);
-          
-          // Update the session
-          if (activeSessionId) {
-            updateSessionWithMessages(activeSessionId, newMessages);
-          }
-        } else {
-          throw new Error('Unexpected response format');
-        }
-      } catch (fallbackErr) {
-        console.error('Both streaming and fallback methods failed:', fallbackErr);
-        setError(`Failed to send message: ${fallbackErr.message || 'Unknown error'}`);
-        
-        toast({
-          title: 'Error',
-          description: `Failed to send message: ${fallbackErr.message || 'Unknown error'}`,
-          status: 'error',
-          duration: 5000,
-          isClosable: true,
-        });
-      } finally {
-        setIsLoading(false);
       }
+      
+    } catch (error) {
+      console.error('❌ Error in handleSendMessage:', error);
+      
+      // Safely extract error message - handle cases where error.message might be undefined
+      const getErrorMessage = (err) => {
+        if (!err) return 'Unknown error occurred';
+        if (typeof err === 'string') return err;
+        if (err.message) return err.message;
+        if (err.toString && typeof err.toString === 'function') return err.toString();
+        return 'Unknown error occurred';
+      };
+      
+      const errorMessage = getErrorMessage(error);
+      
+      // Update the last message to show the error
+      setMessages(currentMessages => {
+        const updatedMessages = [...currentMessages];
+        const lastMessage = updatedMessages[updatedMessages.length - 1];
+        
+        if (lastMessage && lastMessage.role === "assistant" && lastMessage.isGenerating) {
+          lastMessage.isGenerating = false;
+          lastMessage.processingState = "Error occurred";
+          lastMessage.metadata.error = {
+            message: errorMessage,
+            timestamp: new Date().toISOString(),
+            originalError: error
+          };
+          
+          // Show user-friendly error message
+          if (errorMessage.includes('timeout')) {
+            lastMessage.content = "⏱️ The request timed out. This may be due to high server load or a complex query. Please try again with a simpler question or check your connection.";
+          } else if (errorMessage.includes('network') || errorMessage.includes('Failed to fetch')) {
+            lastMessage.content = "🌐 Network error. Please check your internet connection and try again.";
+          } else {
+            lastMessage.content = `❌ ${errorMessage}`;
+          }
+        }
+        
+        return updatedMessages;
+      });
+      
+      // Show toast notification for better user feedback
+      toast({
+        title: 'Chat Error',
+        description: errorMessage.includes('timeout') 
+          ? 'The request timed out. Please try again.'
+          : errorMessage.includes('network')
+          ? 'Network error. Please check your connection.'
+          : 'An error occurred while processing your message.',
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      // Always clean up loading state
+      setIsLoading(false);
+      setCurrentRequestId(null);
+      
+      console.log('🧹 handleSendMessage cleanup completed');
     }
   };
 
@@ -847,7 +1003,7 @@ const ChatPage = () => {
   };
 
   return (
-    <Flex h="100vh" flexDirection="column">
+    <Box h="100vh" flexDirection="column">
       {/* Header */}
       <Box 
         py={3} 
@@ -914,6 +1070,29 @@ const ChatPage = () => {
           overflow="hidden"
           bg={chatBg}
         >
+          {/* Global Loading Indicator */}
+          {isLoading && (
+            <Box 
+              bg="blue.50" 
+              borderBottom="1px solid" 
+              borderBottomColor="blue.200" 
+              px={4} 
+              py={2}
+            >
+              <HStack spacing={2}>
+                <Spinner size="sm" color={accentColor} thickness="2px" />
+                <Text fontSize="sm" color="blue.700" fontWeight="medium">
+                  Processing your request...
+                </Text>
+                {currentRequestId && (
+                  <Text fontSize="xs" color="blue.600">
+                    Request ID: {currentRequestId.slice(-8)}
+                  </Text>
+                )}
+              </HStack>
+            </Box>
+          )}
+          
           {/* Error notification */}
           {error && (
             <Box 
@@ -1009,12 +1188,21 @@ const ChatPage = () => {
           {/* Chat input area */}
           <ChatControls 
             onSendMessage={handleSendMessage}
+            onCancelRequest={handleCancelRequest}
             disabled={isLoading}
             reasoningNodeId={reasoningNodeId}
           />
         </Flex>
       </Flex>
-    </Flex>
+      
+      {/* Loading Overlay for critical operations */}
+      <LoadingOverlay
+        isVisible={isLoading && !currentRequestId} // Show for session operations, not chat messages
+        message="Setting up your session..."
+        subMessage="Please wait while we prepare your chat environment."
+        showCancel={false}
+      />
+    </Box>
   );
 };
 

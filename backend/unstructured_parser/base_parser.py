@@ -93,9 +93,9 @@ class BaseParser(abc.ABC):
     @staticmethod
     def get_parser(
         parser_type: ParserType,
-        neo4j_uri: str,
-        neo4j_user: str,
-        neo4j_password: str,
+        neo4j_uri: str = None,
+        neo4j_user: str = None,
+        neo4j_password: str = None,
         **kwargs
     ) -> 'BaseParser':
         """
@@ -103,48 +103,37 @@ class BaseParser(abc.ABC):
 
         Args:
             parser_type: Type of parser to create
-            neo4j_uri: URI for Neo4j database
-            neo4j_user: Username for Neo4j
-            neo4j_password: Password for Neo4j
+            neo4j_uri: URI for Neo4j database (not used for DocumentParser)
+            neo4j_user: Username for Neo4j (not used for DocumentParser)
+            neo4j_password: Password for Neo4j (not used for DocumentParser)
             **kwargs: Additional parser-specific initialization parameters
 
         Returns:
             A parser instance
         """
         from .document_parser import DocumentParser
-        from .doctly_parser import DoctlyParser
-        from .llamaparse_parser import LlamaParseParser
-
+        
         if parser_type == ParserType.UNSTRUCTURED:
-            return DocumentParser(
-                neo4j_uri=neo4j_uri,
-                neo4j_user=neo4j_user,
-                neo4j_password=neo4j_password,
-                **kwargs
-            )
+            # DocumentParser no longer needs Neo4j or Qdrant parameters
+            # Filter out parameters that aren't supported by DocumentParser
+            supported_kwargs = {}
+            for key, value in kwargs.items():
+                if key in ['embedding_dim', 'chunk_size', 'chunk_overlap', 'chunking_strategy', 
+                          'extract_tables', 'extract_metadata', 'extract_images', 'is_cloud',
+                          'unstructured_api_url', 'unstructured_api_key']:
+                    supported_kwargs[key] = value
+            
+            return DocumentParser(**supported_kwargs)
         elif parser_type == ParserType.UNSTRUCTURED_CLOUD:
             # For cloud version, we use the same parser but with different API URL
             # The API key and dedicated cloud URL must be provided in kwargs or environment variables
-            return DocumentParser(
-                neo4j_uri=neo4j_uri,
-                neo4j_user=neo4j_user,
-                neo4j_password=neo4j_password,
-                is_cloud=True,
-                **kwargs
-            )
-        elif parser_type == ParserType.DOCTLY:
-            return DoctlyParser(
-                neo4j_uri=neo4j_uri,
-                neo4j_user=neo4j_user,
-                neo4j_password=neo4j_password,
-                **kwargs
-            )
-        elif parser_type == ParserType.LLAMAPARSE:
-            return LlamaParseParser(
-                neo4j_uri=neo4j_uri,
-                neo4j_user=neo4j_user,
-                neo4j_password=neo4j_password,
-                **kwargs
-            )
+            supported_kwargs = {'is_cloud': True}
+            for key, value in kwargs.items():
+                if key in ['embedding_dim', 'chunk_size', 'chunk_overlap', 'chunking_strategy', 
+                          'extract_tables', 'extract_metadata', 'extract_images',
+                          'unstructured_api_url', 'unstructured_api_key']:
+                    supported_kwargs[key] = value
+            
+            return DocumentParser(**supported_kwargs)
         else:
             raise ValueError(f"Unknown parser type: {parser_type}")

@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, Union, List, BinaryIO
 import time
 import uuid
 from dotenv import load_dotenv
-from neo4j import GraphDatabase
+
 
 # Add the parent directory to Python's module path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -53,7 +53,7 @@ app.conf.update(
 
 # Import tasks - we define these here to avoid circular imports
 from unstructured_parser.base_parser import BaseParser, ParserType
-from llamaIndex_rag.rag import RAGSystem
+from rag.hype_rag import HyPERagSystem as RAGSystem
 
 # Configuration from environment variables
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
@@ -139,12 +139,12 @@ def get_rag_system():
         try:
             rag = RAGSystem(
                 collection_name="regulaite_docs",
-                metadata_collection_name="regulaite_metadata",
-                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-                embedding_dim=384,
-                llm_model="gpt-4.1",
                 qdrant_url=QDRANT_URL,
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2",
                 openai_api_key=OPENAI_API_KEY,
+                llm_model="gpt-4o-mini",
+                chunk_size=1024,
+                chunk_overlap=200,
                 vector_weight=0.7,
                 semantic_weight=0.3
             )
@@ -345,7 +345,7 @@ def execute_agent_task(self, agent_type: str, task: str, config: Optional[Dict[s
         query = f"Task: {task}\nAgent type: {agent_type}"
         
         if include_context and context_query:
-            context = rag_system.retrieve_context(context_query or task, top_k=5)
+            context = rag_system.retrieve(context_query or task, top_k=5)
             context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(context)])
             query = f"{context_str}\n\n{query}"
             
@@ -465,7 +465,7 @@ def retrieve_context(self, query: str, top_k: int = 5) -> Dict[str, Any]:
         rag_system = get_rag_system()
 
         # Retrieve context
-        results = rag_system.retrieve_context(query, top_k=top_k)
+        results = rag_system.retrieve(query, top_k=top_k)
 
         # Clean up
         rag_system.close()

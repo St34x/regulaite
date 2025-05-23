@@ -554,3 +554,6 @@ __all__ = [
     "ParserConfigResponse",
     "UpdateParserSettingsRequest"
 ]
+
+# Add an alias to match the import in __init__.py
+router = task_router

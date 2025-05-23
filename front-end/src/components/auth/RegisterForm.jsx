@@ -101,29 +101,42 @@ const RegisterForm = () => {
       
       // Make sure we extract a string error message
       let errorMessage = 'Registration failed. Please try again.';
+      
       if (typeof err === 'string') {
         errorMessage = err;
       } else if (err && typeof err === 'object') {
-        if (err.detail) {
+        // Handle direct detail string
+        if (typeof err.detail === 'string') {
           errorMessage = err.detail;
-        } else if (err.message) {
+        }
+        // Handle Pydantic validation errors (array format)
+        else if (Array.isArray(err.detail)) {
+          const validationErrors = err.detail.map(error => {
+            if (error.msg) {
+              return error.msg;
+            } else if (error.message) {
+              return error.message;
+            }
+            return 'Invalid field';
+          });
+          errorMessage = validationErrors.join('. ');
+        }
+        // Handle other object formats
+        else if (err.message) {
           errorMessage = err.message;
-        } else if (err.response && err.response.data) {
-          // Handle Axios error object
+        }
+        // Handle Axios response structure
+        else if (err.response && err.response.data) {
           const responseData = err.response.data;
           if (typeof responseData === 'string') {
             errorMessage = responseData;
-          } else if (responseData.detail) {
+          } else if (typeof responseData.detail === 'string') {
             errorMessage = responseData.detail;
+          } else if (Array.isArray(responseData.detail)) {
+            const validationErrors = responseData.detail.map(error => error.msg || error.message || 'Invalid field');
+            errorMessage = validationErrors.join('. ');
           } else if (responseData.message) {
             errorMessage = responseData.message;
-          } else {
-            // Try to stringify the response data
-            try {
-              errorMessage = JSON.stringify(responseData);
-            } catch (e) {
-              // Fall back to the default error message
-            }
           }
         }
       }

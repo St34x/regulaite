@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { User, Bot, Info, Cpu, ArrowDownRight, FileText, AlertTriangle, ChevronDown, ChevronUp, BrainCircuit } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip, Progress, Button, Collapse } from '@chakra-ui/react';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Tooltip, Progress, Button, Collapse, VStack, HStack } from '@chakra-ui/react';
+import ProcessingStatus from './ProcessingStatus';
+import AIReasoningPanel from './AIReasoningPanel';
 
 /**
  * Renders a single chat message
@@ -139,7 +141,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             </Tooltip>
           )}
           
-          {!isUser && agentInfo && agentInfo.agent_type && (
+          {!isUser && agentInfo && agentInfo.agent_used && (
             <Badge 
               bg={accentColor} 
               color="white" 
@@ -149,7 +151,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
               px={2}
               boxShadow="0 1px 2px rgba(68, 21, 182, 0.3)"
             >
-              {agentInfo.agent_type} Agent
+              Autonomous Agent
             </Badge>
           )}
           
@@ -201,6 +203,38 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
           <ReactMarkdown>{cleanMessageContent()}</ReactMarkdown>
         </Box>
         
+        {/* Enhanced Processing Status - Show when processing or has internal thoughts */}
+        {(isProcessing || hasInternalThoughts) && (
+          <ProcessingStatus
+            processingState={message.processingState}
+            internalThoughts={message.metadata?.internal_thoughts}
+            isProcessing={isProcessing}
+            expanded={internalThoughtsExpanded}
+            processingSteps={message.metadata?.processingSteps || []}
+            currentStep={message.metadata?.currentStep || 0}
+            totalSteps={message.metadata?.totalSteps || 7}
+            startTime={message.metadata?.startTime || (isProcessing ? Date.now() : null)}
+            contextMetadata={message.metadata?.contextMetadata}
+            isConnected={true}
+            requestId={message.requestId || message.metadata?.requestId}
+          />
+        )}
+        
+        {/* AI Reasoning Panel - Show detailed insights when response is complete */}
+        {!isUser && !isProcessing && (message.metadata?.contextMetadata || message.metadata?.sources) && (
+          <AIReasoningPanel
+            contextMetadata={message.metadata?.contextMetadata}
+            processingMetrics={{
+              responseTime: message.metadata?.processingTime,
+              tokenCount: message.metadata?.tokenCount
+            }}
+            confidenceScore={message.metadata?.confidence_score || 
+              (message.metadata?.context_quality === 'high' ? 0.9 : 
+               message.metadata?.context_quality === 'medium' ? 0.75 : 0.6)}
+            isVisible={true}
+          />
+        )}
+        
         {/* Hallucination Risk */}
         {hasHallucinationRisk && message.metadata.hallucination_risk > 0.5 && (
           <Box mt={3} mb={3}>
@@ -217,100 +251,6 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
               borderRadius="full"
               mt={1}
             />
-          </Box>
-        )}
-        
-        {/* Internal Thoughts - Updated to show during processing */}
-        {(hasInternalThoughts || isProcessing) && (
-          <Box 
-            mt={3} 
-            pt={2} 
-            borderTop="1px solid" 
-            borderColor={dividerColor} 
-            fontSize="xs" 
-            color={mutedTextColor}
-          >
-            <Flex 
-              align="center" 
-              justify="space-between" 
-              mb={2}
-              cursor="pointer"
-              onClick={() => setInternalThoughtsExpanded(!internalThoughtsExpanded)}
-              _hover={{ bg: agentInfoBg }}
-              borderRadius="md"
-              p={1}
-            >
-              <Flex align="center">
-                <Icon as={BrainCircuit} boxSize={3} mr={1} color={accentColor} />
-                <Text fontWeight="medium" color={accentColor}>
-                  Internal Thoughts 
-                  {isProcessing && <Spinner size="xs" ml={2} color={accentColor} />}
-                </Text>
-              </Flex>
-              <Icon as={internalThoughtsExpanded ? ChevronUp : ChevronDown} boxSize={3} />
-            </Flex>
-            
-            <Collapse in={internalThoughtsExpanded}>
-              {isProcessing && message.processingState && (
-                <Box 
-                  mb={2}
-                  p={2}
-                  bg={processingStateBg}
-                  color={processingStateColor}
-                  fontSize="xs"
-                  borderRadius="md"
-                  fontWeight="medium"
-                >
-                  {message.processingState}
-                </Box>
-              )}
-              
-              <Box
-                bg={internalThoughtsBg}
-                p={3}
-                borderRadius="md"
-                boxShadow="inset 0 1px 3px rgba(0, 0, 0, 0.05)"
-                borderLeft="3px solid"
-                borderLeftColor={accentColor}
-                color={internalThoughtsColor}
-                fontSize="xs"
-                whiteSpace="pre-wrap"
-                fontFamily="monospace"
-                position="relative"
-              >
-                {isProcessing && (
-                  <Box 
-                    position="absolute" 
-                    top={2} 
-                    right={2}
-                  >
-                    <Spinner size="xs" color={accentColor} />
-                  </Box>
-                )}
-                {isProcessing 
-                  ? (
-                    <ReactMarkdown>
-                      {message.metadata?.internal_thoughts 
-                        ? message.metadata.internal_thoughts
-                            .replace(/<internal_thoughts>/g, '')
-                            .replace(/<\/internal_thoughts>/g, '')
-                        : "Thinking..."
-                      }
-                    </ReactMarkdown>
-                  ) 
-                  : (
-                    <ReactMarkdown>
-                      {message.metadata?.internal_thoughts
-                        ? message.metadata.internal_thoughts
-                            .replace(/<internal_thoughts>/g, '')
-                            .replace(/<\/internal_thoughts>/g, '')
-                        : ""
-                      }
-                    </ReactMarkdown>
-                  )
-                }
-              </Box>
-            </Collapse>
           </Box>
         )}
         

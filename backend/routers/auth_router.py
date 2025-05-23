@@ -10,6 +10,10 @@ import uuid
 import mariadb
 from passlib.context import CryptContext
 import re
+import logging
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 # Create a router instance
 router = APIRouter(
@@ -248,54 +252,87 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(user: UserCreate):
     """Register a new user"""
-    conn = get_db_connection()
+    logger.info(f"Registration attempt for email: {user.email}")
+    
+    conn = None
     try:
+        # Get database connection
+        logger.info("Attempting to get database connection...")
+        conn = get_db_connection()
+        logger.info("Database connection established successfully")
+        
         # Ensure tables exist
+        logger.info("Creating auth tables if they don't exist...")
         create_auth_tables(conn)
+        logger.info("Auth tables verified/created successfully")
+        
         cursor = conn.cursor()
         
         # Check if email already exists
+        logger.info(f"Checking if email {user.email} already exists...")
         existing_user = get_user_by_email(user.email)
         if existing_user:
+            logger.warning(f"Registration failed: Email {user.email} already registered")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email already registered"
             )
+        logger.info("Email check passed - email is available")
         
         # Create new user
         user_id = str(uuid.uuid4())
-        password_hash = get_password_hash(user.password)
+        logger.info(f"Generated user ID: {user_id}")
         
-        try:
-            cursor.execute(
-                "INSERT INTO users (user_id, email, password_hash, full_name, company, username) VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, user.email, password_hash, user.full_name, user.company, user.username)
-            )
-            conn.commit()
-        except mariadb.Error as e:
+        password_hash = get_password_hash(user.password)
+        logger.info("Password hashed successfully")
+        
+        # Insert user into database
+        logger.info("Inserting user into database...")
+        cursor.execute(
+            "INSERT INTO users (user_id, email, password_hash, full_name, company, username) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, user.email, password_hash, user.full_name, user.company, user.username)
+        )
+        conn.commit()
+        logger.info(f"User {user.email} registered successfully with ID: {user_id}")
+        
+        # Return user data without password
+        user_response = UserResponse(
+            user_id=user_id,
+            email=user.email,
+            full_name=user.full_name,
+            company=user.company,
+            username=user.username,
+            created_at=datetime.now()
+        )
+        logger.info(f"Returning successful registration response for user: {user.email}")
+        return user_response
+        
+    except HTTPException as he:
+        # Re-raise HTTP exceptions (like email already exists)
+        logger.error(f"HTTP Exception during registration: {he.detail}")
+        if conn:
             conn.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to create user: {e}"
-            )
-    except Exception as e:
-        conn.rollback()
+        raise he
+    except mariadb.Error as me:
+        logger.error(f"MariaDB error during registration: {str(me)}")
+        if conn:
+            conn.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error during registration: {str(e)}"
+            detail=f"Database error: {str(me)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during registration: {str(e)}", exc_info=True)
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Registration failed"
         )
     finally:
-        conn.close()
-    
-    # Return user data without password
-    return UserResponse(
-        user_id=user_id,
-        email=user.email,
-        full_name=user.full_name,
-        company=user.company,
-        username=user.username,
-        created_at=datetime.now()
-    )
+        if conn:
+            conn.close()
+            logger.info("Database connection closed")
 
 
 @router.post("/login", response_model=Token)

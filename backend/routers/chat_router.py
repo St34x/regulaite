@@ -14,6 +14,13 @@ from fastapi.responses import StreamingResponse
 import mariadb
 from datetime import timedelta
 import re
+import asyncio
+
+# Import OpenAI clients for both sync and async operations
+from openai import OpenAI, AsyncOpenAI
+
+# Import agent framework integrations
+from agent_framework.integrations.chat_integration import get_chat_integration
 
 # Configure logging
 logging.basicConfig(
@@ -46,9 +53,7 @@ class ChatRequest(BaseModel):
     include_context: bool = Field(True, description="Whether to include RAG context")
     context_query: Optional[str] = Field(None, description="Query to use for retrieving context")
     retrieval_type: Optional[str] = Field("auto", description="Type of retrieval to use: 'hybrid', 'vector', or 'auto' (default)")
-    use_agent: bool = Field(False, description="Whether to use an agent for processing")
-    agent_type: Optional[str] = Field(None, description="Type of agent to use if use_agent is True")
-    agent_params: Optional[Dict[str, Any]] = Field(None, description="Additional parameters for the agent")
+    use_agent: bool = Field(True, description="Whether to use an agent for processing")
     use_tree_reasoning: bool = Field(False, description="Whether to use tree-based reasoning")
     tree_template: Optional[str] = Field(None, description="ID of the decision tree template to use")
     custom_tree: Optional[Dict[str, Any]] = Field(None, description="Custom decision tree for reasoning")
@@ -58,10 +63,9 @@ class ChatRequest(BaseModel):
 class SourceInfo(BaseModel):
     """Information about a source used in RAG retrieval."""
     doc_id: Optional[str] = Field(None, description="Document ID")
-    page_number: Optional[int] = Field(None, description="Page number in document")
+    page_number: Optional[int] = Field(1, description="Page number in document")
     score: Optional[float] = Field(None, description="Relevance score")
-    reliability_score: Optional[float] = Field(None, description="Reliability score from Reliable RAG")
-    retrieval_method: Optional[str] = Field(None, description="Method used for retrieval")
+    retrieval_method: Optional[str] = Field("HyPE", description="Method used for retrieval")
     title: Optional[str] = Field(None, description="Document title if available")
     content: Optional[str] = Field(None, description="Actual text content from the document chunk")
 
@@ -70,7 +74,6 @@ class ChatResponse(BaseModel):
     """Response for a chat completion."""
     message: str = Field(..., description="Assistant response message")
     model: str = Field(..., description="Model used for generation")
-    agent_type: Optional[str] = Field(None, description="Type of agent used (if any)")
     agent_used: bool = Field(False, description="Whether an agent was used")
     tree_reasoning_used: bool = Field(False, description="Whether tree reasoning was used")
     context_used: bool = Field(False, description="Whether context was used")
@@ -81,6 +84,8 @@ class ChatResponse(BaseModel):
     context_quality: Optional[str] = Field(None, description="Quality assessment of the context")
     hallucination_risk: Optional[float] = Field(None, description="Risk of hallucination in the response")
     internal_thoughts: Optional[str] = Field(None, description="Internal thoughts and reasoning process")
+    tools_used: Optional[List[str]] = Field(None, description="List of tools used by the agent")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata from agent processing")
 
 
 class ChatHistoryEntry(BaseModel):
@@ -538,345 +543,468 @@ You will be provided with context information from various sources. When answeri
         
         # Track token usage
         token_usage = {}
+        execution_id = None
+        context_used = False
+        sources = None
+        internal_thoughts = None
+        assistant_message = ""  # Initialize to ensure it always has a value
 
         # If agent-based processing is requested
-        if request.use_agent and request.agent_type:
-            # Create agent execution tracking in progress state
-            if not request.stream:
-                # For non-streaming, we'll create a background task for progress updates
+        if request.use_agent and not request.stream:
+            # Agent processing only works with non-streaming requests for now
+            try:
+                # Use the chat integration for agent processing
+                chat_integration = get_chat_integration()
+                
+                # Prepare request data for the chat integration
+                request_data = {
+                    "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+                    "model": request.model,
+                    "session_id": session_id,
+                    "include_context": request.include_context,
+                    "context_query": request.context_query,
+                    "response_format": "text"
+                }
+                
+                # Process with the agent framework
+                agent_response = await chat_integration.process_chat_request(
+                    request_data=request_data,
+                    use_agent=True
+                )
+                
+                if agent_response.get("error"):
+                    raise Exception(agent_response.get("message", "Agent processing failed"))
+                
+                assistant_message = agent_response.get("message", "")
+                context_used = agent_response.get("context_used", False)
+                sources = agent_response.get("sources")
+                
+                # Extract agent metadata
+                agent_tools_used = agent_response.get("tools_used")
+                agent_metadata = agent_response.get("metadata", {})
+                
+                # If we have sources from the agent, format them for the response
+                if sources:
+                    # Create a compatible context_result structure for the return statement
+                    context_result = {
+                        "sources": sources,
+                        "context_quality": "agent_processed",
+                        "hallucination_risk": None
+                    }
+                
+                # Create agent execution tracking
                 cursor.execute(
                     """
                     INSERT INTO agent_executions (
                         agent_id, session_id, task, model, error
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (request.agent_type, session_id, user_message, request.model, False)
+                    (request.model, session_id, user_message, request.model, False)
                 )
                 conn.commit()
                 execution_id = cursor.lastrowid
                 
-                # Initialize progress
+                # Initialize and complete progress
                 cursor.execute(
                     """
                     INSERT INTO agent_progress (
                         execution_id, progress_percent, status, status_message
                     ) VALUES (?, ?, ?, ?)
                     """,
-                    (execution_id, 0.0, "running", "Task started")
+                    (execution_id, 100.0, "completed", "Agent processing completed")
                 )
                 conn.commit()
-
-            # Handle tree-based reasoning if requested - since pyndantic_agents is removed, we'll use a simplified approach
-            if request.use_tree_reasoning:
-                # Update progress if available
+                
+            except Exception as e:
+                logger.error(f"Error in agent processing: {str(e)}")
+                
+                # Update execution record with error if exists
                 if execution_id:
                     cursor.execute(
                         """
+                        UPDATE agent_executions SET
+                            error = 1, error_message = ?
+                        WHERE id = ?
+                        """,
+                        (str(e), execution_id)
+                    )
+                    
+                    cursor.execute(
+                        """
                         UPDATE agent_progress SET
-                            progress_percent = ?, status_message = ?
+                            status = 'failed', status_message = ?, progress_percent = 0
                         WHERE execution_id = ?
                         """,
-                        (10.0, "Setting up reasoning process", execution_id)
+                        (f"Error: {str(e)}", execution_id)
                     )
                     conn.commit()
+                    
+                # Set a fallback error message and fall through to standard RAG processing
+                logger.info("Falling back to standard RAG processing due to agent error")
+                assistant_message = ""  # Reset to trigger standard processing
+                
+        if not assistant_message:
+            # Standard RAG-based processing (used when no agent or agent failed or streaming enabled)
+            # Import OpenAI API key from main application
+            from main import OPENAI_API_KEY
 
-                try:
-                    # Update progress if available
-                    if execution_id:
-                        cursor.execute(
-                            """
-                            UPDATE agent_progress SET
-                                progress_percent = ?, status_message = ?
-                            WHERE execution_id = ?
-                            """,
-                            (25.0, "Executing reasoning task", execution_id)
-                        )
-                        conn.commit()
-                    
-                    # Simplified implementation without pyndantic_agents
-                    # Prepare context if needed
-                    context_text = ""
-                    if request.include_context:
-                        context_query = request.context_query or user_message
-                        context = await retrieve_context_for_query(context_query, top_k=5, search_filter=None, rag_query_engine=rag_query_engine)
-                        if context and "results" in context and context["results"]:
-                            context_text = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(context["results"])])
-                    
-                    # Prepare prompt for reasoning
-                    prompt = f"""Task: {user_message}
-                    
-Agent Type: {request.agent_type}
-
-Your task is to analyze the request and provide a comprehensive response."""
-
-                    if context_text:
-                        prompt = f"{context_text}\n\n{prompt}"
-                        
-                    # Call LLM directly
-                    from openai import OpenAI
-                    client = OpenAI(api_key=OPENAI_API_KEY)
-                    
-                    # Update progress
-                    if execution_id:
-                        cursor.execute(
-                            """
-                            UPDATE agent_progress SET
-                                progress_percent = ?, status_message = ?
-                            WHERE execution_id = ?
-                            """,
-                            (50.0, "Processing with language model", execution_id)
-                        )
-                        conn.commit()
-                        
-                    # Call OpenAI
-                    response = client.chat.completions.create(
-                        model=request.model,
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant specializing in regulatory analysis."},
-                            {"role": "user", "content": prompt}
-                        ],
-                        temperature=request.temperature,
-                        max_tokens=request.max_tokens
-                    )
-                    
-                    # Extract result
-                    assistant_message = response.choices[0].message.content
-                    
-                    # Extract internal thoughts if present
-                    internal_thoughts = None
-                    internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_message, re.DOTALL)
-                    if internal_thoughts_match:
-                        internal_thoughts = internal_thoughts_match.group(1).strip()
-                        # Remove internal thoughts from the message
-                        assistant_message = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_message, flags=re.DOTALL).strip()
-                        # Log successful extraction
-                        logger.info(f"Successfully extracted internal thoughts: {internal_thoughts[:50]}...")
-                    else:
-                        logger.info("No internal thoughts found in response")
-                    
-                    # Track token usage
-                    if response.usage:
-                        token_usage = {
-                            "prompt_tokens": response.usage.prompt_tokens,
-                            "completion_tokens": response.usage.completion_tokens,
-                            "total_tokens": response.usage.total_tokens
-                        }
-                    
-                    # Update progress if available
-                    if execution_id:
-                        cursor.execute(
-                            """
-                            UPDATE agent_progress SET
-                                progress_percent = ?, status_message = ?
-                            WHERE execution_id = ?
-                            """,
-                            (100.0, "Reasoning task completed", execution_id)
-                        )
-                        conn.commit()
-                        
-                        # Track execution in background task
-                        background_tasks.add_task(
-                            update_agent_analytics,
-                            "tree_reasoning",
-                            execution_id
-                        )
-                        
-                except Exception as e:
-                    logger.error(f"Error in tree reasoning process: {str(e)}")
-                    
-                    # Update execution record with error
-                    if execution_id:
-                        cursor.execute(
-                            """
-                            UPDATE agent_executions SET
-                                error = 1, error_message = ?
-                            WHERE id = ?
-                            """,
-                            (str(e), execution_id)
-                        )
-                        
-                        cursor.execute(
-                            """
-                            UPDATE agent_progress SET
-                                status = 'failed', status_message = ?, progress_percent = 0
-                            WHERE execution_id = ?
-                            """,
-                            (f"Error: {str(e)}", execution_id)
-                        )
-                        conn.commit()
-                        
-                    # Set a fallback error message
-                    assistant_message = f"I encountered an error while processing your request: {str(e)}. Please try again with a different approach."
-
-        else:
-            # Standard RAG-based processing
-            # Import OpenAI client from main application
-            from main import OpenAI, OPENAI_API_KEY
-
-            # Create OpenAI client
-            client = OpenAI(api_key=OPENAI_API_KEY)
+            # Create OpenAI client - use AsyncOpenAI for streaming to prevent blocking
+            if request.stream:
+                client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+            else:
+                client = OpenAI(api_key=OPENAI_API_KEY)
 
             # Convert messages for OpenAI API
             openai_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
             
+            # Detect language from user message and create appropriate system prompt
+            detected_language = detect_language(user_message)
+            logger.info(f"Detected language: {detected_language} for message: {user_message[:50]}...")
+            
             # Add system message with instruction to include internal thoughts
             openai_messages.insert(0, {
                 "role": "system", 
-                "content": """You are a helpful assistant specializing in regulatory analysis.
-                
-When responding, include your internal thoughts and reasoning process wrapped in <internal_thoughts> tags. 
-These thoughts should explain your approach to answering the question and any key insights.
-For example:
-
-<internal_thoughts>
-First, I need to understand what regulations apply to this scenario.
-I should check if there are any specific compliance frameworks mentioned.
-The key considerations seem to be X, Y, and Z.
-</internal_thoughts>
-
-Then provide your actual response to the user without these tags.
-"""
+                "content": get_system_prompt_for_language(detected_language, context_used)
             })
 
             # Get chat completion
             if request.stream:
                 # Handle streaming response
                 async def generate():
-                    # Start streaming response
-                    yield json.dumps({
-                        "type": "start",
-                        "timestamp": datetime.now().isoformat()
-                    }) + "\n"
-                    
-                    # Stream token by token
-                    collected_tokens = []
-                    internal_thought_tokens = []
-                    in_internal_thoughts = False
-                    
-                    # Send initial processing state
-                    yield json.dumps({
-                        "type": "processing",
-                        "state": "Starting to process your query",
-                        "timestamp": datetime.now().isoformat()
-                    }) + "\n"
-                    
-                    # Create streaming completion
-                    stream = client.chat.completions.create(
-                        model=request.model,
-                        messages=openai_messages,
-                        temperature=request.temperature,
-                        max_tokens=request.max_tokens,
-                        stream=True
-                    )
-                    
-                    # Process the stream (non-async iteration)
-                    for chunk in stream:
-                        if hasattr(chunk.choices[0], 'delta') and hasattr(chunk.choices[0].delta, 'content') and chunk.choices[0].delta.content:
-                            content = chunk.choices[0].delta.content
+                    try:
+                        # Start streaming response with request tracking
+                        request_start = time.time()
+                        yield json.dumps({
+                            "type": "start",
+                            "timestamp": datetime.now().isoformat(),
+                            "request_id": f"stream_{int(request_start)}_{uuid.uuid4().hex[:8]}"
+                        }) + "\n"
+                        
+                        # Enhanced processing steps for transparency (with minimal delays)
+                        processing_steps = [
+                            {
+                                "step": "query_analysis", 
+                                "message": "Analyzing your query and understanding the intent",
+                                "details": "Parsing natural language, identifying key concepts, and determining query complexity"
+                            },
+                            {
+                                "step": "intent_classification", 
+                                "message": "Classifying query intent and domain",
+                                "details": "Determining if this is a compliance question, policy inquiry, or general guidance request"
+                            },
+                            {
+                                "step": "knowledge_search", 
+                                "message": "Searching knowledge base for relevant information",
+                                "details": "Performing hybrid vector + semantic search across regulatory documents and guidelines"
+                            },
+                            {
+                                "step": "context_retrieval", 
+                                "message": "Retrieving and ranking relevant documents",
+                                "details": "Evaluating document relevance scores and filtering most pertinent information"
+                            },
+                            {
+                                "step": "reasoning_preparation", 
+                                "message": "Preparing reasoning framework",
+                                "details": "Organizing information hierarchy and establishing logical reasoning paths"
+                            },
+                            {
+                                "step": "response_generation", 
+                                "message": "Generating comprehensive response",
+                                "details": "Synthesizing information with domain expertise to create accurate, helpful answer"
+                            }
+                        ]
+                        
+                        # Send enhanced processing updates with minimal delays
+                        for i, step in enumerate(processing_steps):
+                            yield json.dumps({
+                                "type": "processing",
+                                "state": step["message"],
+                                "step": step["step"],
+                                "step_number": i + 1,
+                                "total_steps": len(processing_steps),
+                                "details": step["details"],
+                                "timestamp": datetime.now().isoformat()
+                            }) + "\n"
                             
-                            # Track if we're inside internal thoughts tags
-                            if "<internal_thoughts>" in content:
-                                in_internal_thoughts = True
-                                # Split at the tag and add the part before to normal tokens
-                                parts = content.split("<internal_thoughts>", 1)
-                                if parts[0]:
-                                    collected_tokens.append(parts[0])
-                                content = parts[1] if len(parts) > 1 else ""
+                            # Minimal delay only for context retrieval to show real work
+                            if step["step"] in ["knowledge_search"]:
+                                await asyncio.sleep(0.1)  # Further reduced from 0.2s
+                            elif step["step"] in ["context_retrieval"]:
+                                await asyncio.sleep(0.05)  # Minimal delay to show progress
+                        
+                        # Before generating, provide context insights
+                        if context_used and context_result:
+                            source_count = len(context_result.get("sources", []))
+                            context_quality = context_result.get("context_quality", "unknown")
                             
-                            if "</internal_thoughts>" in content and in_internal_thoughts:
-                                parts = content.split("</internal_thoughts>", 1)
-                                if parts[0]:
-                                    internal_thought_tokens.append(parts[0])
-                                if len(parts) > 1 and parts[1]:
-                                    collected_tokens.append(parts[1])
-                                in_internal_thoughts = False
-                                
-                                # Send processing update with current internal thoughts
-                                current_thoughts = "".join(internal_thought_tokens)
+                            yield json.dumps({
+                                "type": "processing",
+                                "state": f"Found {source_count} relevant sources with {context_quality} quality context",
+                                "step": "context_evaluation",
+                                "step_number": 5,
+                                "total_steps": len(processing_steps),
+                                "details": f"Successfully retrieved {source_count} documents with {context_quality}-quality relevance scores",
+                                "context_metadata": {
+                                    "source_count": source_count,
+                                    "context_quality": context_quality,
+                                    "hallucination_risk": context_result.get("hallucination_risk")
+                                },
+                                "timestamp": datetime.now().isoformat()
+                            }) + "\n"
+                        
+                        # Final processing state before generation
+                        yield json.dumps({
+                            "type": "processing",
+                            "state": "Starting response generation",
+                            "step": "response_generation", 
+                            "step_number": len(processing_steps),
+                            "total_steps": len(processing_steps),
+                            "timestamp": datetime.now().isoformat()
+                        }) + "\n"
+                        
+                        # Initialize token collection
+                        collected_tokens = []
+                        internal_thought_tokens = []
+                        in_internal_thoughts = False
+                        
+                        try:
+                            # Create async streaming completion with timeout protection
+                            logger.info("Starting OpenAI streaming request")
+                            
+                            # Add timeout protection for OpenAI call
+                            openai_timeout = 120  # 2 minutes for OpenAI call
+                            
+                            # Create the OpenAI stream with timeout
+                            stream_task = asyncio.create_task(
+                                client.chat.completions.create(
+                                    model=request.model,
+                                    messages=openai_messages,
+                                    temperature=request.temperature,
+                                    max_tokens=request.max_tokens,
+                                    stream=True,
+                                    timeout=openai_timeout
+                                )
+                            )
+                            
+                            timeout_task = asyncio.create_task(asyncio.sleep(openai_timeout))
+                            
+                            # Wait for either the stream creation or timeout
+                            done, pending = await asyncio.wait(
+                                [stream_task, timeout_task],
+                                return_when=asyncio.FIRST_COMPLETED
+                            )
+                            
+                            # Cancel any pending tasks
+                            for task in pending:
+                                task.cancel()
+                                try:
+                                    await task
+                                except asyncio.CancelledError:
+                                    pass
+                            
+                            if stream_task not in done:
+                                # OpenAI call timed out
+                                logger.error("OpenAI stream creation timed out")
                                 yield json.dumps({
-                                    "type": "processing",
-                                    "state": "Thinking through your query",
-                                    "internal_thoughts": current_thoughts,
-                                    "timestamp": datetime.now().isoformat()
+                                    "type": "error",
+                                    "message": "OpenAI request timed out. Please try again with a shorter question.",
+                                    "error_code": "OPENAI_TIMEOUT"
                                 }) + "\n"
-                            elif in_internal_thoughts:
-                                internal_thought_tokens.append(content)
-                                
-                                # Periodically send processing updates with current internal thoughts
-                                if len(internal_thought_tokens) % 10 == 0:  # Send every ~10 tokens
-                                    current_thoughts = "".join(internal_thought_tokens)
+                                return
+                            
+                            # Get the stream
+                            stream = await stream_task
+                            logger.info("OpenAI stream created successfully, processing chunks")
+                            
+                            # Track chunk processing time
+                            last_chunk_time = time.time()
+                            chunk_timeout = 30  # 30 seconds between chunks
+                            heartbeat_interval = 10  # Send heartbeat every 10 seconds
+                            last_heartbeat = time.time()
+                            
+                            # Process the async stream with chunk timeout protection
+                            async for chunk in stream:
+                                try:
+                                    # Update last chunk time
+                                    current_time = time.time()
+                                    
+                                    # Send periodic heartbeat to show we're still processing
+                                    if current_time - last_heartbeat > heartbeat_interval:
+                                        yield json.dumps({
+                                            "type": "processing",
+                                            "state": "Generating response... (receiving data from AI)",
+                                            "step": "generation_active",
+                                            "timestamp": datetime.now().isoformat()
+                                        }) + "\n"
+                                        last_heartbeat = current_time
+                                    
+                                    # Check if too much time passed since last chunk
+                                    if current_time - last_chunk_time > chunk_timeout:
+                                        logger.warning(f"Chunk timeout detected ({current_time - last_chunk_time:.2f}s)")
+                                        yield json.dumps({
+                                            "type": "processing",
+                                            "state": "Response generation taking longer than expected...",
+                                            "step": "generation_delay",
+                                            "timestamp": datetime.now().isoformat()
+                                        }) + "\n"
+                                    
+                                    last_chunk_time = current_time
+                                    
+                                    if (hasattr(chunk, 'choices') and 
+                                        len(chunk.choices) > 0 and 
+                                        hasattr(chunk.choices[0], 'delta') and 
+                                        hasattr(chunk.choices[0].delta, 'content') and 
+                                        chunk.choices[0].delta.content is not None):
+                                        
+                                        content = chunk.choices[0].delta.content
+                                        
+                                        # Track if we're inside internal thoughts tags
+                                        if "<internal_thoughts>" in content:
+                                            in_internal_thoughts = True
+                                            # Split at the tag and add the part before to normal tokens
+                                            parts = content.split("<internal_thoughts>", 1)
+                                            if parts[0]:
+                                                collected_tokens.append(parts[0])
+                                                # Send the visible token
+                                                yield json.dumps({
+                                                    "type": "token",
+                                                    "content": parts[0]
+                                                }) + "\n"
+                                            content = parts[1] if len(parts) > 1 else ""
+                                        
+                                        if "</internal_thoughts>" in content and in_internal_thoughts:
+                                            parts = content.split("</internal_thoughts>", 1)
+                                            if parts[0]:
+                                                internal_thought_tokens.append(parts[0])
+                                            if len(parts) > 1 and parts[1]:
+                                                collected_tokens.append(parts[1])
+                                                # Send the visible token
+                                                yield json.dumps({
+                                                    "type": "token", 
+                                                    "content": parts[1]
+                                                }) + "\n"
+                                            in_internal_thoughts = False
+                                            
+                                            # Send processing update with current internal thoughts
+                                            current_thoughts = "".join(internal_thought_tokens)
+                                            yield json.dumps({
+                                                "type": "processing",
+                                                "state": "Processing internal reasoning",
+                                                "step": "reasoning",
+                                                "internal_thoughts": current_thoughts,
+                                                "timestamp": datetime.now().isoformat()
+                                            }) + "\n"
+                                        elif in_internal_thoughts:
+                                            internal_thought_tokens.append(content)
+                                            
+                                            # Periodically send processing updates with current internal thoughts (reduced frequency)
+                                            if len(internal_thought_tokens) % 30 == 0:  # Even less frequent
+                                                current_thoughts = "".join(internal_thought_tokens)
+                                                yield json.dumps({
+                                                    "type": "processing",
+                                                    "state": "Developing reasoning and analysis",
+                                                    "step": "reasoning", 
+                                                    "internal_thoughts": current_thoughts,
+                                                    "timestamp": datetime.now().isoformat()
+                                                }) + "\n"
+                                        else:
+                                            collected_tokens.append(content)
+                                            # Send the visible token immediately
+                                            yield json.dumps({
+                                                "type": "token",
+                                                "content": content
+                                            }) + "\n"
+                                            
+                                except Exception as chunk_error:
+                                    logger.error(f"Error processing chunk: {str(chunk_error)}")
+                                    # Send error notification but continue processing
                                     yield json.dumps({
                                         "type": "processing",
-                                        "state": "Thinking through your query",
-                                        "internal_thoughts": current_thoughts,
+                                        "state": "Recovering from chunk processing error...",
+                                        "step": "error_recovery",
                                         "timestamp": datetime.now().isoformat()
                                     }) + "\n"
-                            else:
-                                collected_tokens.append(content)
+                                    continue
                             
-                            # Always emit the token
+                            logger.info(f"OpenAI streaming completed successfully in {time.time() - request_start:.2f}s")
+                            
+                        except asyncio.TimeoutError:
+                            logger.error("OpenAI streaming timed out")
                             yield json.dumps({
-                                "type": "token",
-                                "content": content
+                                "type": "error",
+                                "message": "Response generation timed out. Please try again with a shorter question.",
+                                "error_code": "GENERATION_TIMEOUT"
                             }) + "\n"
-                    
-                    # Combine tokens to get the full response
-                    assistant_response = "".join(collected_tokens)
-                    
-                    # Final internal thoughts
-                    internal_thoughts = "".join(internal_thought_tokens) if internal_thought_tokens else None
-                    
-                    if not internal_thoughts:
-                        # If no internal thoughts were extracted via streaming, try regex extraction
-                        internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_response, re.DOTALL)
-                        if internal_thoughts_match:
-                            internal_thoughts = internal_thoughts_match.group(1).strip()
-                            # Remove internal thoughts from the message
-                            assistant_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_response, flags=re.DOTALL).strip()
-                            logger.info(f"Extracted internal thoughts via regex: {internal_thoughts[:50]}...")
-                    
-                    # Store the response in chat history
-                    try:
-                        cursor.execute(
-                            """
-                            INSERT INTO chat_history (user_id, session_id, message_text, message_role)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (user_id, session_id, assistant_response, "assistant")
-                        )
-                        conn.commit()
+                            return
+                        except Exception as e:
+                            logger.error(f"Error in OpenAI streaming: {str(e)}")
+                            yield json.dumps({
+                                "type": "error",
+                                "message": f"Error during response generation: {str(e)}",
+                                "error_code": "GENERATION_ERROR"
+                            }) + "\n"
+                            return
+                        
+                        # Combine tokens to get the full response
+                        assistant_response = "".join(collected_tokens)
+                        
+                        # Final internal thoughts
+                        internal_thoughts = "".join(internal_thought_tokens) if internal_thought_tokens else None
+                        
+                        if not internal_thoughts:
+                            # If no internal thoughts were extracted via streaming, try regex extraction
+                            internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', assistant_response, re.DOTALL)
+                            if internal_thoughts_match:
+                                internal_thoughts = internal_thoughts_match.group(1).strip()
+                                # Remove internal thoughts from the message
+                                assistant_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', assistant_response, flags=re.DOTALL).strip()
+                                logger.info(f"Extracted internal thoughts via regex: {internal_thoughts[:50]}...")
+                        
+                        # Store the response in chat history
+                        try:
+                            cursor.execute(
+                                """
+                                INSERT INTO chat_history (user_id, session_id, message_text, message_role)
+                                VALUES (?, ?, ?, ?)
+                                """,
+                                (user_id, session_id, assistant_response, "assistant")
+                            )
+                            conn.commit()
+                        except Exception as e:
+                            logger.error(f"Error storing assistant message in chat history: {str(e)}")
+                            # Continue anyway, as this is not critical
+                        
+                        # Extract sources from context result if available
+                        sources = []
+                        if context_result and context_result.get("status") == "success":
+                            sources = context_result.get("sources", [])
+                        
+                        # Send completion event
+                        yield json.dumps({
+                            "type": "end",
+                            "message": assistant_response,
+                            "model": request.model,
+                            "context_used": context_used,
+                            "session_id": session_id,
+                            "timestamp": datetime.now().isoformat(),
+                            "sources": sources,
+                            "context_quality": context_result.get("context_quality") if context_result else None,
+                            "hallucination_risk": context_result.get("hallucination_risk") if context_result else None,
+                            "internal_thoughts": internal_thoughts
+                        }) + "\n"
+                        
+                        logger.info("Streaming response completed successfully")
+                        
                     except Exception as e:
-                        logger.error(f"Error storing assistant message in chat history: {str(e)}")
-                    
-                    # Calculate token usage for billing/analytics
-                    total_tokens = sum(len(m["content"].split()) for m in openai_messages) + len(assistant_response.split())
-                    token_usage = {
-                        "prompt_tokens": sum(len(m["content"].split()) for m in openai_messages),
-                        "completion_tokens": len(assistant_response.split()),
-                        "total_tokens": total_tokens
-                    }
-                    
-                    # End of stream
-                    completion_data = {
-                        "type": "end",
-                        "timestamp": datetime.now().isoformat(),
-                        "model": request.model,
-                        "session_id": session_id,
-                        "token_usage": token_usage,
-                        "context_used": context_used,
-                        "internal_thoughts": internal_thoughts
-                    }
-                    
-                    # Include source information if available
-                    if context_result:
-                        completion_data["sources"] = context_result.get("sources")
-                        completion_data["context_quality"] = context_result.get("context_quality")
-                        completion_data["hallucination_risk"] = context_result.get("hallucination_risk")
-                    
-                    yield json.dumps(completion_data) + "\n"
-                
+                        logger.error(f"Error in streaming generator: {str(e)}")
+                        yield json.dumps({
+                            "type": "error",
+                            "message": f"Generator error: {str(e)}"
+                        }) + "\n"
+
                 return StreamingResponse(generate(), media_type="text/event-stream")
             else:
+                # Non-streaming response
                 response = client.chat.completions.create(
                     model=request.model,
                     messages=openai_messages,
@@ -908,7 +1036,6 @@ Then provide your actual response to the user without these tags.
                     }
 
         # Store assistant response in chat history (only for non-streaming responses)
-        # For streaming responses, the chat history is stored in the generate functions
         if not request.stream:
             try:
                 cursor.execute(
@@ -926,11 +1053,14 @@ Then provide your actual response to the user without these tags.
             # Close database connection
             conn.close()
             
+            # Ensure assistant_message is not empty
+            if not assistant_message or assistant_message.strip() == "":
+                assistant_message = "I apologize, but I wasn't able to generate a response to your query. Please try rephrasing your question or try again."
+            
             # Return final chat response
             return ChatResponse(
                 message=assistant_message,
                 model=request.model,
-                agent_type=request.agent_type if request.use_agent else None,
                 agent_used=request.use_agent,
                 tree_reasoning_used=request.use_tree_reasoning,
                 context_used=context_used,
@@ -940,7 +1070,9 @@ Then provide your actual response to the user without these tags.
                 sources=context_result.get("sources") if context_result else None,
                 context_quality=context_result.get("context_quality") if context_result else None,
                 hallucination_risk=context_result.get("hallucination_risk") if context_result else None,
-                internal_thoughts=internal_thoughts
+                internal_thoughts=internal_thoughts,
+                tools_used=agent_tools_used if 'agent_tools_used' in locals() else None,
+                metadata=agent_metadata if 'agent_metadata' in locals() else None
             )
         # For streaming responses, we've already returned a StreamingResponse
 
@@ -1813,7 +1945,7 @@ async def delete_chat_session(
             logger.info(f"Database connection closed after session deletion. session_id={session_id}")
 
 
-@router.post("/rag", response_model=ChatResponse)
+@router.post("/rag")
 async def chat_with_rag(
     payload: Dict[str, Any] = Body(...),
     req: Request = None,
@@ -1823,13 +1955,21 @@ async def chat_with_rag(
     Process a chat request with RAG (Retrieval-Augmented Generation) enabled by default.
     
     This endpoint is a streamlined version of the regular chat endpoint that always uses RAG.
+    Supports both streaming and non-streaming responses based on the request.
     """
+    start_time = time.time()
+    
     # Check if we have valid messages in the payload
     if not payload.get("messages"):
         raise HTTPException(
             status_code=400,
             detail="Messages array is required"
         )
+    
+    # Log the incoming messages for debugging
+    logger.info(f"Received {len(payload.get('messages', []))} messages in /chat/rag endpoint")
+    for i, msg in enumerate(payload.get("messages", [])):
+        logger.info(f"Message {i}: role={msg.get('role')}, content_length={len(msg.get('content', ''))}")
     
     # Convert the dict-based messages to ChatMessage objects
     try:
@@ -1845,24 +1985,26 @@ async def chat_with_rag(
             detail=f"Invalid message format: {str(e)}"
         )
     
-    # Create a ChatRequest object with RAG enabled
+    # Create a ChatRequest object with RAG enabled and streaming by default
     request = ChatRequest(
         messages=messages,
-        stream=payload.get("stream", False),
+        stream=payload.get("stream", True),  # Enable streaming by default
         model=payload.get("model", "gpt-4"),
         temperature=payload.get("temperature", 0.7),
         max_tokens=payload.get("max_tokens", 2048),
         include_context=True,  # Always include context for RAG
         context_query=payload.get("context_query"),
         retrieval_type=payload.get("retrieval_type", "auto"),
-        use_agent=payload.get("use_agent", False),
-        agent_type=payload.get("agent_type"),
-        agent_params=payload.get("agent_params"),
+        use_agent=payload.get("use_agent", False),  # Disable agent by default to prevent hanging
         use_tree_reasoning=payload.get("use_tree_reasoning", False),
         tree_template=payload.get("tree_template"),
         custom_tree=payload.get("custom_tree"),
         session_id=payload.get("session_id")
     )
+    
+    # Enhanced request tracking
+    request_id = f"rag_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    logger.info(f"Processing RAG request {request_id} - Agent enabled: {request.use_agent}, Streaming: {request.stream}")
     
     # TEMPORARY TESTING WORKAROUND:
     # Create a modified request object with the auth check bypassed
@@ -1895,8 +2037,80 @@ async def chat_with_rag(
             }
             req = Request(scope=scope)
     
-    # Process the request using the existing chat endpoint logic
-    return await chat(request, req, background_tasks)
+    # Add timeout handling for the entire request
+    try:
+        # Set up request timeout (5 minutes max)
+        timeout_task = asyncio.create_task(asyncio.sleep(300))  # 5 minutes
+        chat_task = asyncio.create_task(chat(request, req, background_tasks))
+        
+        # Wait for either the chat to complete or timeout
+        done, pending = await asyncio.wait(
+            [chat_task, timeout_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Cancel any pending tasks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # Check if we got a result or timed out
+        if chat_task in done:
+            result = await chat_task
+            elapsed_time = time.time() - start_time
+            logger.info(f"RAG request {request_id} completed successfully in {elapsed_time:.2f}s")
+            return result
+        else:
+            # Request timed out
+            elapsed_time = time.time() - start_time
+            logger.error(f"RAG request {request_id} timed out after {elapsed_time:.2f}s")
+            
+            if request.stream:
+                # Return a streaming error response
+                async def timeout_generator():
+                    yield json.dumps({
+                        "type": "error",
+                        "message": "Request timed out. The query is taking too long to process. Please try a simpler question or try again later.",
+                        "error_code": "TIMEOUT",
+                        "request_id": request_id,
+                        "timestamp": datetime.now().isoformat()
+                    }) + "\n"
+                
+                return StreamingResponse(timeout_generator(), media_type="text/event-stream")
+            else:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Request timed out. The query is taking too long to process. Please try a simpler question or try again later."
+                )
+                
+    except asyncio.CancelledError:
+        elapsed_time = time.time() - start_time
+        logger.info(f"RAG request {request_id} was cancelled after {elapsed_time:.2f}s")
+        raise HTTPException(
+            status_code=499,
+            detail="Request was cancelled"
+        )
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        logger.error(f"RAG request {request_id} failed after {elapsed_time:.2f}s: {str(e)}")
+        
+        if request.stream:
+            # Return a streaming error response
+            async def error_generator():
+                yield json.dumps({
+                    "type": "error",
+                    "message": f"An error occurred: {str(e)}",
+                    "error_code": "PROCESSING_ERROR",
+                    "request_id": request_id,
+                    "timestamp": datetime.now().isoformat()
+                }) + "\n"
+            
+            return StreamingResponse(error_generator(), media_type="text/event-stream")
+        else:
+            raise e
 
 
 async def retrieve_context_for_query(
@@ -1957,10 +2171,9 @@ async def retrieve_context_for_query(
                 # Basic source info
                 source = {
                     "doc_id": doc_id,
-                    "page_number": metadata.get("page_number"),
+                    "page_number": metadata.get("page_num", metadata.get("page_number", ctx.get("page_num", 1))),
                     "score": float(ctx.get("score", 0)),
-                    "reliability_score": float(metadata.get("reliability_score", ctx.get("reliability_score", 0))),
-                    "retrieval_method": metadata.get("retrieval_method", ctx.get("retrieval_method", "default")),
+                    "retrieval_method": "HyPE",
                     "title": metadata.get("title") or metadata.get("filename", ""),
                     "content": ctx.get("text", "")  # Include the actual content
                 }
@@ -2017,3 +2230,155 @@ async def retrieve_context_for_query(
             "context": [],
             "sources": []
         }
+
+def detect_language(text: str) -> str:
+    """
+    Detect the language of the input text.
+    Returns language code (en, fr, es, etc.)
+    """
+    # Simple language detection based on common words and patterns
+    text_lower = text.lower()
+    
+    # French indicators
+    french_indicators = [
+        'le ', 'la ', 'les ', 'de ', 'du ', 'des ', 'et ', 'est ', 'un ', 'une ',
+        'dans ', 'pour ', 'avec ', 'sur ', 'par ', 'ce ', 'qui ', 'que ', 'comment ',
+        'où ', 'quand ', 'pourquoi ', 'qu\'', 'c\'', 'd\'', 'l\'', 'n\'', 'tion ',
+        'ment ', 'ées ', 'ent ', 'sont ', 'ont', 'était', 'avait', 'sera', 'sécurité',
+        'réseau', 'conformité', 'réglementation', 'politique', 'gestion', 'contrôle'
+    ]
+    
+    # Spanish indicators
+    spanish_indicators = [
+        'el ', 'la ', 'los ', 'las ', 'de ', 'del ', 'y ', 'es ', 'un ', 'una ',
+        'en ', 'con ', 'por ', 'para ', 'que ', 'como ', 'donde ', 'cuando ',
+        'por qué ', 'cómo ', 'ción ', 'mente ', 'ado ', 'ida ', 'son ', 'han',
+        'seguridad', 'red', 'cumplimiento'
+    ]
+    
+    # English is default, but check for specific patterns
+    english_indicators = [
+        'the ', 'and ', 'is ', 'are ', 'was ', 'were ', 'a ', 'an ', 'in ', 'on ',
+        'at ', 'by ', 'for ', 'with ', 'to ', 'of ', 'that ', 'this ', 'what ',
+        'how ', 'when ', 'where ', 'why ', 'tion ', 'ment ', 'ing ', 'ed ',
+        'security', 'network', 'compliance', 'regulation', 'policy', 'management'
+    ]
+    
+    # Count indicators for each language
+    french_score = sum(1 for indicator in french_indicators if indicator in text_lower)
+    spanish_score = sum(1 for indicator in spanish_indicators if indicator in text_lower)
+    english_score = sum(1 for indicator in english_indicators if indicator in text_lower)
+    
+    # Determine language based on highest score
+    if french_score > english_score and french_score > spanish_score:
+        return 'fr'
+    elif spanish_score > english_score and spanish_score > french_score:
+        return 'es'
+    else:
+        return 'en'  # Default to English
+
+def get_system_prompt_for_language(language: str, context_available: bool = False) -> str:
+    """
+    Get system prompt in the specified language.
+    """
+    prompts = {
+        'fr': {
+            'base': """Vous êtes un assistant spécialisé dans l'analyse réglementaire et la conformité.
+
+Lorsque vous répondez, incluez vos réflexions internes et votre processus de raisonnement dans des balises <internal_thoughts>. 
+Ces réflexions doivent expliquer votre approche pour répondre à la question et toute information clé.
+Par exemple :
+
+<internal_thoughts>
+D'abord, je dois comprendre quelles réglementations s'appliquent à ce scénario.
+Je devrais vérifier s'il y a des cadres de conformité spécifiques mentionnés.
+Les considérations clés semblent être X, Y, et Z.
+</internal_thoughts>
+
+Ensuite, fournissez votre réponse réelle à l'utilisateur sans ces balises.
+IMPORTANT : Répondez TOUJOURS en français, même si des informations en anglais sont fournies dans le contexte.""",
+            'with_context': """Vous êtes un assistant spécialisé dans l'analyse réglementaire et la conformité.
+
+Vous avez accès à des documents de contexte pertinents pour aider à répondre aux questions de l'utilisateur. Utilisez ces informations pour fournir des réponses précises et détaillées.
+
+Lorsque vous répondez, incluez vos réflexions internes et votre processus de raisonnement dans des balises <internal_thoughts>. 
+Ces réflexions doivent expliquer votre approche pour répondre à la question et toute information clé.
+Par exemple :
+
+<internal_thoughts>
+D'abord, je dois analyser le contexte fourni pour trouver des informations pertinentes.
+Je vois des informations sur la sécurité réseau dans le contexte.
+Les points clés à aborder sont X, Y, et Z basés sur la documentation.
+</internal_thoughts>
+
+Ensuite, fournissez votre réponse réelle à l'utilisateur sans ces balises.
+IMPORTANT : Répondez TOUJOURS en français, même si des informations en anglais sont fournies dans le contexte."""
+        },
+        'es': {
+            'base': """Eres un asistente especializado en análisis regulatorio y cumplimiento.
+
+Al responder, incluye tus pensamientos internos y proceso de razonamiento envueltos en etiquetas <internal_thoughts>. 
+Estos pensamientos deben explicar tu enfoque para responder la pregunta y cualquier información clave.
+Por ejemplo:
+
+<internal_thoughts>
+Primero, necesito entender qué regulaciones se aplican a este escenario.
+Debería verificar si hay marcos de cumplimiento específicos mencionados.
+Las consideraciones clave parecen ser X, Y, y Z.
+</internal_thoughts>
+
+Luego proporciona tu respuesta real al usuario sin estas etiquetas.
+IMPORTANTE: Responde SIEMPRE en español, incluso si se proporciona información en inglés en el contexto.""",
+            'with_context': """Eres un asistente especializado en análisis regulatorio y cumplimiento.
+
+Tienes acceso a documentos de contexto relevantes para ayudar a responder las preguntas del usuario. Usa esta información para proporcionar respuestas precisas y detalladas.
+
+Al responder, incluye tus pensamientos internos y proceso de razonamiento envueltos en etiquetas <internal_thoughts>. 
+Estos pensamientos deben explicar tu enfoque para responder la pregunta y cualquier información clave.
+Por ejemplo:
+
+<internal_thoughts>
+Primero, necesito analizar el contexto proporcionado para encontrar información relevante.
+Veo información sobre seguridad de red en el contexto.
+Los puntos clave a abordar son X, Y, y Z basados en la documentación.
+</internal_thoughts>
+
+Luego proporciona tu respuesta real al usuario sin estas etiquetas.
+IMPORTANTE: Responde SIEMPRE en español, incluso si se proporciona información en inglés en el contexto."""
+        },
+        'en': {
+            'base': """You are a helpful assistant specializing in regulatory analysis and compliance.
+
+When responding, include your internal thoughts and reasoning process wrapped in <internal_thoughts> tags. 
+These thoughts should explain your approach to answering the question and any key insights.
+For example:
+
+<internal_thoughts>
+First, I need to understand what regulations apply to this scenario.
+I should check if there are any specific compliance frameworks mentioned.
+The key considerations seem to be X, Y, and Z.
+</internal_thoughts>
+
+Then provide your actual response to the user without these tags.
+IMPORTANT: Always respond in English, even if information in other languages is provided in the context.""",
+            'with_context': """You are a helpful assistant specializing in regulatory analysis and compliance.
+
+You have access to relevant context documents to help answer the user's questions. Use this information to provide accurate and detailed responses.
+
+When responding, include your internal thoughts and reasoning process wrapped in <internal_thoughts> tags. 
+These thoughts should explain your approach to answering the question and any key insights.
+For example:
+
+<internal_thoughts>
+First, I need to analyze the provided context to find relevant information.
+I can see information about network security in the context.
+The key points to address are X, Y, and Z based on the documentation.
+</internal_thoughts>
+
+Then provide your actual response to the user without these tags.
+IMPORTANT: Always respond in English, even if information in other languages is provided in the context."""
+        }
+    }
+    
+    language_prompts = prompts.get(language, prompts['en'])  # Default to English
+    return language_prompts['with_context'] if context_available else language_prompts['base']

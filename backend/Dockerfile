@@ -42,24 +42,12 @@ RUN echo "[global]\ntimeout = 20\nretries = 5" > /etc/pip.conf && \
     pip install --upgrade pip setuptools wheel
 
 # Base requirements
-RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore --timeout 300 -r /app/requirements.txt || \
-    pip install --no-cache-dir --use-pep517 --root-user-action=ignore -r /app/requirements.txt
+RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore -r /app/requirements.txt
 
 
 # Install spaCy and download models
-RUN pip install --no-cache-dir --use-pep517 --root-user-action=ignore spacy langdetect langid && \
-    python -m spacy download en_core_web_sm && \
-    python -m spacy download es_core_news_sm && \
-    python -m spacy download fr_core_news_sm && \
-    python -m spacy download de_core_news_sm && \
-    python -m spacy download it_core_news_sm && \
-    python -m spacy download pt_core_news_sm && \
-    python -m spacy download xx_ent_wiki_sm && \
-    # Pre-download these models so they're ready at container start
-    python -c "from sentence_transformers import SentenceTransformer; \
-                SentenceTransformer('all-MiniLM-L6-v2'); \
+RUN python -c "from sentence_transformers import SentenceTransformer; \
                 SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2'); \
-                SentenceTransformer('LaBSE'); \
                 from sentence_transformers import CrossEncoder; \
                 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2')"
 

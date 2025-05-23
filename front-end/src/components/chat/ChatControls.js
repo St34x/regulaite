@@ -1,12 +1,14 @@
 import React from 'react';
-import { Box, HStack, Text, VStack, useColorModeValue } from '@chakra-ui/react';
+import { Box, HStack, Text, VStack, useColorModeValue, Button, Flex } from '@chakra-ui/react';
+import { StopCircle } from 'lucide-react';
 import ChatInput from './ChatInput';
 
 /**
- * Chat controls component with just the input
+ * Chat controls component with input and cancel functionality
  */
 const ChatControls = ({ 
   onSendMessage, 
+  onCancelRequest,
   disabled = false,
   reasoningNodeId = null
 }) => {
@@ -25,7 +27,32 @@ const ChatControls = ({
     <Box position="relative" bg={bgBase}>
       <Box borderTop="1px solid" borderTopColor={borderColor} bg={bgBase} p={3}>
         <VStack spacing={3} maxW="100%" mx="auto">
-          <ChatInput onSendMessage={onSendMessage} disabled={disabled} />
+          <Flex w="100%" gap={2} align="center">
+            <Box flex="1">
+              <ChatInput onSendMessage={onSendMessage} disabled={disabled} />
+            </Box>
+            {/* Temporarily disabled cancel button
+            {disabled && onCancelRequest && (
+              <Button
+                leftIcon={<StopCircle size={16} />}
+                onClick={onCancelRequest}
+                size="md"
+                colorScheme="red"
+                variant="outline"
+                borderRadius="lg"
+                _hover={{
+                  bg: 'red.50',
+                  borderColor: 'red.400'
+                }}
+                _active={{
+                  bg: 'red.100'
+                }}
+              >
+                Cancel
+              </Button>
+            )}
+            */}
+          </Flex>
           
           {/* Tree reasoning info */}
           {showReasoningInfo && (

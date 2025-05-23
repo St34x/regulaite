@@ -138,6 +138,9 @@ class DocumentSearchRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(None, description="Metadata filters")
     date_range: Optional[Dict[str, str]] = Field(None, description="Date range filter")
     hybrid_search: Optional[bool] = Field(True, description="Whether to use hybrid search")
+    vector_weight: Optional[float] = Field(0.7, description="Weight for vector search")
+    semantic_weight: Optional[float] = Field(0.3, description="Weight for semantic search")
+    debug: Optional[bool] = Field(False, description="Include debug info in response")
 
 
 class DocumentStatsResponse(BaseModel):
@@ -328,6 +331,7 @@ async def document_list(
         sort_order = "desc"
 
     documents = []
+    unique_doc_ids = set()  # Track unique doc_ids to avoid duplicates
     try:
         # Get RAG system for Qdrant access
         rag_system = await get_rag_system()
@@ -397,8 +401,7 @@ async def document_list(
             # Get all points from metadata collection
             scroll_params = {
                 "collection_name": rag_system.metadata_collection_name,
-                "limit": limit,  # Use the limit from the request
-                "offset": skip, # Use the skip (offset) from the request
+                "limit": limit + skip,  # Fetch more to account for potential duplicates
                 "with_payload": True,
                 "with_vectors": False,
             }
@@ -454,21 +457,32 @@ async def document_list(
                 reverse=(sort_order == "desc")
             )
             
-            # Apply pagination - THIS IS NO LONGER NEEDED AS QDRANT HANDLES IT
-            # paginated_points = metadata_points[skip:skip+limit]
-            paginated_points = metadata_points # Qdrant already paginated
+            # Apply pagination and track unique documents
+            documents = []
+            count = 0
             
-            # Convert to DocumentMetadata objects
-            for point in paginated_points:
+            for point in metadata_points:
+                if count >= limit:
+                    break
+                    
                 payload = point.payload
                 if not payload:
                     continue
+                    
+                doc_id = payload.get("doc_id", "")
+                
+                # Skip if we already have this document
+                if doc_id in unique_doc_ids:
+                    continue
+                    
+                unique_doc_ids.add(doc_id)
+                count += 1
                 
                 # Extract document metadata
                 doc = DocumentMetadata(
-                    doc_id=payload.get("doc_id", ""),
+                    doc_id=doc_id,
                     title=payload.get("title", "Untitled"),
-                    name=payload.get("name", payload.get("original_filename", "Document " + payload.get("doc_id", "")[:8])),
+                    name=payload.get("name", payload.get("original_filename", "Document " + doc_id[:8])),
                     is_indexed=payload.get("is_indexed", False),
                     file_type=payload.get("file_type", ""),
                     description=payload.get("description", ""),
@@ -731,56 +745,40 @@ async def search_documents(request: DocumentSearchRequest):
         # Get RAG system
         rag_system = await get_rag_system()
 
-        # Prepare search parameters
-        hybrid = request.hybrid_search if request.hybrid_search is not None else True
+        # Prepare filters
+        filters = request.filters or {}
+        
+        # Add date range to filters if provided
+        if request.date_range:
+            filters["date_range"] = request.date_range
 
         # Use RAG system to search
         try:
-            results = rag_system.retrieve_context(
+            results = rag_system.retrieve(
                 query=request.query,
                 top_k=request.limit,
-                filters=request.filters
+                filters=filters
             )
         except Exception as retrieval_error:
             logger.error(f"Error during document retrieval: {str(retrieval_error)}")
             # Return empty results instead of failing completely
             results = []
 
-        # Process results
-        processed_results = []
-        seen_docs = set()
-
-        for item in results:
-            try:
-                doc_id = item.get("metadata", {}).get("doc_id")
-                if not doc_id:
-                    continue
-
-                # Create a result entry
-                result_entry = {
-                    "doc_id": doc_id,
-                    "document_title": item.get("metadata", {}).get("doc_name", "Unknown document"),
-                    "text": item.get("text", ""),
-                    "section": item.get("metadata", {}).get("section", "Unknown"),
-                    "score": item.get("score", 0),
-                    "metadata": item.get("metadata", {})
-                }
-
-                processed_results.append(result_entry)
-                seen_docs.add(doc_id)
-            except Exception as item_error:
-                logger.error(f"Error processing search result item: {str(item_error)}")
-                continue
+        # Count unique documents
+        unique_docs = set()
+        for result in results:
+            doc_id = result.get("metadata", {}).get("document_id")
+            if doc_id:
+                unique_docs.add(doc_id)
 
         return {
-            "results": processed_results,
+            "results": results,
             "query": request.query,
-            "count": len(processed_results),
-            "unique_documents": len(seen_docs)
+            "count": len(results),
+            "unique_documents": len(unique_docs)
         }
-
     except Exception as e:
-        logger.error(f"Error searching documents: {str(e)}")
+        logger.error(f"Error in document search: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error searching documents: {str(e)}"

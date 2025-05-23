@@ -1,7 +1,31 @@
 import axios from "axios";
 import { jwtDecode } from "jwt-decode";
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090';
+// Determine the correct API URL based on the environment and current location
+const getApiUrl = () => {
+  // First, try the environment variable
+  if (process.env.REACT_APP_API_URL) {
+    return process.env.REACT_APP_API_URL;
+  }
+  
+  // If no environment variable, determine based on current location
+  const { protocol, hostname } = window.location;
+  
+  // If we're on localhost, use localhost with the backend port
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return `${protocol}//${hostname}:8090`;
+  }
+  
+  // For other hostnames, assume same host different port
+  return `${protocol}//${hostname}:8090`;
+};
+
+const API_URL = getApiUrl();
+
+// Log the API URL for debugging
+console.log('AuthService: Using API_URL:', API_URL);
+console.log('AuthService: Environment REACT_APP_API_URL:', process.env.REACT_APP_API_URL);
+console.log('AuthService: Window location:', window.location.href);
 
 // Create axios instance with base URL
 const api = axios.create({
@@ -28,10 +52,39 @@ const authService = {
   // Register a new user
   register: async (userData) => {
     try {
+      console.log('AuthService: Starting registration...');
+      console.log('AuthService: API_URL being used:', API_URL);
+      console.log('AuthService: Full registration URL:', `${API_URL}/auth/register`);
+      console.log('AuthService: axios baseURL:', api.defaults.baseURL);
+      
       const response = await api.post('/auth/register', userData);
       return response.data;
     } catch (error) {
-      throw error.response?.data || { detail: 'Registration failed' };
+      console.error('AuthService: Registration request failed');
+      console.error('AuthService: Error details:', error);
+      console.error('AuthService: Request config:', error.config);
+      
+      const errorData = error.response?.data;
+      if (errorData) {
+        // Handle Pydantic validation errors (which come as arrays)
+        if (errorData.detail && Array.isArray(errorData.detail)) {
+          // Extract the first validation error message
+          const firstError = errorData.detail[0];
+          if (firstError && firstError.msg) {
+            throw { detail: firstError.msg };
+          }
+          // Fallback to showing all validation errors
+          const errorMessages = errorData.detail.map(err => err.msg || err.message || 'Invalid field').join(', ');
+          throw { detail: errorMessages };
+        }
+        // Handle simple string errors
+        if (typeof errorData.detail === 'string') {
+          throw errorData;
+        }
+        // Handle other error formats
+        throw errorData;
+      }
+      throw { detail: 'Registration failed' };
     }
   },
 

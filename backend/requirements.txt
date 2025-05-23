@@ -27,7 +27,9 @@ spacy>=3.7.2
 langdetect>=1.0.9
 langid>=1.1.6
 langchain-text-splitters>=0.3.8  # For TokenTextSplitter
-langchain-core>=0.3.54  # Core LangChain functionality
+langchain-core>=0.3.54
+langchain-openai==0.3.18
+huggingface_hub[hf_xet]
 
 # Additional document parsing APIs
 doctly>=0.1.0
@@ -38,8 +40,9 @@ llama-index-vector-stores-qdrant>=0.5.0
 llama-index-embeddings-fastembed==0.3.1
 llama-index>=0.12.28
 llama-index-core==0.12.30
-sentence-transformers==4.0.2
 llama-index-retrievers-bm25==0.5.2
+sentence-transformers==4.0.2
+llama-index-embeddings-huggingface==0.5.4
 PyStemmer==2.2.0.3
 
 # Language-specific models

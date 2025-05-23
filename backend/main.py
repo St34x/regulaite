@@ -33,17 +33,17 @@ from routers.task_router import task_router
 from unstructured_parser.document_parser import DocumentParser
 
 # Import LlamaIndex RAG components
-from llamaIndex_rag.rag import RAGSystem
-from llamaIndex_rag.query_engine import RAGQueryEngine
+from rag.hype_rag import HyPERagSystem as RAGSystem
+from rag.query_engine import RAGQueryEngine
 
 # Import our new custom routers
 from routers.chat_router import router as chat_router
 from routers.document_router import router as document_router
 from routers.config_router import router as config_router
-from routers.agents_router import router as agents_metadata_router
+from routers.agents_router import router as agents_router
 from routers.welcome_router import router as welcome_router
 from routers.auth_router import router as auth_router
-from routers.rag_router import router as rag_router
+from routers.hype_router import router as hype_router
 
 # Configure logging
 logging.basicConfig(
@@ -100,13 +100,13 @@ app.add_middleware(
 )
 
 # Include all routers
-app.include_router(agents_metadata_router)
+app.include_router(agents_router)
 app.include_router(chat_router)
 app.include_router(document_router)
 app.include_router(config_router)
 app.include_router(welcome_router)
 app.include_router(auth_router)
-app.include_router(rag_router)  # Add RAG router
+app.include_router(hype_router) 
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
@@ -172,9 +172,6 @@ def init_document_parser():
             embedding_dim = rag_system.embedding_dim
             
         document_parser = DocumentParser(
-            qdrant_url=QDRANT_URL,
-            qdrant_collection_name="regulaite_docs",
-            qdrant_metadata_collection_name="regulaite_metadata",
             embedding_dim=embedding_dim, # Pass embedding_dim
             chunk_size=1000,
             chunk_overlap=200,
@@ -227,24 +224,20 @@ def init_rag_system():
         # Initialize RAG system with hallucination prevention
         rag_system = RAGSystem(
             collection_name="regulaite_docs",
-            metadata_collection_name="regulaite_metadata",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
-            embedding_dim=384,
-            llm_model="gpt-4.1",
             qdrant_url=QDRANT_URL,
+            embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             openai_api_key=openai_api_key,
-            max_context_chunks=8,
-            min_context_score=0.7,
-            doc_chunk_size=1024,
-            doc_chunk_overlap=200,
-            vector_weight=0.7,
-            semantic_weight=0.3,
+            llm_model="gpt-4o-mini",
+            chunk_size=1024,
+            chunk_overlap=200,
+            vector_weight=0.75,
+            semantic_weight=0.25,
         )
         
         # Initialize query engine
         rag_query_engine = RAGQueryEngine(
             rag_system=rag_system,
-            model_name="gpt-4.1",
+            model_name="gpt-4o-mini",
             temperature=0.1,
             max_tokens=1500,
             use_self_critique=True
@@ -286,8 +279,8 @@ class ChatRequest(BaseModel):
     """Request for chat completion."""
     messages: List[ChatMessage] = Field(..., description="List of chat messages")
     stream: bool = Field(False, description="Whether to stream the response")
-    model: str = Field("gpt-4", description="Model to use for generation")
-    temperature: float = Field(0.4, description="Temperature for generation")
+    model: str = Field("gpt-4.1", description="Model to use for generation")
+    temperature: float = Field(0.2, description="Temperature for generation")
     max_tokens: int = Field(2048, description="Maximum tokens in response")
     include_context: bool = Field(True, description="Whether to include RAG context")
     context_query: Optional[str] = Field(None, description="Query to use for retrieving context")
@@ -396,7 +389,7 @@ def initialize_database(conn):
         cursor.execute("""
         INSERT IGNORE INTO regulaite_settings (setting_key, setting_value, description) VALUES
         ('llm_model', 'gpt-4.1', 'Default LLM model'),
-        ('llm_temperature', '0.4', 'Default temperature for LLM'),
+        ('llm_temperature', '0.2', 'Default temperature for LLM'),
         ('llm_max_tokens', '2048', 'Default max tokens for LLM'),
         ('llm_top_p', '1', 'Default top_p value for LLM'),
         ('enable_chat_history', 'true', 'Whether to save chat history');
@@ -625,16 +618,16 @@ async def process_document(
                         WHERE setting_key = 'doc_index_immediately'
                         """
                     )
-                    result = cursor.fetchone()
-                    if result:
-                        index_immediately = result['setting_value'].lower() == 'true'
+                    db_result = cursor.fetchone()
+                    if db_result:
+                        index_immediately = db_result['setting_value'].lower() == 'true'
                     conn.close()
                 except Exception as config_e:
                     logger.warning(f"Could not get index_immediately setting, using default: {str(config_e)}")
                 
                 if index_immediately:
                     logger.info(f"Indexing document {processed_doc_id} in Qdrant")
-                    index_result = rag_system.index_document(processed_doc_id)
+                    index_result = rag_system.process_parsed_document(result)
                     
                     if isinstance(index_result, dict):
                         if index_result.get("status") == "success":
@@ -771,7 +764,7 @@ async def chat(request: ChatRequest, req: Request):
                 query = request.context_query or user_message
 
                 # Retrieve context using RAG system
-                retrieved_nodes = rag_system.retrieve_context(query, top_k=5)
+                retrieved_nodes = rag_system.retrieve(query, top_k=5)
 
                 # Format context
                 if retrieved_nodes:
@@ -1247,6 +1240,154 @@ async def delete_document(doc_id: str, background_tasks: BackgroundTasks = None)
         raise HTTPException(
             status_code=500,
             detail=f"Error deleting document: {str(e)}"
+        )
+
+
+@app.delete("/documents")
+async def delete_all_documents(background_tasks: BackgroundTasks = None, confirm: str = ""):
+    """Delete ALL documents from the system (nuclear option)."""
+    try:
+        # Require confirmation parameter to prevent accidental deletion
+        if confirm != "DELETE_ALL_DOCUMENTS":
+            raise HTTPException(
+                status_code=400,
+                detail="To delete all documents, you must include confirm=DELETE_ALL_DOCUMENTS parameter"
+            )
+        
+        logger.warning("Processing request to delete ALL documents from the system")
+
+        # Delete all documents from Qdrant through RAG system
+        if rag_system:
+            result = rag_system.delete_all_documents()
+            
+            if result.get("status") == "success":
+                return {
+                    "status": "success",
+                    "message": f"Successfully deleted {result.get('total_deleted', 0)} vectors from all collections",
+                    "total_deleted": result.get("total_deleted", 0),
+                    "collections": result.get("collections", {}),
+                    "warning": "All documents have been permanently deleted from the vector store"
+                }
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error during bulk deletion: {result.get('error', 'Unknown error')}"
+                )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="RAG system not available"
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions without modification
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting all documents: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting all documents: {str(e)}"
+        )
+
+
+@app.get("/documents/count")
+async def get_document_count():
+    """Get count of documents and vectors in the system."""
+    try:
+        logger.info("Getting document count")
+
+        if rag_system:
+            result = rag_system.get_document_count()
+            
+            return {
+                "status": "success",
+                "total_vectors": result.get("total_vectors", 0),
+                "unique_documents": result.get("unique_documents", 0),
+                "collections": result.get("collections", {}),
+                "bm25_nodes": result.get("bm25_nodes", 0),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="RAG system not available"
+            )
+
+    except Exception as e:
+        logger.error(f"Error getting document count: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting document count: {str(e)}"
+        )
+
+
+@app.get("/documents/list-ids")
+async def list_document_ids(limit: int = 100):
+    """List all unique document IDs in the system."""
+    try:
+        logger.info(f"Listing document IDs (limit: {limit})")
+
+        if not rag_system:
+            raise HTTPException(
+                status_code=500,
+                detail="RAG system not available"
+            )
+
+        # Get unique document IDs from the vector store
+        doc_ids = set()
+        offset = None
+        total_scanned = 0
+        
+        while len(doc_ids) < limit and total_scanned < 1000:  # Safety limit
+            scroll_data = {
+                "limit": 100,
+                "with_payload": True,
+                "with_vector": False
+            }
+            
+            if offset:
+                scroll_data["offset"] = offset
+            
+            response = requests.post(
+                f"{rag_system.qdrant_url}/collections/{rag_system.collection_name}/points/scroll",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(scroll_data)
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to scroll Qdrant: {response.text}")
+                break
+            
+            result = response.json()
+            points = result.get("result", {}).get("points", [])
+            
+            if not points:
+                break
+            
+            for point in points:
+                doc_id = point.get("payload", {}).get("doc_id")
+                if doc_id and len(doc_ids) < limit:
+                    doc_ids.add(doc_id)
+                total_scanned += 1
+            
+            offset = result.get("result", {}).get("next_page_offset")
+            if not offset:
+                break
+        
+        return {
+            "status": "success",
+            "document_ids": list(doc_ids),
+            "count": len(doc_ids),
+            "total_scanned": total_scanned,
+            "limit": limit,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing document IDs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error listing document IDs: {str(e)}"
         )
 
 

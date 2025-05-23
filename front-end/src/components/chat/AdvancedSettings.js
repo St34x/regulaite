@@ -22,20 +22,15 @@ import {
 
 import AgentSelector from './AgentSelector';
 import ModelParamsSelector from './ModelParamsSelector';
-import DecisionTreeVisualizer from './DecisionTreeVisualizer';
 
 /**
- * Advanced settings component that combines agent settings, LLM parameters,
- * and decision tree visualization into a drawer
+ * Advanced settings component for autonomous agent and LLM parameters
  */
 const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings = {} }) => {
   // Default settings - never changes
   const defaultSettings = {
     agent: {
-      use_agent: false,
-      agent_type: null,
-      use_tree_reasoning: false,
-      tree_template: 'default'
+      use_agent: true
     },
     llm: {
       model: 'gpt-4',
@@ -50,7 +45,6 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
   // Local state
   const [agentSettings, setAgentSettings] = useState({...defaultSettings.agent});
   const [llmSettings, setLlmSettings] = useState({...defaultSettings.llm});
-  const [showTreeTab, setShowTreeTab] = useState(false);
   
   // Colors
   const accentColor = '#4415b6';
@@ -69,12 +63,6 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
         ...defaultSettings.llm,
         ...(initialSettings.llm || {})
       });
-      
-      // Check if tree tab should be shown
-      setShowTreeTab(
-        initialSettings.agent?.use_tree_reasoning && 
-        initialSettings.agent?.tree_template
-      );
     }
   }, [isOpen, initialSettings]);
   
@@ -109,7 +97,6 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
   // Agent selector only updates local state
   const handleAgentChange = (newAgentSettings) => {
     setAgentSettings(newAgentSettings);
-    setShowTreeTab(newAgentSettings.use_tree_reasoning && newAgentSettings.tree_template);
   };
   
   // Model parameters only update local state
@@ -130,18 +117,15 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
         <DrawerHeader borderBottomWidth="1px">
           <Text color={accentColor}>Advanced Settings</Text>
           <Text fontSize="sm" fontWeight="normal" color={secondaryText}>
-            Configure AI agents, model parameters, and decision trees
+            Configure autonomous AI agent and model parameters
           </Text>
         </DrawerHeader>
 
         <DrawerBody>
           <Tabs colorScheme="purple" variant="enclosed">
             <TabList>
-              <Tab>AI Agent</Tab>
+              <Tab>Autonomous Agent</Tab>
               <Tab>Model Parameters</Tab>
-              {showTreeTab && (
-                <Tab>Decision Tree</Tab>
-              )}
             </TabList>
             
             <TabPanels>
@@ -160,15 +144,6 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
                   initialParams={llmSettings} 
                 />
               </TabPanel>
-              
-              {/* Decision Tree Tab */}
-              {showTreeTab && (
-                <TabPanel p={3}>
-                  <DecisionTreeVisualizer 
-                    treeId={agentSettings.tree_template} 
-                  />
-                </TabPanel>
-              )}
             </TabPanels>
           </Tabs>
         </DrawerBody>
