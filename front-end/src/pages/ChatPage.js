@@ -29,6 +29,10 @@ const suggestedQuestions = [
  * Chat page component
  */
 const ChatPage = () => {
+  console.log('🚀 ChatPage component is mounting...');
+  console.log('🌐 Current URL:', window.location.href);
+  console.log('🌐 Current pathname:', window.location.pathname);
+  
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [messages, setMessages] = useState([initialMessage]);
@@ -38,6 +42,15 @@ const ChatPage = () => {
   const [reasoningNodeId, setReasoningNodeId] = useState(null);
   const [agentProgress, setAgentProgress] = useState(null);
   const [currentRequestId, setCurrentRequestId] = useState(null);
+  
+  console.log('📊 ChatPage state initialized:', {
+    sessionsCount: sessions.length,
+    activeSessionId,
+    messagesCount: messages.length
+  });
+  
+  console.log('🔍 RENDER: ChatPage is rendering with sessions:', sessions);
+  console.log('🔍 RENDER: Current sessions array:', JSON.stringify(sessions, null, 2));
   
   const messagesEndRef = useRef(null);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -64,6 +77,8 @@ const ChatPage = () => {
   const loadingBg = useColorModeValue('blue.50', 'blue.900');
   const loadingBorderColor = useColorModeValue('blue.200', 'blue.700');
   const loadingTextColor = useColorModeValue('blue.700', 'blue.200');
+  const mobileToggleBg = useColorModeValue('white', 'gray.800');
+  const fixedInputBg = useColorModeValue('white', 'gray.800');
 
   // Add ref for tracking accumulated content to prevent stale closures
   const messageContentRef = useRef(new Map());
@@ -79,13 +94,21 @@ const ChatPage = () => {
 
   // Redirect to login page if user is not authenticated
   useEffect(() => {
-    if (!isAuthenticated()) {
+    console.log('🔐 Checking authentication...');
+    const authResult = isAuthenticated();
+    console.log('🔐 isAuthenticated() result:', authResult);
+    
+    if (!authResult) {
+      console.log('❌ User not authenticated, redirecting to /login');
       navigate('/login');
+    } else {
+      console.log('✅ User is authenticated, staying on chat page');
     }
   }, [isAuthenticated, navigate]);
 
   // Fetch chat sessions on component mount
   useEffect(() => {
+    console.log('🔄 useEffect for fetchSessions is running...');
     fetchSessions();
   }, []);
 
@@ -134,11 +157,16 @@ const ChatPage = () => {
   }, []);
 
   const fetchSessions = async () => {
+    console.log('🔍 fetchSessions called');
+    console.log('🔍 IMMEDIATE LOG - fetchSessions function started');
     setError(null);
     try {
+      console.log('📡 Calling chatService.getChatSessions()...');
       const fetchedSessions = await chatService.getChatSessions();
+      console.log('📦 Received sessions from API:', fetchedSessions);
       
       if (fetchedSessions && Array.isArray(fetchedSessions) && fetchedSessions.length > 0) {
+        console.log('✅ Processing', fetchedSessions.length, 'sessions');
         // Process and deduplicate sessions
         const uniqueSessions = [];
         const sessionIds = new Set();
@@ -163,21 +191,31 @@ const ChatPage = () => {
           }
         });
         
+        console.log('🎯 Setting', uniqueSessions.length, 'unique sessions to state');
         setSessions(uniqueSessions);
         
         // Select the first session if we have any
         if (uniqueSessions.length > 0) {
+          console.log('📌 Selecting first session:', uniqueSessions[0].id);
           handleSelectSession(uniqueSessions[0].id);
         } else {
+          console.log('🆕 No sessions found, creating new session');
           await handleNewSession();
         }
       } else {
         // If no sessions, create a new one
-        console.log('No existing sessions found, creating a new session');
+        console.log('📭 No existing sessions found, creating a new session');
         await handleNewSession();
       }
     } catch (err) {
-      console.error('Failed to fetch chat sessions:', err);
+      console.error('❌ Failed to fetch chat sessions:', err);
+      console.error('❌ Error details:', {
+        status: err.response?.status,
+        statusText: err.response?.statusText,
+        data: err.response?.data,
+        message: err.message
+      });
+      
       let errorMessage = 'Failed to load chat sessions. Creating a new session.';
       let errorType = 'session_load_error';
       let shouldCreateFallback = true;
@@ -235,7 +273,7 @@ const ChatPage = () => {
       // Only create fallback sessions if not redirecting due to auth error
       // and if we should create a fallback
       if (shouldCreateFallback) {
-        console.log('Creating fallback session due to error:', errorType);
+        console.log('🔄 Creating fallback session due to error:', errorType);
         const fallbackSessionId = Date.now().toString();
         setSessions([{
           id: fallbackSessionId,
@@ -397,573 +435,390 @@ const ChatPage = () => {
                   lastMessage.metadata.isGeneratingActive = true;
                   lastMessage.metadata.lastGenerationHeartbeat = Date.now();
                 } else if (chunkData.step === 'generation_delay') {
-                  // Generation is taking longer than expected
-                  lastMessage.metadata.generationDelayed = true;
-                } else if (chunkData.step === 'timeout_warning') {
-                  // Request may be stalled
-                  lastMessage.metadata.timeoutWarning = true;
-                }
-              } else if (chunkData.type === 'token' && chunkData.content) {
-                // Response token - FIXED ACCUMULATION TO PREVENT DUPLICATION
-                const currentContent = messageContentRef.current.get(messageKey) || '';
-                const newContent = currentContent + chunkData.content;
-                
-                // Update the ref with accumulated content
-                messageContentRef.current.set(messageKey, newContent);
-                
-                // Update the message content from ref to prevent stale closures
-                lastMessage.content = newContent;
-                lastMessage.processingState = "Generating response...";
-              } else if (chunkData.type === 'end') {
-                // Streaming completed
-                lastMessage.isGenerating = false;
-                lastMessage.processingState = "Complete";
-                
-                // Use the final content from the backend or the accumulated content
-                const accumulatedContent = messageContentRef.current.get(messageKey) || lastMessage.content;
-                const finalContent = chunkData.message || accumulatedContent;
-                
-                // Update final message content if provided from backend is longer
-                if (finalContent && finalContent.length >= lastMessage.content.length) {
-                  lastMessage.content = finalContent;
-                  messageContentRef.current.set(messageKey, finalContent);
-                }
-                
-                // Store final metadata
-                if (chunkData.metadata) {
-                  lastMessage.metadata = {
-                    ...lastMessage.metadata,
-                    ...chunkData.metadata,
-                    completed: true,
-                    endTime: Date.now()
-                  };
-                }
-                
-                // Mark all steps as completed
-                if (lastMessage.metadata.processingSteps) {
-                  lastMessage.metadata.processingSteps.forEach(step => {
-                    if (step.status === 'in_progress') {
-                      step.status = 'completed';
-                    }
-                  });
-                }
-                
-                // Clean up the content accumulator for this message
-                messageContentRef.current.delete(messageKey);
-              } else if (chunkData.type === 'error') {
-                // Handle streaming errors
-                lastMessage.isGenerating = false;
-                lastMessage.processingState = "Error occurred";
-                lastMessage.metadata.error = {
-                  message: chunkData.message,
-                  error_code: chunkData.error_code,
-                  request_id: chunkData.request_id
-                };
-                
-                // Show error message in content if no content was generated
-                if (!lastMessage.content.trim()) {
-                  lastMessage.content = `❌ ${chunkData.message}`;
-                }
-                
-                // Mark current step as failed
-                if (lastMessage.metadata.processingSteps && lastMessage.metadata.processingSteps.length > 0) {
-                  const currentStepIndex = lastMessage.metadata.processingSteps.findIndex(
-                    step => step.status === 'in_progress'
-                  );
-                  if (currentStepIndex >= 0) {
-                    lastMessage.metadata.processingSteps[currentStepIndex].status = 'failed';
+                  lastMessage.metadata.generationDelay = chunkData.details;
+                } else if (chunkData.step === 'reasoning_agent') {
+                  // Reasoning agent progress
+                  if (chunkData.reasoning_node_id) {
+                    setReasoningNodeId(chunkData.reasoning_node_id);
+                  }
+                  
+                  if (chunkData.details?.execution_id) {
+                    // Update agent progress
+                    setAgentProgress({
+                      execution_id: chunkData.details.execution_id,
+                      status: chunkData.details.status || 'running',
+                      current_tree_node: chunkData.reasoning_node_id
+                    });
                   }
                 }
+              } else if (chunkData.type === 'content') {
+                // Get the accumulated content for this message
+                const currentAccumulatedContent = messageContentRef.current.get(messageKey) || '';
+                const newAccumulatedContent = currentAccumulatedContent + (chunkData.content || '');
                 
-                // Clean up content accumulator on error
+                // Update the accumulated content
+                messageContentRef.current.set(messageKey, newAccumulatedContent);
+                
+                // Update the message with the new accumulated content
+                lastMessage.content = newAccumulatedContent;
+                lastMessage.processingState = "Generating response...";
+              } else if (chunkData.type === 'complete') {
+                // Final completion
+                lastMessage.isGenerating = false;
+                lastMessage.processingState = null;
+                
+                // Final content update if provided
+                if (chunkData.final_content) {
+                  lastMessage.content = chunkData.final_content;
+                  // Update the accumulator for consistency
+                  messageContentRef.current.set(messageKey, chunkData.final_content);
+                }
+                
+                // Clean up the accumulated content for this message
                 messageContentRef.current.delete(messageKey);
-              } else if (chunkData.type === 'agent_progress') {
-                // Agent progress update
-                lastMessage.metadata.agentProgress = chunkData.data;
+              } else if (chunkData.type === 'error') {
+                // Error during streaming
+                lastMessage.isGenerating = false;
+                lastMessage.content = lastMessage.content || "I apologize, but there was an error processing your request. Please try again.";
+                lastMessage.error = chunkData.error;
+                lastMessage.processingState = null;
+                
+                // Clean up
+                messageContentRef.current.delete(messageKey);
               }
-              
-              // Update connection status based on activity
-              lastMessage.metadata.isConnected = true;
-              lastMessage.metadata.lastActivity = Date.now();
             }
             
             return updatedMessages;
           });
-        },
-        {
-          model: 'gpt-4',
-          temperature: 0.7,
-          max_tokens: 2048,
-          includeContext: true,
-          use_agent: false, // Disable agent by default to prevent hanging
-          timeout: 300000 // 5 minutes
-        },
-        messagesForAPI,
-        requestId
+        }
       );
       
-      console.log('✅ Streaming completed successfully:', result);
+      console.log('✅ Streaming completed successfully');
       
-      // Final cleanup and session update
-      if (activeSessionId) {
-        setMessages(currentMessages => {
-          updateSessionWithMessages(activeSessionId, currentMessages);
-          return currentMessages;
-        });
-      }
+    } catch (err) {
+      console.error('❌ Error in handleSendMessage:', err);
       
-    } catch (error) {
-      console.error('❌ Error in handleSendMessage:', error);
-      
-      // Safely extract error message - handle cases where error.message might be undefined
+      // Get detailed error message
       const getErrorMessage = (err) => {
-        if (!err) return 'Unknown error occurred';
-        if (typeof err === 'string') return err;
-        if (err.message) return err.message;
-        if (err.toString && typeof err.toString === 'function') return err.toString();
-        return 'Unknown error occurred';
+        if (err.response) {
+          const status = err.response.status;
+          const detail = err.response.data?.detail;
+          
+          if (status === 401) {
+            navigate('/login'); 
+            return "Authentication required. Please log in again.";
+          } else if (status === 403) {
+            return "You don't have permission to send messages.";
+          } else if (status === 429) {
+            return "Rate limit exceeded. Please wait a moment before sending another message.";
+          } else if (status === 500) {
+            return "Server error occurred. Please try again in a few moments.";
+          } else if (detail) {
+            return detail;
+          }
+        } else if (err.request) {
+          return "Network error. Please check your connection and try again.";
+        }
+        return "An unexpected error occurred. Please try again.";
       };
-      
-      const errorMessage = getErrorMessage(error);
-      
-      // Update the last message to show the error
+
+      const errorMessage = getErrorMessage(err);
+      setError(errorMessage);
+
+      // Remove the temporary processing message and replace with error
       setMessages(currentMessages => {
         const updatedMessages = [...currentMessages];
         const lastMessage = updatedMessages[updatedMessages.length - 1];
         
         if (lastMessage && lastMessage.role === "assistant" && lastMessage.isGenerating) {
           lastMessage.isGenerating = false;
-          lastMessage.processingState = "Error occurred";
-          lastMessage.metadata.error = {
-            message: errorMessage,
-            timestamp: new Date().toISOString(),
-            originalError: error
-          };
-          
-          // Show user-friendly error message
-          if (errorMessage.includes('timeout')) {
-            lastMessage.content = "⏱️ The request timed out. This may be due to high server load or a complex query. Please try again with a simpler question or check your connection.";
-          } else if (errorMessage.includes('network') || errorMessage.includes('Failed to fetch')) {
-            lastMessage.content = "🌐 Network error. Please check your internet connection and try again.";
-          } else {
-            lastMessage.content = `❌ ${errorMessage}`;
-          }
+          lastMessage.content = "I apologize, but I encountered an error while processing your request. Please try again.";
+          lastMessage.error = errorMessage;
+          lastMessage.processingState = null;
         }
         
         return updatedMessages;
       });
-      
-      // Show toast notification for better user feedback
+
+      // Show error toast
       toast({
-        title: 'Chat Error',
-        description: errorMessage.includes('timeout') 
-          ? 'The request timed out. Please try again.'
-          : errorMessage.includes('network')
-          ? 'Network error. Please check your connection.'
-          : 'An error occurred while processing your message.',
-        status: 'error',
+        title: "Message Error",
+        description: errorMessage,
+        status: "error",
         duration: 5000,
         isClosable: true,
       });
     } finally {
-      // Always clean up loading state
       setIsLoading(false);
       setCurrentRequestId(null);
-      
-      console.log('🧹 handleSendMessage cleanup completed');
     }
   };
 
   const handleSelectSession = async (sessionId) => {
-    setError(null);
-    setIsLoading(true);
+    console.log('🎯 handleSelectSession called with sessionId:', sessionId);
     
-    // Clean up any accumulated content from previous conversations
-    messageContentRef.current.clear();
+    if (!sessionId || sessionId === activeSessionId) {
+      console.log('❌ Session selection rejected - no ID or already active');
+      return;
+    }
+    
+    setError(null);
     
     try {
-      // Fetch messages for this session
-      const sessionMessages = await chatService.getSessionMessages(sessionId);
+      // Don't show loading overlay for session switches - it's distracting
+      // setIsLoading(true);
       
-      if (sessionMessages && Array.isArray(sessionMessages) && sessionMessages.length > 0) {
-        // Transform messages to the correct format if needed
-        const formattedMessages = sessionMessages.map(msg => ({
-          role: msg.role || msg.message_role,
-          content: msg.content || msg.message_text,
-        }));
-        
-        setMessages(formattedMessages);
+      const session = sessions.find(s => s.id === sessionId);
+      if (session && session.is_fallback && session.messages) {
+        // This is a fallback session, use the stored messages
+        console.log('📝 Loading fallback session messages');
+        setActiveSessionId(sessionId);
+        setMessages(session.messages);
+        return;
+      }
+      
+      // Fetch the conversation history for this session
+      const conversationHistory = await chatService.getSessionMessages(sessionId);
+      
+      if (conversationHistory && conversationHistory.length > 0) {
+        console.log('✅ Successfully loaded conversation history:', conversationHistory.length, 'messages');
+        setActiveSessionId(sessionId);
+        setMessages(conversationHistory);
       } else {
-        // If no messages, add the initial welcome message
+        console.log('📝 No conversation history found, using initial message');
+        setActiveSessionId(sessionId);
         setMessages([initialMessage]);
       }
       
-      // Update the active session ID
-      setActiveSessionId(sessionId);
     } catch (err) {
-      console.error('Failed to load chat messages:', err);
-      let errorMessage = 'Failed to load messages for this conversation.';
+      console.error('❌ Failed to load session:', err);
+      let errorMessage = 'Failed to load conversation history';
       
-      if (err.response) {
-        const status = err.response.status;
-        if (status === 401) {
-          errorMessage = 'Authentication required to access messages.';
-          // Redirect to login page if unauthorized
-          navigate('/login');
-          return;
-        } else if (status === 404) {
-          errorMessage = 'Chat session not found. It may have been deleted.';
-        } else if (status === 500) {
-          errorMessage = 'Server error while loading messages.';
-        }
-      } else if (err.request) {
-        errorMessage = 'Network error. Unable to connect to the chat server.';
+      if (err.response?.status === 404) {
+        errorMessage = 'Conversation not found. It may have been deleted.';
+        // Remove this session from the list
+        setSessions(prevSessions => prevSessions.filter(s => s.id !== sessionId));
+      } else if (err.response?.status === 401) {
+        errorMessage = 'Authentication required';
+        navigate('/login');
+        return;
       }
       
       setError(errorMessage);
+      toast({
+        title: "Session Error", 
+        description: errorMessage,
+        status: "warning",
+        duration: 3000,
+        isClosable: true,
+      });
       
-      // Set empty messages with welcome message
+      // Fallback to initial message
+      setActiveSessionId(sessionId);
       setMessages([initialMessage]);
     } finally {
-      setIsLoading(false);
+      // setIsLoading(false);
     }
   };
 
   const handleNewSession = async (force = false) => {
-    setError(null);
-    setIsLoading(true);
+    console.log('🎯 handleNewSession called, force:', force);
     
-    // Clean up any accumulated content from previous conversations
-    messageContentRef.current.clear();
-    
-    // Check if there's already an empty conversation we can reuse
-    if (!force) {
-      const currentSession = sessions.find(s => s.id === activeSessionId);
-      const hasNoUserMessages = messages.every(m => m.role !== 'user');
-      
-      // If we already have an active session with no user messages, just reset it
-      if (currentSession && hasNoUserMessages) {
-        setMessages([initialMessage]);
-        setIsLoading(false);
-        return activeSessionId;
-      }
+    // Don't create a new session if we already have an empty one (unless forced)
+    if (!force && activeSessionId && messages.length <= 1) {
+      console.log('❌ New session rejected - already have empty session');
+      return;
     }
     
     try {
-      console.log('Creating new chat session via API...');
-      // Create a new session
-      const response = await chatService.createSession();
-      const newSessionId = response.session_id;
+      setError(null);
+      setIsLoading(true);
       
-      if (!newSessionId) {
-        console.error('No session ID returned from createSession API call');
-        throw new Error('Invalid session ID returned from server');
+      console.log('🔄 Creating new session...');
+      
+      // Create session using the service
+      const newSession = await chatService.createSession();
+      
+      console.log('✅ New session created:', newSession);
+      
+      const sessionId = newSession.session_id || newSession.id;
+      
+      if (!sessionId) {
+        throw new Error('Failed to get session ID from response');
       }
       
-      console.log('New session created successfully:', newSessionId);
-      
-      // Add the new session to our list
-      const newSession = {
-        id: newSessionId,
+      // Create a new session object for the UI
+      const newSessionObj = {
+        id: sessionId,
         title: "New Conversation",
-        date: new Date().toLocaleString(),
+        date: "Just now", 
         preview: "",
         message_count: 0
       };
       
-      setSessions([newSession, ...sessions]);
-      setActiveSessionId(newSessionId);
+      // Add to sessions list
+      setSessions(prevSessions => [newSessionObj, ...prevSessions]);
+      
+      // Set as active session
+      setActiveSessionId(sessionId);
       setMessages([initialMessage]);
       
-      return newSessionId;
+      console.log('✅ New session setup complete');
+      
     } catch (err) {
-      console.error('Failed to create new session:', err);
-      let errorMessage = 'Failed to create a new conversation.';
-      let retryAttempted = false;
-      let shouldDisplayError = false;
+      console.error('❌ Failed to create new session:', err);
+      
+      let errorMessage = 'Failed to create new conversation';
+      let shouldCreateFallback = true;
       
       if (err.response) {
         const status = err.response.status;
         if (status === 401) {
-          errorMessage = 'Authentication required to create a new session.';
-          shouldDisplayError = true;
-          // Redirect to login page if unauthorized
+          errorMessage = 'Authentication required to create a new conversation';
           navigate('/login');
-          return null;
+          return;
+        } else if (status === 403) {
+          errorMessage = 'You do not have permission to create conversations';
+          shouldCreateFallback = false;
         } else if (status === 429) {
-          errorMessage = 'Too many requests. Please try again in a moment.';
-          shouldDisplayError = true;
-        } else if (status === 500) {
-          errorMessage = 'Server error while creating a new session.';
-          
-          // Try once more if server error
-          if (!retryAttempted) {
-            retryAttempted = true;
-            console.log('Retrying session creation after server error...');
-            try {
-              // Short delay before retry
-              await new Promise(resolve => setTimeout(resolve, 500));
-              const retryResponse = await chatService.createSession();
-              const newSessionId = retryResponse.session_id;
-              
-              if (newSessionId) {
-                // Success on retry
-                const newSession = {
-                  id: newSessionId,
-                  title: "New Conversation",
-                  date: new Date().toLocaleString(),
-                  preview: "",
-                  message_count: 0
-                };
-                
-                setSessions([newSession, ...sessions]);
-                setActiveSessionId(newSessionId);
-                setMessages([initialMessage]);
-                
-                setIsLoading(false);
-                return newSessionId;
-              }
-            } catch (retryErr) {
-              console.error('Retry also failed:', retryErr);
-            }
-          }
+          errorMessage = 'Rate limit exceeded. Please wait before creating a new conversation';
+          shouldCreateFallback = false;
         }
       } else if (err.request) {
-        errorMessage = 'Network error. Unable to connect to the chat server.';
+        errorMessage = 'Network error. Unable to create new conversation';
       }
       
-      // Only set the error if we should display it
-      if (shouldDisplayError) {
-        setError(errorMessage);
+      setError(errorMessage);
+      toast({
+        title: "New Conversation Error",
+        description: errorMessage,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Create a fallback local session if appropriate
+      if (shouldCreateFallback) {
+        console.log('🔄 Creating fallback session due to error');
+        const fallbackSessionId = `fallback_${Date.now()}`;
+        const fallbackSession = {
+          id: fallbackSessionId,
+          title: "New Conversation",
+          date: "Just now",
+          preview: "",
+          messages: [initialMessage],
+          is_fallback: true
+        };
         
-        // Show toast notification for better user feedback
-        toast({
-          title: 'New Chat Session',
-          description: errorMessage,
-          status: 'warning',
-          duration: 5000,
-          isClosable: true,
-        });
-      } else {
-        // Clear any existing error
-        setError(null);
+        setSessions(prevSessions => [fallbackSession, ...prevSessions]);
+        setActiveSessionId(fallbackSessionId);
+        setMessages([initialMessage]);
+        
+        console.log('✅ Fallback session created');
       }
       
-      // Create a fallback session ID with a consistent format
-      const fallbackSessionId = `fallback-${Date.now()}`;
-      console.log('Creating fallback session with ID:', fallbackSessionId);
-      
-      const fallbackSession = {
-        id: fallbackSessionId,
-        title: "New Conversation",
-        date: new Date().toLocaleString(),
-        preview: "",
-        is_fallback: true, // Mark this as a fallback session
-      };
-      
-      setSessions([fallbackSession, ...sessions]);
-      setActiveSessionId(fallbackSessionId);
-      setMessages([initialMessage]);
-      
-      return fallbackSessionId;
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleDeleteSession = async (sessionId) => {
-    setError(null);
-    
-    // For debugging purposes
-    console.log('Attempting to delete session:', sessionId);
+    if (!sessionId) return;
     
     try {
-      // Find the session we want to delete
-      const sessionToDelete = sessions.find(session => session.id === sessionId);
-      
-      if (!sessionToDelete) {
-        console.error('Could not find session to delete:', sessionId);
+      // Don't delete if it's the only session or the active session
+      if (sessions.length <= 1) {
         toast({
-          title: 'Delete Error',
-          description: 'Could not find the conversation to delete.',
-          status: 'error',
+          title: "Cannot Delete",
+          description: "Cannot delete the last remaining conversation.",
+          status: "warning",
           duration: 3000,
           isClosable: true,
         });
         return;
       }
       
-      console.log('Found session to delete:', sessionToDelete);
-      
-      // Show loading state to indicate deletion in progress
-      setIsLoading(true);
-      
-      // First, remove from local state to update UI immediately (for better responsiveness)
-      const updatedSessions = sessions.filter(session => session.id !== sessionId);
-      setSessions(updatedSessions);
-      
-      // If we deleted the active session, switch to another one immediately for better UX
-      if (sessionId === activeSessionId) {
-        if (updatedSessions.length > 0) {
-          handleSelectSession(updatedSessions[0].id);
-        } else {
-          handleNewSession();
-        }
+      // Check if this is a fallback session
+      const session = sessions.find(s => s.id === sessionId);
+      if (session && !session.is_fallback) {
+        // Delete from server for real sessions
+        await chatService.deleteSession(sessionId);
       }
       
-      // If the session was a fallback session, we don't need to delete from server
-      const isFallbackSession = sessionToDelete.is_fallback === true || 
-                                sessionId.startsWith('fallback-') || 
-                                !sessionId.includes('-');
-      
-      if (isFallbackSession) {
-        console.log('Skipping server delete for fallback session:', sessionId);
-        
-        // Short delay to ensure UI updates are visible
-        await new Promise(resolve => setTimeout(resolve, 300));
-        setIsLoading(false);
-        
-        toast({
-          title: 'Conversation Deleted',
-          description: 'The conversation has been removed.',
-          status: 'success',
-          duration: 3000,
-          isClosable: true,
-        });
-        
-        return;
-      }
-      
-      // For regular sessions, attempt to delete from server
-      let serverDeletionSuccess = false;
-      let errorDetails = null;
-      
-      try {
-        // Add a small delay to ensure UI updates first
-        await new Promise(resolve => setTimeout(resolve, 300));
-        
-        console.log('Deleting session from server:', sessionId);
-        const result = await chatService.deleteSession(sessionId);
-        console.log('Server deletion response:', result);
-        
-        if (result && result.messages_deleted !== undefined) {
-          console.log(`Deleted ${result.messages_deleted} messages from session ${sessionId}`);
-        }
-        
-        serverDeletionSuccess = true;
-      } catch (serverError) {
-        console.error('Server deletion failed:', serverError);
-        errorDetails = serverError?.message || 'Unknown server error';
-        
-        // Try one more time with a slight delay in case it was a temporary issue
-        try {
-          console.log('Retrying session deletion after failure...');
-          await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
-          const result = await chatService.deleteSession(sessionId);
-          console.log('Server deletion retry response:', result);
-          serverDeletionSuccess = true;
-        } catch (retryError) {
-          console.error('Server deletion retry also failed:', retryError);
-          // We'll continue with UI updates even though server deletion failed
-        }
-      } finally {
-        // Always turn off loading state
-        setIsLoading(false);
-      }
-      
-      // Show appropriate toast based on server deletion success
-      if (serverDeletionSuccess) {
-        toast({
-          title: 'Conversation Deleted',
-          description: 'The conversation has been deleted.',
-          status: 'success',
-          duration: 3000,
-          isClosable: true,
-        });
-      } else {
-        toast({
-          title: 'Partial Success',
-          description: `The conversation was removed from your view, but the server reported an error: ${errorDetails}`,
-          status: 'warning',
-          duration: 5000,
-          isClosable: true,
-        });
-      }
-      
-    } catch (error) {
-      console.error('Error in handleDeleteSession:', error);
-      setIsLoading(false);
-      
-      // Make sure we still update the UI even if there was an error
-      const updatedSessions = sessions.filter(session => session.id !== sessionId);
-      setSessions(updatedSessions);
+      // Remove from local state
+      setSessions(prevSessions => prevSessions.filter(s => s.id !== sessionId));
       
       // If we deleted the active session, switch to another one
-      if (sessionId === activeSessionId) {
-        if (updatedSessions.length > 0) {
-          handleSelectSession(updatedSessions[0].id);
+      if (activeSessionId === sessionId) {
+        const remainingSessions = sessions.filter(s => s.id !== sessionId);
+        if (remainingSessions.length > 0) {
+          await handleSelectSession(remainingSessions[0].id);
         } else {
-          handleNewSession();
+          // Create a new session if no sessions remain
+          await handleNewSession();
         }
       }
       
       toast({
-        title: 'Note',
-        description: 'The conversation was removed from your history, but there might have been an issue with the server.',
-        status: 'info',
-        duration: 5000,
+        title: "Conversation Deleted",
+        description: "The conversation has been successfully deleted.",
+        status: "success",
+        duration: 2000,
+        isClosable: true,
+      });
+      
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+      
+      let errorMessage = 'Failed to delete conversation';
+      if (err.response?.status === 404) {
+        errorMessage = 'Conversation not found. It may have already been deleted.';
+        // Remove from local state anyway
+        setSessions(prevSessions => prevSessions.filter(s => s.id !== sessionId));
+      } else if (err.response?.status === 401) {
+        errorMessage = 'Authentication required';
+        navigate('/login');
+        return;
+      } else if (err.response?.status === 403) {
+        errorMessage = 'You do not have permission to delete this conversation';
+      }
+      
+      toast({
+        title: "Delete Error",
+        description: errorMessage,
+        status: "error",
+        duration: 3000,
         isClosable: true,
       });
     }
   };
 
   const updateSessionWithMessages = (sessionId, updatedMessages) => {
-    // Update the sessions list with new message information
-    const updatedSessions = sessions.map(session => {
-      if (session.id === sessionId) {
-        // Get the last message for preview (from either user or assistant)
-        const lastMessage = updatedMessages.length > 0 ? updatedMessages[updatedMessages.length - 1] : null;
-        
-        // Create preview text from the last message
-        const preview = lastMessage 
-          ? lastMessage.content.substring(0, 60) + (lastMessage.content.length > 60 ? '...' : '') 
-          : '';
-        
-        return {
-          ...session,
-          preview,
-          message_count: updatedMessages.length,
-          date: new Date().toLocaleString()
-        };
-      }
-      return session;
-    });
-    
-    setSessions(updatedSessions);
+    setSessions(prevSessions =>
+      prevSessions.map(session => {
+        if (session.id === sessionId) {
+          const lastUserMessage = [...updatedMessages].reverse().find(msg => msg.role === 'user');
+          return {
+            ...session,
+            preview: lastUserMessage ? lastUserMessage.content.substring(0, 100) : session.preview,
+            message_count: updatedMessages.length,
+            date: "Just now"
+          };
+        }
+        return session;
+      })
+    );
   };
 
   const generateSessionTitle = (message) => {
-    // Create a title from the user's message
-    // Truncate long messages, capitalize first letter
-    if (!message) return "New Conversation";
-    
-    // Clean up message - remove excess whitespace
-    const cleanMessage = message.trim().replace(/\s+/g, ' ');
-    
-    // Truncate if too long
-    const truncated = cleanMessage.length > 50 
-      ? cleanMessage.substring(0, 47) + '...'
-      : cleanMessage;
-      
-    // Capitalize first letter
-    return truncated.charAt(0).toUpperCase() + truncated.slice(1);
+    // Extract first 50 chars and clean up
+    return message.substring(0, 50).replace(/[^\w\s]/g, '').trim() + (message.length > 50 ? '...' : '');
   };
-  
+
   const updateSessionTitle = (sessionId, title) => {
-    // Update the title of a session
-    setSessions(prevSessions => 
-      prevSessions.map(session => 
-        session.id === sessionId 
+    setSessions(prevSessions =>
+      prevSessions.map(session =>
+        session.id === sessionId
           ? { ...session, title }
           : session
       )
@@ -989,168 +844,181 @@ const ChatPage = () => {
   };
 
   return (
-    <Box h="100vh" flexDirection="column">
-      {/* Header - Simplified */}
-      <Box 
-        py={4} 
-        px={6} 
-        borderBottomWidth="1px" 
-        borderColor={borderColor}
-        bg={headerBg}
-        zIndex="1"
+    <Box h="100vh" display="flex" overflow="hidden">
+      {/* Chat history sidebar */}
+      <Box
+        w={isSidebarOpen ? { base: "full", md: "300px" } : "0px"}
+        h="100vh"
+        bg={sidebarBg}
+        borderRightWidth="1px"
+        borderRightColor={borderColor}
+        position={{ base: isSidebarOpen ? "absolute" : "static", md: "static" }}
+        zIndex="2"
+        transition="width 0.3s"
+        overflow="hidden"
+        display={isSidebarOpen ? "block" : "none"}
+        boxShadow={isMobile && isSidebarOpen ? "0 0 15px rgba(0,0,0,0.2)" : "none"}
       >
-        <Flex justify="space-between" align="center">
-          <Heading 
-            size="lg" 
-            fontWeight="600"
-            color={accentColor}
-          >
-            RegulAIte Chat
-          </Heading>
-          
-          {/* Mobile sidebar toggle */}
-          {isMobile && (
-            <IconButton
-              icon={isSidebarOpen ? <X size={18} /> : <PanelLeft size={18} />}
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              variant="ghost"
-              aria-label="Toggle Sidebar"
-              size="sm"
-            />
-          )}
-        </Flex>
+        {console.log('🎨 Rendering ChatHistory with sessions:', sessions, 'activeSessionId:', activeSessionId)}
+        <ChatHistory
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={handleSelectSession}
+          onNewSession={handleNewSession}
+          onDeleteSession={handleDeleteSession}
+        />
       </Box>
       
-      <Flex flex="1" overflow="hidden">
-        {/* Chat history sidebar */}
-        <Box
-          w={isSidebarOpen ? { base: "full", md: "300px" } : "0px"}
-          h="full"
-          bg={sidebarBg}
-          borderRightWidth="1px"
-          borderRightColor={borderColor}
-          position={{ base: isSidebarOpen ? "absolute" : "static", md: "static" }}
-          zIndex="2"
-          transition="width 0.3s"
-          overflow="hidden"
-          display={isSidebarOpen ? "block" : "none"}
-          boxShadow={isMobile && isSidebarOpen ? "0 0 15px rgba(0,0,0,0.2)" : "none"}
-        >
-          <ChatHistory
-            sessions={sessions}
-            activeSessionId={activeSessionId}
-            onSelectSession={handleSelectSession}
-            onNewSession={handleNewSession}
-            onDeleteSession={handleDeleteSession}
+      {/* Main chat area */}
+      <Flex 
+        flex="1" 
+        flexDirection="column" 
+        h="100vh" 
+        overflow="hidden"
+        bg={chatBg}
+        position="relative"
+      >
+        {/* Mobile sidebar toggle - positioned absolutely in top left */}
+        {isMobile && (
+          <IconButton
+            icon={isSidebarOpen ? <X size={18} /> : <PanelLeft size={18} />}
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            variant="ghost"
+            aria-label="Toggle Sidebar"
+            size="sm"
+            position="absolute"
+            top="4"
+            left="4"
+            zIndex="3"
+            bg={mobileToggleBg}
+            boxShadow="sm"
           />
-        </Box>
-        
-        {/* Main chat area */}
-        <Flex 
-          flex="1" 
-          flexDirection="column" 
-          h="100%" 
-          overflow="hidden"
-          bg={chatBg}
-        >
-          {/* Simplified Loading Indicator */}
-          {isLoading && (
-            <Box 
-              bg={loadingBg} 
-              borderBottom="1px solid" 
-              borderBottomColor={loadingBorderColor} 
-              px={4} 
-              py={2}
-            >
-              <HStack spacing={2}>
-                <Spinner size="sm" color={accentColor} />
-                <Text fontSize="sm" color={loadingTextColor}>
-                  Processing...
-                </Text>
-              </HStack>
-            </Box>
-          )}
-          
-          {/* Error notification - Simplified */}
-          {error && (
-            <Box 
-              bg={errorBg} 
-              color={errorColor} 
-              p={3} 
-              borderBottomWidth="1px" 
-              borderBottomColor={errorBorderColor}
-            >
-              <Flex align="center" justify="space-between">
-                <Text fontSize="sm">{error}</Text>
-                <Button 
-                  size="xs" 
-                  onClick={() => setError(null)}
-                  variant="ghost"
-                  color={errorColor}
-                >
-                  ×
-                </Button>
-              </Flex>
-            </Box>
-          )}
-          
-          {/* Message area */}
-          <VStack 
-            spacing={4} 
-            flex="1" 
-            overflowY="auto" 
-            p={6} 
-            align="stretch"
+        )}
+
+        {/* Simplified Loading Indicator */}
+        {isLoading && (
+          <Box 
+            bg={loadingBg} 
+            borderBottom="1px solid" 
+            borderBottomColor={loadingBorderColor} 
+            px={4} 
+            py={2}
           >
-            {/* Welcome header for new chats - Simplified */}
-            {messages.length <= 1 && (
-              <Box textAlign="center" my={8}>
-                <Heading as="h2" size="lg" mb={4} color={textColor}>
-                  How can I help you today?
-                </Heading>
-                <Text color={secondaryTextColor} mb={6}>
-                  Ask me about governance, risk, and compliance
-                </Text>
-                
-                {/* Suggested questions - Simplified */}
-                <VStack spacing={2} maxW="md" mx="auto">
-                  {suggestedQuestions.slice(0, 3).map((question, index) => (
-                    <Button
-                      key={index}
-                      size="sm"
-                      variant="outline"
-                      width="full"
-                      onClick={() => handleSuggestedQuestion(question)}
-                      textAlign="left"
-                      justifyContent="flex-start"
-                    >
-                      {question}
-                    </Button>
-                  ))}
-                </VStack>
-              </Box>
-            )}
-            
-            {/* Messages */}
-            {messages.map((message, index) => (
-              <ChatMessage 
-                key={index} 
-                message={message} 
-                isLoading={isLoading && index === messages.length - 1}
-              />
-            ))}
-            
-            {/* Invisible element to scroll to */}
-            <Box ref={messagesEndRef} />
-          </VStack>
+            <HStack spacing={2}>
+              <Spinner size="sm" color={accentColor} />
+              <Text fontSize="sm" color={loadingTextColor}>
+                Processing...
+              </Text>
+            </HStack>
+          </Box>
+        )}
+        
+        {/* Error notification - Simplified */}
+        {error && (
+          <Box 
+            bg={errorBg} 
+            color={errorColor} 
+            p={3} 
+            borderBottomWidth="1px" 
+            borderBottomColor={errorBorderColor}
+          >
+            <Flex align="center" justify="space-between">
+              <Text fontSize="sm">{error}</Text>
+              <Button 
+                size="xs" 
+                onClick={() => setError(null)}
+                variant="ghost"
+                color={errorColor}
+              >
+                ×
+              </Button>
+            </Flex>
+          </Box>
+        )}
+        
+        {/* Chat messages area - scrollable */}
+        <VStack 
+          spacing={4} 
+          flex="1" 
+          overflowY="auto" 
+          p={6} 
+          align="stretch"
+          pb="120px" // Add padding bottom to account for fixed input
+        >
+          {/* Welcome header for new chats */}
+          {messages.length <= 1 && (
+            <Box textAlign="center" my={8}>
+              <Heading as="h2" size="xl" mb={4} color={textColor}>
+                How can I help with GRC today?
+              </Heading>
+              <Text color={secondaryTextColor} mb={6} fontSize="lg">
+                Ask me anything about governance, risk, and compliance
+              </Text>
+              
+              {/* Suggested questions */}
+              <VStack spacing={3} maxW="2xl" mx="auto">
+                {suggestedQuestions.slice(0, 4).map((question, index) => (
+                  <Button
+                    key={index}
+                    size="md"
+                    variant="outline"
+                    width="full"
+                    onClick={() => handleSuggestedQuestion(question)}
+                    textAlign="left"
+                    justifyContent="flex-start"
+                    py={6}
+                    px={6}
+                    fontSize="sm"
+                    color={accentColor}
+                    borderColor={accentColor}
+                    bg={questionButtonBg}
+                    _hover={{
+                      bg: buttonHoverBg,
+                      borderColor: buttonHoverBorderColor,
+                      transform: 'translateY(-1px)',
+                      boxShadow: '0 4px 12px rgba(68, 21, 182, 0.15)'
+                    }}
+                    transition="all 0.2s ease"
+                    borderRadius="lg"
+                  >
+                    {question}
+                  </Button>
+                ))}
+              </VStack>
+            </Box>
+          )}
           
-          {/* Chat input area */}
+          {/* Messages */}
+          {messages.map((message, index) => (
+            <ChatMessage 
+              key={index} 
+              message={message} 
+              isLoading={isLoading && index === messages.length - 1}
+            />
+          ))}
+          
+          {/* Invisible element to scroll to */}
+          <Box ref={messagesEndRef} />
+        </VStack>
+        
+        {/* Fixed chat input area at bottom */}
+        <Box
+          position="fixed"
+          bottom="0"
+          left={isSidebarOpen && !isMobile ? { base: "0", md: "300px" } : "0"}
+          right="0"
+          bg={fixedInputBg}
+          borderTopWidth="1px"
+          borderTopColor={borderColor}
+          zIndex="1"
+          transition="left 0.3s"
+        >
           <ChatControls 
             onSendMessage={handleSendMessage}
             disabled={isLoading}
             reasoningNodeId={reasoningNodeId}
           />
-        </Flex>
+        </Box>
       </Flex>
       
       {/* Loading Overlay for critical operations */}

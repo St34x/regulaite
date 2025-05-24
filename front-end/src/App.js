@@ -35,11 +35,7 @@ function App() {
               
               <Route 
                 path="/chat" 
-                element={
-                  <Layout>
-                    <ChatPage />
-                  </Layout>
-                } 
+                element={<ChatPage />}
               />
               
               <Route 

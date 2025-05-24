@@ -86,15 +86,18 @@ const chatService = {
       // If userId not provided, get from auth service
       if (!userId) {
         const userData = authService.getCurrentUserData();
+        console.log('🔐 Current user data from auth service:', userData);
         userId = userData?.user_id;
         
         // Additional logging to help diagnose issues
         if (!userId) {
-          console.warn('No user ID available from getCurrentUserData()', userData);
+          console.warn('❌ No user ID available from getCurrentUserData()', userData);
         } else {
-          console.log('Fetching chat sessions for user ID:', userId);
+          console.log('✅ Fetching chat sessions for user ID:', userId);
         }
       }
+      
+      console.log('📡 Making request to /chat/sessions with params:', { user_id: userId, limit, offset });
       
       const response = await api.get(`/chat/sessions`, {
         params: { user_id: userId, limit, offset },
@@ -102,16 +105,33 @@ const chatService = {
         timeout: 10000
       });
       
+      // Log complete response for debugging
+      console.log('📋 Complete response from /chat/sessions:', response);
+      console.log('📋 Response data:', response.data);
+      console.log('📋 Response data keys:', Object.keys(response.data || {}));
+      
       // Log response status and data shape for debugging
       console.log(`Sessions response status: ${response.status}, found ${response.data.sessions?.length || 0} sessions`);
       
       // Check if we have valid sessions in the response
-      if (!response.data.sessions) {
-        console.warn('API response missing sessions array:', response.data);
+      // Try different possible response structures
+      let sessions = null;
+      if (response.data.sessions) {
+        sessions = response.data.sessions;
+        console.log('✅ Found sessions in response.data.sessions');
+      } else if (Array.isArray(response.data)) {
+        sessions = response.data;
+        console.log('✅ Found sessions directly in response.data (array)');
+      } else if (response.data.data && Array.isArray(response.data.data)) {
+        sessions = response.data.data;
+        console.log('✅ Found sessions in response.data.data');
+      } else {
+        console.warn('❌ API response missing sessions array or unexpected structure:', response.data);
         return [];
       }
       
-      return response.data.sessions || [];
+      console.log('📊 Returning sessions:', sessions);
+      return sessions || [];
     } catch (error) {
       // Enhanced error logging with more details
       console.error('Error fetching chat sessions:', error);
