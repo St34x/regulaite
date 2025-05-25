@@ -49,14 +49,18 @@ class RAGIntegration:
             try:
                 # Try to get the query engine from the main application
                 try:
-                    from main import rag_query_engine
-                    if rag_query_engine is not None:
-                        self.query_engine = rag_query_engine
-                        logger.info("Successfully initialized RAG query engine from main application")
+                    import sys
+                    if 'main' in sys.modules:
+                        main_module = sys.modules['main']
+                        if hasattr(main_module, 'rag_query_engine') and main_module.rag_query_engine is not None:
+                            self.query_engine = main_module.rag_query_engine
+                            logger.info("Successfully initialized RAG query engine from main application")
+                        else:
+                            logger.warning("RAG query engine not available in main application")
                     else:
-                        logger.warning("RAG query engine not available in main application")
-                except ImportError:
-                    logger.warning("Could not import RAG query engine from main application")
+                        logger.warning("Main module not found in sys.modules")
+                except Exception as e:
+                    logger.warning(f"Could not import RAG query engine from main application: {str(e)}")
                 
                 # If still no query engine, try the generic get_query_engine function
                 if self.query_engine is None:
@@ -252,17 +256,58 @@ class RAGIntegration:
             # If sources is still empty, create from context
             if not sources and context:
                 sources = []
-                for i, text in enumerate(context):
+                for i, ctx_item in enumerate(context):
                     source = {"id": f"source_{i}", "title": f"Source {i+1}"}
                     
-                    # Try to extract metadata if available
-                    if isinstance(text, dict) and "metadata" in text:
-                        source.update(text["metadata"])
+                    # Handle different context item formats
+                    if isinstance(ctx_item, dict):
+                        # Extract metadata if available
+                        if "metadata" in ctx_item:
+                            metadata = ctx_item["metadata"]
+                            source.update(metadata)
+                            
+                            # Extract filename from metadata
+                            if "filename" in metadata:
+                                source["filename"] = metadata["filename"]
+                            elif "original_filename" in metadata:
+                                source["filename"] = metadata["original_filename"]
+                            
+                            # Update title with actual filename if available
+                            if "filename" in source:
+                                source["title"] = source["filename"]
+                        
+                        # Extract chunk text content
+                        if "text" in ctx_item:
+                            source["content"] = ctx_item["text"]
+                            source["chunk_text"] = ctx_item["text"]  # Also store as chunk_text for clarity
+                        
+                        # Extract relevance score
+                        if "score" in ctx_item:
+                            source["relevance_score"] = ctx_item["score"]
+                            source["match_percentage"] = round(ctx_item["score"] * 100, 1)  # Convert to percentage
+                        
+                        # Extract document ID
+                        if "document_id" in ctx_item:
+                            source["document_id"] = ctx_item["document_id"]
+                    elif isinstance(ctx_item, str):
+                        # If context item is just a string, use it as content
+                        source["content"] = ctx_item
+                        source["chunk_text"] = ctx_item
                         
                     sources.append(source)
             
+            # Extract text content for results
+            results = []
+            for ctx_item in context:
+                if isinstance(ctx_item, dict) and "text" in ctx_item:
+                    results.append(ctx_item["text"])
+                elif isinstance(ctx_item, str):
+                    results.append(ctx_item)
+                else:
+                    results.append(str(ctx_item))
+            
             return {
-                "results": context,
+                "results": results,
                 "sources": sources
             }
         else:

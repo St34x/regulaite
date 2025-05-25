@@ -71,23 +71,26 @@ class ResponseGenerator:
     async def generate(self, 
                       response: AgentResponse, 
                       query: Union[Query, ParsedQuery],
-                      format: str = ResponseFormat.TEXT) -> FormattedResponse:
+                      format: str = ResponseFormat.MARKDOWN) -> FormattedResponse:
         """
         Generate a formatted response.
         
         Args:
             response: The raw agent response
             query: The original query
-            format: The desired output format
+            format: The desired output format (default: markdown)
             
         Returns:
             A formatted response
         """
         # Get the appropriate formatter
-        formatter = self.formatters.get(format, self._format_text)
+        formatter = self.formatters.get(format, self._format_markdown)
         
-        # Format the content
-        formatted_content = formatter(response.content, query)
+        # For markdown format, use the enhanced formatter with metadata
+        if format == ResponseFormat.MARKDOWN:
+            formatted_content = self._format_markdown_with_metadata(response.content, response, query)
+        else:
+            formatted_content = formatter(response.content, query)
         
         # Create the formatted response
         formatted_response = FormattedResponse(
@@ -104,9 +107,14 @@ class ResponseGenerator:
         )
         
         # Add sources if available
-        if "sources" in response.metadata:
+        if response.sources:
             formatted_response.sources = [
-                SourceInfo(**source) if isinstance(source, dict) else source
+                SourceInfo(**source) if isinstance(source, dict) else SourceInfo(title=str(source))
+                for source in response.sources
+            ]
+        elif "sources" in response.metadata:
+            formatted_response.sources = [
+                SourceInfo(**source) if isinstance(source, dict) else SourceInfo(title=str(source))
                 for source in response.metadata["sources"]
             ]
             
@@ -158,31 +166,100 @@ class ResponseGenerator:
         
     def _format_markdown(self, content: str, query: Union[Query, ParsedQuery]) -> str:
         """
-        Format the response as Markdown.
+        Format the response as Markdown with proper structure.
         
         Args:
             content: The response content
             query: The original query
             
         Returns:
-            Formatted Markdown response
+            Formatted Markdown response with proper structure
         """
-        # For now, just add some basic formatting
-        formatted = f"## Response\n\n{content}\n\n"
+        # Start with the main response content
+        formatted = f"{content}\n\n"
         
-        # Add sources section if available in query metadata
-        if hasattr(query, "metadata") and "sources" in query.metadata:
-            formatted += "\n\n## Sources\n\n"
-            for i, source in enumerate(query.metadata["sources"]):
-                title = source.get("title", f"Source {i+1}")
-                url = source.get("url", "")
-                
-                if url:
-                    formatted += f"- [{title}]({url})\n"
-                else:
-                    formatted += f"- {title}\n"
+        # Don't add redundant "Response" header if content already has structure
+        if not content.strip().startswith('#'):
+            formatted = f"## Response\n\n{content}\n\n"
         
         return formatted
+        
+    def _format_markdown_with_metadata(self, content: str, response: 'AgentResponse', query: Union[Query, ParsedQuery]) -> str:
+        """
+        Format the response as Markdown with metadata sections.
+        
+        Args:
+            content: The response content
+            response: The full agent response with metadata
+            query: The original query
+            
+        Returns:
+            Formatted Markdown response with metadata sections
+        """
+        # Clean and ensure proper markdown structure
+        formatted = content.strip()
+        
+        # Ensure the response starts with a markdown header
+        if not formatted.startswith('#'):
+            # If content doesn't start with a header, add one
+            lines = formatted.split('\n')
+            first_line = lines[0].strip()
+            
+            # If first line looks like a title/summary, make it a header
+            if first_line and not first_line.startswith('#'):
+                # Check if it's a short title-like line (less than 100 chars, no periods at end)
+                if len(first_line) < 100 and not first_line.endswith('.'):
+                    lines[0] = f"## {first_line}"
+                else:
+                    # Insert a generic header at the beginning
+                    lines.insert(0, "## Réponse" if self._detect_french(formatted) else "## Response")
+                    lines.insert(1, "")  # Add spacing
+                
+                formatted = '\n'.join(lines)
+        
+        # Ensure proper spacing after headers
+        formatted = self._fix_markdown_spacing(formatted)
+        
+        # Ensure proper ending
+        if not formatted.endswith('\n\n'):
+            formatted += '\n\n'
+        
+        # Add tools used section if available
+        if response.tools_used and len(response.tools_used) > 0:
+            formatted += "## Analysis Tools Used\n\n"
+            for tool in response.tools_used:
+                formatted += f"- **{tool}**: Specialized analysis tool\n"
+            formatted += "\n"
+                
+        # Add confidence indicator if available and not perfect
+        if hasattr(response, 'confidence') and response.confidence < 1.0:
+            confidence_percent = int(response.confidence * 100)
+            formatted += f"## Confidence Level\n\n"
+            formatted += f"Response confidence: **{confidence_percent}%**\n\n"
+        
+        return formatted
+    
+    def _detect_french(self, text: str) -> bool:
+        """Detect if text is in French."""
+        french_indicators = ['le ', 'la ', 'les ', 'de ', 'du ', 'des ', 'et ', 'est ', 'un ', 'une ']
+        text_lower = text.lower()
+        return any(indicator in text_lower for indicator in french_indicators)
+    
+    def _fix_markdown_spacing(self, content: str) -> str:
+        """Fix markdown spacing issues."""
+        lines = content.split('\n')
+        fixed_lines = []
+        
+        for i, line in enumerate(lines):
+            fixed_lines.append(line)
+            
+            # Add spacing after headers if not already present
+            if line.startswith('#') and i < len(lines) - 1:
+                next_line = lines[i + 1] if i + 1 < len(lines) else ""
+                if next_line.strip() != "":
+                    fixed_lines.append("")  # Add empty line after header
+        
+        return '\n'.join(fixed_lines)
         
     def _format_html(self, content: str, query: Union[Query, ParsedQuery]) -> str:
         """

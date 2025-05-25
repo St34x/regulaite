@@ -11,6 +11,7 @@ import RegisterPage from './pages/RegisterPage';
 import DocumentsPage from './pages/DocumentsPage';
 import { chakraTheme } from './theme';
 import './App.css';
+import './styles/chat.css';
 
 function App() {
   return (

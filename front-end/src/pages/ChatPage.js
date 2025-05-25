@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Shield, PanelLeft, X, RefreshCw } from 'lucide-react';
-import ChatMessage from '../components/chat/ChatMessage';
 import ChatHistory from '../components/chat/ChatHistory';
 import LoadingOverlay from '../components/ui/LoadingOverlay';
 import useMediaQuery from '../hooks/useMediaQuery';
@@ -9,6 +8,10 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import ChatControls from '../components/chat/ChatControls';
 import { Box, Flex, Heading, Button, IconButton, Text, Spinner, VStack, HStack, useToast, useColorModeValue } from '@chakra-ui/react';
+import MessageInput from '../components/MessageInput';
+import ChatContainer from '../components/chat/ChatContainer';
+import { motion, AnimatePresence } from 'framer-motion';
+import { getErrorMessage } from '../lib/utils';
 
 // Initial message for new chats
 const initialMessage = {
@@ -38,6 +41,7 @@ const ChatPage = () => {
   const [reasoningNodeId, setReasoningNodeId] = useState(null);
   const [agentProgress, setAgentProgress] = useState(null);
   const [currentRequestId, setCurrentRequestId] = useState(null);
+  const [activeStreamId, setActiveStreamId] = useState(null);
   
   const messagesEndRef = useRef(null);
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -66,8 +70,8 @@ const ChatPage = () => {
   const loadingTextColor = useColorModeValue('blue.700', 'blue.200');
   const fixedInputBg = useColorModeValue('white', 'gray.800');
 
-  // Add ref for tracking accumulated content to prevent stale closures
-  const messageContentRef = useRef(new Map());
+  // Stream management
+  const streamAbortControllerRef = useRef(null);
 
   // Close sidebar on mobile by default
   useEffect(() => {
@@ -253,6 +257,7 @@ const ChatPage = () => {
     }
   };
 
+  // Enhanced message sending with improved streaming
   const handleSendMessage = async (content) => {
     console.log('🎯 handleSendMessage called with content:', content);
     console.log('🔄 Current isLoading state:', isLoading);
@@ -275,27 +280,30 @@ const ChatPage = () => {
       // Create a new user message
       const userMessage = {
         role: "user",
-        content: content
+        content: content,
+        timestamp: Date.now(),
+        id: `user_${Date.now()}`
       };
       
       // Add to UI immediately
       const updatedMessages = [...messages, userMessage];
       
-      // Create a temporary assistant message that will show processing state
+      // Create a temporary assistant message with streamlined metadata
       const tempAssistantMessage = {
         role: "assistant",
         content: "",
         isGenerating: true,
         processingState: "Initializing request...",
         requestId: requestId,
+        timestamp: Date.now(),
+        id: `assistant_${Date.now()}`,
         metadata: {
           internal_thoughts: "",
           processingSteps: [],
-          currentStep: 0,
-          totalSteps: 6,
           startTime: Date.now(),
           requestId: requestId,
-          isConnected: true
+          isConnected: true,
+          streamId: null
         }
       };
       
@@ -313,177 +321,170 @@ const ChatPage = () => {
         content: msg.content
       }));
       
-      console.log('📞 Starting streaming request to /chat/rag');
+      console.log('📞 Starting streamlined streaming request');
       
-      // Use the enhanced streaming API
+      // Create abort controller for this stream
+      streamAbortControllerRef.current = new AbortController();
+      
+      // Use the enhanced streaming API with simplified chunk handling
       const result = await chatService.sendMessageStreaming(
         activeSessionId,
         content,
         (chunkData) => {
-          // Handle different types of streaming data
+          // Streamlined chunk handling - delegate complex UI logic to StreamingMessage
           setMessages(currentMessages => {
             const updatedMessages = [...currentMessages];
             const lastMessage = updatedMessages[updatedMessages.length - 1];
             
             if (lastMessage.role === "assistant" && lastMessage.isGenerating) {
-              // Create a unique key for this message
-              const messageKey = `${lastMessage.id || 'temp'}_${lastMessage.timestamp}`;
-              
-              if (chunkData.type === 'start') {
-                // Streaming started - initialize the content accumulator
-                lastMessage.processingState = "Connection established, starting processing...";
-                lastMessage.metadata.streamStarted = true;
-                lastMessage.metadata.backendRequestId = chunkData.request_id;
-                
-                // Initialize content accumulator for this message
-                if (!messageContentRef.current.has(messageKey)) {
-                  messageContentRef.current.set(messageKey, '');
-                }
-              } else if (chunkData.type === 'processing') {
-                // Processing update
-                lastMessage.processingState = chunkData.state || "Processing...";
-                
-                if (chunkData.internal_thoughts) {
-                  lastMessage.metadata.internal_thoughts = chunkData.internal_thoughts;
-                }
-                
-                // Update step information
-                if (chunkData.step_number && chunkData.total_steps) {
-                  lastMessage.metadata.currentStep = chunkData.step_number;
-                  lastMessage.metadata.totalSteps = chunkData.total_steps;
+              // Handle different chunk types with simplified logic
+              switch (chunkData.type) {
+                case 'start':
+                  lastMessage.processingState = "Connection established, starting processing...";
+                  lastMessage.metadata.streamStarted = true;
+                  lastMessage.metadata.backendRequestId = chunkData.request_id;
+                  lastMessage.metadata.streamId = chunkData.streamId;
+                  setActiveStreamId(chunkData.streamId);
+                  break;
+
+                case 'processing':
+                  lastMessage.processingState = chunkData.state || "Processing...";
                   
-                  // Initialize processingSteps if not exists
-                  if (!lastMessage.metadata.processingSteps) {
-                    lastMessage.metadata.processingSteps = [];
+                  if (chunkData.internal_thoughts) {
+                    lastMessage.metadata.internal_thoughts = chunkData.internal_thoughts;
                   }
                   
-                  // Update or add the current step
-                  const stepData = {
-                    step: chunkData.step,
-                    stepNumber: chunkData.step_number,
-                    totalSteps: chunkData.total_steps,
-                    message: chunkData.state,
-                    details: chunkData.details,
-                    contextMetadata: chunkData.context_metadata,
-                    status: 'in_progress',
-                    timestamp: chunkData.timestamp
-                  };
-                  
-                  const existingStepIndex = lastMessage.metadata.processingSteps.findIndex(
-                    step => step.step === chunkData.step
-                  );
-                  
-                  if (existingStepIndex >= 0) {
-                    lastMessage.metadata.processingSteps[existingStepIndex] = stepData;
-                  } else {
-                    lastMessage.metadata.processingSteps.push(stepData);
-                  }
-                  
-                  // Mark previous steps as completed
-                  lastMessage.metadata.processingSteps.forEach((step) => {
-                    if (step.stepNumber < chunkData.step_number) {
-                      step.status = 'completed';
+                  // Handle agent steps differently from regular processing steps
+                  if (chunkData.isAgentStep) {
+                    // Agent processing steps
+                    if (!lastMessage.metadata.agentSteps) {
+                      lastMessage.metadata.agentSteps = [];
                     }
-                  });
-                }
-                
-                // Store context metadata
-                if (chunkData.context_metadata) {
-                  lastMessage.metadata.contextMetadata = chunkData.context_metadata;
-                }
-                
-                // Handle special processing steps
-                if (chunkData.step === 'generation_active') {
-                  // This is a heartbeat during AI generation - show activity indicator
-                  lastMessage.metadata.isGeneratingActive = true;
-                  lastMessage.metadata.lastGenerationHeartbeat = Date.now();
-                } else if (chunkData.step === 'generation_delay') {
-                  // Generation is taking longer than expected
-                  lastMessage.metadata.generationDelayed = true;
-                } else if (chunkData.step === 'timeout_warning') {
-                  // Request may be stalled
-                  lastMessage.metadata.timeoutWarning = true;
-                }
-              } else if (chunkData.type === 'token' && chunkData.content) {
-                // Response token - FIXED ACCUMULATION TO PREVENT DUPLICATION
-                const currentContent = messageContentRef.current.get(messageKey) || '';
-                const newContent = currentContent + chunkData.content;
-                
-                // Update the ref with accumulated content
-                messageContentRef.current.set(messageKey, newContent);
-                
-                // Update the message content from ref to prevent stale closures
-                lastMessage.content = newContent;
-                lastMessage.processingState = "Generating response...";
-              } else if (chunkData.type === 'end') {
-                // Streaming completed
-                lastMessage.isGenerating = false;
-                lastMessage.processingState = "Complete";
-                
-                // Use the final content from the backend or the accumulated content
-                const accumulatedContent = messageContentRef.current.get(messageKey) || lastMessage.content;
-                const finalContent = chunkData.message || accumulatedContent;
-                
-                // Update final message content if provided from backend is longer
-                if (finalContent && finalContent.length >= lastMessage.content.length) {
-                  lastMessage.content = finalContent;
-                  messageContentRef.current.set(messageKey, finalContent);
-                }
-                
-                // Store final metadata
-                if (chunkData.metadata) {
+                    
+                    const agentStepData = {
+                      step: chunkData.step,
+                      message: chunkData.state,
+                      details: chunkData.details,
+                      progress: chunkData.progress,
+                      executionId: chunkData.executionId,
+                      status: 'in_progress',
+                      timestamp: chunkData.timestamp,
+                      isAgentStep: true
+                    };
+                    
+                    // Update or add agent step
+                    const existingStepIndex = lastMessage.metadata.agentSteps.findIndex(
+                      step => step.step === chunkData.step
+                    );
+                    
+                    if (existingStepIndex >= 0) {
+                      lastMessage.metadata.agentSteps[existingStepIndex] = agentStepData;
+                    } else {
+                      lastMessage.metadata.agentSteps.push(agentStepData);
+                    }
+                    
+                    // Update processing state with agent-specific messaging
+                    lastMessage.processingState = `🤖 Agent: ${chunkData.state}`;
+                    
+                  } else {
+                    // Regular processing steps (RAG/LLM)
+                    if (chunkData.step_number && chunkData.total_steps) {
+                      if (!lastMessage.metadata.processingSteps) {
+                        lastMessage.metadata.processingSteps = [];
+                      }
+                      
+                      const stepData = {
+                        step: chunkData.step,
+                        stepNumber: chunkData.step_number,
+                        totalSteps: chunkData.total_steps,
+                        message: chunkData.state,
+                        details: chunkData.details,
+                        status: 'in_progress',
+                        timestamp: chunkData.timestamp
+                      };
+                      
+                      // Update or add step
+                      const existingStepIndex = lastMessage.metadata.processingSteps.findIndex(
+                        step => step.step === chunkData.step
+                      );
+                      
+                      if (existingStepIndex >= 0) {
+                        lastMessage.metadata.processingSteps[existingStepIndex] = stepData;
+                      } else {
+                        lastMessage.metadata.processingSteps.push(stepData);
+                      }
+                    }
+                  }
+                  break;
+
+                case 'token':
+                  if (chunkData.content) {
+                    // Simple token accumulation - let StreamingMessage handle display logic
+                    lastMessage.content = chunkData.accumulated || (lastMessage.content + chunkData.content);
+                    lastMessage.processingState = "Generating response...";
+                  }
+                  break;
+
+                case 'end':
+                  // Completion handling
+                  lastMessage.isGenerating = false;
+                  lastMessage.processingState = "Complete";
+                  setActiveStreamId(null);
+                  
+                  if (chunkData.message) {
+                    lastMessage.content = chunkData.message;
+                  }
+                  
+                  // Store metadata and sources
                   lastMessage.metadata = {
                     ...lastMessage.metadata,
-                    ...chunkData.metadata,
+                    ...(chunkData.metadata || {}),
                     completed: true,
-                    endTime: Date.now()
+                    endTime: Date.now(),
+                    // Store sources from the completion event
+                    sources: chunkData.sources || [],
+                    contextUsed: chunkData.contextUsed,
+                    contextQuality: chunkData.contextQuality,
+                    hallucination_risk: chunkData.hallucination_risk,
+                    internalThoughts: chunkData.internalThoughts,
+                    toolsUsed: chunkData.toolsUsed,
+                    agentUsed: chunkData.agentUsed,
+                    model: chunkData.model,
+                    sessionId: chunkData.sessionId
                   };
-                }
-                
-                // Mark all steps as completed
-                if (lastMessage.metadata.processingSteps) {
-                  lastMessage.metadata.processingSteps.forEach(step => {
-                    if (step.status === 'in_progress') {
-                      step.status = 'completed';
-                    }
-                  });
-                }
-                
-                // Clean up the content accumulator for this message
-                messageContentRef.current.delete(messageKey);
-              } else if (chunkData.type === 'error') {
-                // Handle streaming errors
-                lastMessage.isGenerating = false;
-                lastMessage.processingState = "Error occurred";
-                lastMessage.metadata.error = {
-                  message: chunkData.message,
-                  error_code: chunkData.error_code,
-                  request_id: chunkData.request_id
-                };
-                
-                // Show error message in content if no content was generated
-                if (!lastMessage.content.trim()) {
-                  lastMessage.content = `❌ ${chunkData.message}`;
-                }
-                
-                // Mark current step as failed
-                if (lastMessage.metadata.processingSteps && lastMessage.metadata.processingSteps.length > 0) {
-                  const currentStepIndex = lastMessage.metadata.processingSteps.findIndex(
-                    step => step.status === 'in_progress'
-                  );
-                  if (currentStepIndex >= 0) {
-                    lastMessage.metadata.processingSteps[currentStepIndex].status = 'failed';
+                  
+                  // Mark all steps as completed
+                  if (lastMessage.metadata.processingSteps) {
+                    lastMessage.metadata.processingSteps.forEach(step => {
+                      if (step.status === 'in_progress') {
+                        step.status = 'completed';
+                      }
+                    });
                   }
-                }
-                
-                // Clean up content accumulator on error
-                messageContentRef.current.delete(messageKey);
-              } else if (chunkData.type === 'agent_progress') {
-                // Agent progress update
-                lastMessage.metadata.agentProgress = chunkData.data;
+                  break;
+
+                case 'error':
+                  // Error handling
+                  lastMessage.isGenerating = false;
+                  lastMessage.processingState = "Error occurred";
+                  setActiveStreamId(null);
+                  
+                  lastMessage.metadata.error = {
+                    message: chunkData.message,
+                    error_code: chunkData.error_code,
+                    request_id: chunkData.request_id
+                  };
+                  
+                  if (!lastMessage.content.trim()) {
+                    lastMessage.content = `❌ ${chunkData.message}`;
+                  }
+                  break;
+
+                default:
+                  console.warn('Unknown chunk type:', chunkData.type, chunkData);
               }
               
-              // Update connection status based on activity
+              // Update connection status
               lastMessage.metadata.isConnected = true;
               lastMessage.metadata.lastActivity = Date.now();
             }
@@ -496,14 +497,15 @@ const ChatPage = () => {
           temperature: 0.7,
           max_tokens: 2048,
           includeContext: true,
-          use_agent: false, // Disable agent by default to prevent hanging
+          use_agent: true,
+          stream: true,
           timeout: 300000 // 5 minutes
         },
         messagesForAPI,
         requestId
       );
       
-      console.log('✅ Streaming completed successfully:', result);
+      console.log('✅ Streamlined streaming completed successfully:', result);
       
       // Final cleanup and session update
       if (activeSessionId) {
@@ -514,20 +516,10 @@ const ChatPage = () => {
       }
       
     } catch (error) {
-      console.error('❌ Error in handleSendMessage:', error);
+      console.error('💥 Streaming failed:', error);
+      setError(getErrorMessage(error));
       
-      // Safely extract error message - handle cases where error.message might be undefined
-      const getErrorMessage = (err) => {
-        if (!err) return 'Unknown error occurred';
-        if (typeof err === 'string') return err;
-        if (err.message) return err.message;
-        if (err.toString && typeof err.toString === 'function') return err.toString();
-        return 'Unknown error occurred';
-      };
-      
-      const errorMessage = getErrorMessage(error);
-      
-      // Update the last message to show the error
+      // Update the last message to show error state
       setMessages(currentMessages => {
         const updatedMessages = [...currentMessages];
         const lastMessage = updatedMessages[updatedMessages.length - 1];
@@ -536,51 +528,77 @@ const ChatPage = () => {
           lastMessage.isGenerating = false;
           lastMessage.processingState = "Error occurred";
           lastMessage.metadata.error = {
-            message: errorMessage,
-            timestamp: new Date().toISOString(),
-            originalError: error
+            message: getErrorMessage(error),
+            timestamp: Date.now()
           };
           
-          // Show user-friendly error message
-          if (errorMessage.includes('timeout')) {
-            lastMessage.content = "⏱️ The request timed out. This may be due to high server load or a complex query. Please try again with a simpler question or check your connection.";
-          } else if (errorMessage.includes('network') || errorMessage.includes('Failed to fetch')) {
-            lastMessage.content = "🌐 Network error. Please check your internet connection and try again.";
-          } else {
-            lastMessage.content = `❌ ${errorMessage}`;
+          if (!lastMessage.content.trim()) {
+            lastMessage.content = `❌ ${getErrorMessage(error)}`;
           }
         }
         
         return updatedMessages;
       });
-      
-      // Show toast notification for better user feedback
-      toast({
-        title: 'Chat Error',
-        description: errorMessage.includes('timeout') 
-          ? 'The request timed out. Please try again.'
-          : errorMessage.includes('network')
-          ? 'Network error. Please check your connection.'
-          : 'An error occurred while processing your message.',
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
-      });
     } finally {
-      // Always clean up loading state
       setIsLoading(false);
       setCurrentRequestId(null);
-      
-      console.log('🧹 handleSendMessage cleanup completed');
+      setActiveStreamId(null);
+      streamAbortControllerRef.current = null;
     }
   };
+
+  // Enhanced stop streaming function
+  const handleStopStreaming = useCallback(() => {
+    console.log('🛑 Stopping current stream');
+    
+    if (activeStreamId) {
+      chatService.stopStream(activeStreamId);
+    } else {
+      chatService.stopAllStreams();
+    }
+    
+    if (streamAbortControllerRef.current) {
+      streamAbortControllerRef.current.abort();
+    }
+    
+    setIsLoading(false);
+    setActiveStreamId(null);
+    
+    // Update the last message to show stopped state
+    setMessages(currentMessages => {
+      const updatedMessages = [...currentMessages];
+      const lastMessage = updatedMessages[updatedMessages.length - 1];
+      
+      if (lastMessage && lastMessage.role === "assistant" && lastMessage.isGenerating) {
+        lastMessage.isGenerating = false;
+        lastMessage.processingState = "Stopped by user";
+        lastMessage.metadata.stopped = true;
+        lastMessage.metadata.stopTime = Date.now();
+      }
+      
+      return updatedMessages;
+    });
+  }, [activeStreamId]);
+
+  // Enhanced retry function
+  const handleRetryMessage = useCallback((messageIndex) => {
+    console.log('🔄 Retrying message at index:', messageIndex);
+    
+    // Find the user message that triggered this response
+    const userMessage = messages[messageIndex - 1];
+    if (userMessage && userMessage.role === 'user') {
+      // Remove the failed assistant message
+      const updatedMessages = messages.slice(0, messageIndex);
+      setMessages(updatedMessages);
+      
+      // Retry with the same content
+      handleSendMessage(userMessage.content);
+    }
+  }, [messages, handleSendMessage]);
 
   const handleSelectSession = async (sessionId) => {
     setError(null);
     setIsLoading(true);
-    
-    // Clean up any accumulated content from previous conversations
-    messageContentRef.current.clear();
     
     try {
       // Fetch messages for this session
@@ -633,9 +651,6 @@ const ChatPage = () => {
   const handleNewSession = async (force = false) => {
     setError(null);
     setIsLoading(true);
-    
-    // Clean up any accumulated content from previous conversations
-    messageContentRef.current.clear();
     
     // Check if there's already an empty conversation we can reuse
     if (!force) {
@@ -991,8 +1006,44 @@ const ChatPage = () => {
 
   return (
     <Box h="100vh" flexDirection="column">
+      {/* Header with sidebar toggle */}
+      <Box
+        bg={headerBg}
+        borderBottomWidth="1px"
+        borderBottomColor={borderColor}
+        px={4}
+        py={2}
+        display="flex"
+        alignItems="center"
+        justifyContent="space-between"
+        zIndex="3"
+      >
+        <HStack spacing={3}>
+          <IconButton
+            icon={<PanelLeft size={20} />}
+            variant="ghost"
+            size="sm"
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            aria-label="Toggle sidebar"
+            color={textColor}
+          />
+          <Text fontSize="lg" fontWeight="semibold" color={textColor}>
+            RegulAIte
+          </Text>
+        </HStack>
+        
+        {/* Optional: Add session info or controls here */}
+        {activeStreamId && (
+          <HStack spacing={2}>
+            <Spinner size="sm" color={accentColor} />
+            <Text fontSize="sm" color={secondaryTextColor}>
+              Processing...
+            </Text>
+          </HStack>
+        )}
+      </Box>
             
-      <Flex flex="1" h="100vh" overflow="hidden">
+      <Flex flex="1" h="calc(100vh - 60px)" overflow="hidden">
         {/* Chat history sidebar */}
         <Box
           w={isSidebarOpen ? { base: "full", md: "300px" } : "0px"}
@@ -1065,56 +1116,54 @@ const ChatPage = () => {
             </Box>
           )}
           
-          {/* Message area */}
-          <VStack 
-            spacing={4} 
-            flex="1" 
-            overflowY="auto" 
-            p={6} 
-            align="stretch"
-            pb="120px"
-          >
-            {/* Welcome header for new chats - Simplified */}
-            {messages.length <= 1 && (
-              <Box textAlign="center" my={8}>
-                <Heading as="h2" size="lg" mb={4} color={textColor}>
-                  How can I help you today?
-                </Heading>
-                <Text color={secondaryTextColor} mb={6}>
-                  Ask me about governance, risk, and compliance
-                </Text>
-                
-                {/* Suggested questions - Simplified */}
-                <VStack spacing={2} maxW="md" mx="auto">
-                  {suggestedQuestions.slice(0, 3).map((question, index) => (
-                    <Button
-                      key={index}
-                      size="sm"
-                      variant="outline"
-                      width="full"
-                      onClick={() => handleSuggestedQuestion(question)}
-                      textAlign="left"
-                      justifyContent="flex-start"
-                    >
-                      {question}
-                    </Button>
-                  ))}
-                </VStack>
-              </Box>
-            )}
-            
-            {/* Messages */}
-            {messages.map((message, index) => (
-              <ChatMessage 
-                key={index} 
-                message={message} 
-                isLoading={isLoading && index === messages.length - 1}
-              />
-            ))}
-            
-            {/* Invisible element to scroll to */}
-            <Box ref={messagesEndRef} />
-          </VStack>
+          {/* Welcome header for new chats - Simplified */}
+          {messages.length <= 1 && (
+            <Box textAlign="center" my={8} px={6}>
+              <Heading as="h2" size="lg" mb={4} color={textColor}>
+                How can I help you today?
+              </Heading>
+              <Text color={secondaryTextColor} mb={6}>
+                Ask me about governance, risk, and compliance
+              </Text>
+              
+              {/* Suggested questions - Simplified */}
+              <VStack spacing={2} maxW="md" mx="auto">
+                {suggestedQuestions.slice(0, 3).map((question, index) => (
+                  <Button
+                    key={index}
+                    size="sm"
+                    variant="outline"
+                    width="full"
+                    onClick={() => handleSuggestedQuestion(question)}
+                    textAlign="left"
+                    justifyContent="flex-start"
+                  >
+                    {question}
+                  </Button>
+                ))}
+              </VStack>
+            </Box>
+          )}
+          
+          {/* Chat Container with new component hierarchy */}
+          <ChatContainer
+            messages={messages}
+            isLoading={isLoading}
+            onRetry={handleRetryMessage}
+            onStop={handleStopStreaming}
+          />
+          
+          {/* Streaming Stats Display */}
+          {activeStreamId && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="text-xs text-gray-500 text-center p-2"
+            >
+              Active Stream: {activeStreamId} | 
+              Active Streams: {chatService.getStreamingStats().activeStreams}
+            </motion.div>
+          )}
           
           {/* Fixed chat input area at bottom */}
           <Box
@@ -1128,10 +1177,12 @@ const ChatPage = () => {
             zIndex="1"
             transition="left 0.3s"
           >
-            <ChatControls 
+            <MessageInput
               onSendMessage={handleSendMessage}
               disabled={isLoading}
-              reasoningNodeId={reasoningNodeId}
+              placeholder={isLoading ? "AI is thinking..." : "Type your message..."}
+              showStopButton={isLoading && activeStreamId}
+              onStop={handleStopStreaming}
             />
           </Box>
         </Flex>

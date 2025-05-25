@@ -20,7 +20,7 @@ async def test_autonomous_agent():
             "model": "gpt-4",
             "session_id": "test_session",
             "include_context": True,
-            "response_format": "text"
+            "response_format": "markdown"
         }
         
         # Test autonomous processing
@@ -35,6 +35,10 @@ async def test_autonomous_agent():
         print(f'Agent used: {response.get("agent_used")}')
         print(f'Context used: {response.get("context_used")}')
         print(f'Message length: {len(response.get("message", ""))} characters')
+        print('\n📝 Response content:')
+        print('=' * 80)
+        print(response.get("message", ""))
+        print('=' * 80)
         
         return True
         

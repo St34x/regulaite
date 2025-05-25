@@ -8,10 +8,12 @@ from typing import Dict, List, Optional, Any, Union, Callable
 import logging
 import json
 import asyncio
+import time
 
 from .agent import Agent, AgentResponse, Query
 from .query_parser import ParsedQuery, QueryParser
 from .tool_registry import ToolRegistry
+from .response_generator import ResponseGenerator
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -53,6 +55,49 @@ class RAGAgent(Agent):
         # Register standard RAG tools
         self._register_standard_tools()
         
+        # Step tracking for streaming
+        self.step_callback = None
+        self.current_execution_id = None
+        
+    def set_step_callback(self, callback: Callable, execution_id: str = None):
+        """
+        Set a callback function to receive step updates during processing.
+        
+        Args:
+            callback: Function to call with step updates
+            execution_id: Optional execution ID for tracking
+        """
+        self.step_callback = callback
+        self.current_execution_id = execution_id
+        
+    async def _emit_step(self, step_name: str, message: str, details: str = None, progress: float = None):
+        """
+        Emit a processing step update.
+        
+        Args:
+            step_name: Name/ID of the processing step
+            message: Human-readable message describing the step
+            details: Optional additional details
+            progress: Optional progress percentage (0-100)
+        """
+        if self.step_callback:
+            step_data = {
+                "step": step_name,
+                "message": message,
+                "details": details,
+                "progress": progress,
+                "timestamp": time.time(),
+                "execution_id": self.current_execution_id
+            }
+            
+            try:
+                if asyncio.iscoroutinefunction(self.step_callback):
+                    await self.step_callback(step_data)
+                else:
+                    self.step_callback(step_data)
+            except Exception as e:
+                self.logger.error(f"Error in step callback: {e}")
+        
     def _register_standard_tools(self):
         """Register standard tools for the RAG agent."""
         # This would register tools like document retrieval, query reformulation, etc.
@@ -74,6 +119,7 @@ class RAGAgent(Agent):
             query = Query(query_text=query)
         
         if not isinstance(query, ParsedQuery):
+            await self._emit_step("query_parsing", "Parsing and analyzing your query...")
             parsed_query = await self.query_parser.parse(query)
         else:
             parsed_query = query
@@ -88,17 +134,25 @@ class RAGAgent(Agent):
         enhanced_query = parsed_query.query_text
         
         # Step 1: Select and execute relevant tools FIRST (before RAG)
+        await self._emit_step("tool_selection", "Selecting appropriate tools for your query...", progress=10)
+        
         # Tools can help enhance the query, extract entities, or provide additional context
         tool_ids = await self.tool_registry.select_tools(parsed_query.query_text)
         self.logger.info(f"Selected tools: {tool_ids}")
         
-        for tool_id in tool_ids:
+        if tool_ids:
+            await self._emit_step("tool_execution", f"Executing {len(tool_ids)} specialized tools...", 
+                                f"Tools: {', '.join(tool_ids)}", progress=25)
+        
+        for i, tool_id in enumerate(tool_ids):
             tool = self.tool_registry.get_tool(tool_id)
             if tool:
                 try:
                     # Execute the tool with just the query parameter
                     # Most tools expect a 'query' parameter
                     self.logger.info(f"Executing tool: {tool_id}")
+                    await self._emit_step("tool_execution", f"Running {tool_id}...", 
+                                        f"Tool {i+1} of {len(tool_ids)}")
                     
                     # All tools in our system are async, so await them properly
                     result = await tool(query=parsed_query.query_text)
@@ -119,147 +173,194 @@ class RAGAgent(Agent):
                     
                     self.logger.info(f"Tool {tool_id} execution successful")
                     
-                    # Use tool results to enhance the query for RAG
-                    if tool_id == "query_reformulation" and isinstance(result, dict):
-                        reformulations = result.get("reformulations", [])
-                        if reformulations:
-                            # Use the best reformulation for RAG
-                            enhanced_query = reformulations[0]
-                            self.logger.info(f"Enhanced query with reformulation: {enhanced_query}")
-                    
-                    elif tool_id == "extract_search_entities" and isinstance(result, dict):
-                        # Use extracted entities to enhance the search
-                        entities = result
-                        entity_terms = []
-                        for entity_type, entity_list in entities.items():
-                            if entity_list and entity_type in ['keywords', 'regulations', 'organizations']:
-                                entity_terms.extend(entity_list)
-                        
-                        if entity_terms:
-                            # Add important entities to the query for better retrieval
-                            enhanced_query = f"{parsed_query.query_text} {' '.join(entity_terms[:5])}"
-                            self.logger.info(f"Enhanced query with entities: {enhanced_query}")
+                    # If the tool returned context or sources, add them
+                    if isinstance(result, dict):
+                        if "context" in result:
+                            context.extend(result["context"])
+                        if "sources" in result:
+                            sources.extend(result["sources"])
+                        if "enhanced_query" in result:
+                            enhanced_query = result["enhanced_query"]
                             
                 except Exception as e:
                     self.logger.error(f"Error executing tool {tool_id}: {str(e)}")
                     tool_results.append({
                         "tool_id": tool_id,
-                        "result": None,
-                        "success": False,
-                        "error": str(e)
+                        "error": str(e),
+                        "success": False
                     })
+                    await self._emit_step("tool_error", f"Tool {tool_id} encountered an error", str(e))
         
-        # Step 2: Retrieve relevant context using enhanced query (after tools)
-        if self.retrieval_system and getattr(parsed_query, 'category', None) != 'system':
-            try:
-                self.logger.info(f"Retrieving context from RAG system using enhanced query: {enhanced_query}")
+        # Step 2: RAG Processing - Retrieve relevant context
+        await self._emit_step("context_retrieval", "Searching knowledge base for relevant information...", 
+                            progress=50)
+        
+        try:
+            # Use the enhanced query for better retrieval
+            retrieval_query = enhanced_query if enhanced_query != parsed_query.query_text else parsed_query.query_text
+            
+            # Actually call the RAG retrieval system
+            if self.retrieval_system:
+                self.logger.info(f"Calling RAG retrieval system with query: {retrieval_query}")
                 retrieval_result = await self.retrieval_system.retrieve(
-                    enhanced_query,  # Use enhanced query instead of original
+                    query=retrieval_query,
                     top_k=self.max_sources
                 )
                 
-                if retrieval_result:
-                    if isinstance(retrieval_result, dict) and "results" in retrieval_result:
-                        # Handle the case where retrieval returns a dict with results
-                        context = retrieval_result["results"]
-                        if "sources" in retrieval_result:
-                            sources = retrieval_result["sources"]
-                    elif isinstance(retrieval_result, list):
-                        # Handle the case where retrieval returns a list directly
-                        context = retrieval_result
-                        
-                    self.logger.info(f"Retrieved {len(context)} context items")
-            except Exception as e:
-                self.logger.error(f"Error retrieving context: {str(e)}")
-        
-        # Step 3: Generate response using LLM with context and tool results
-        response_content = ""
-        if self.llm_client:
-            try:
-                # Detect language from the original query
-                from .integrations.llm_integration import detect_language, get_language_instruction
-                detected_language = detect_language(parsed_query.query_text)
-                language_instruction = get_language_instruction(detected_language)
+                # Extract context and sources from retrieval result
+                rag_context = retrieval_result.get("results", [])
+                rag_sources = retrieval_result.get("sources", [])
                 
-                self.logger.info(f"RAG Agent detected language: {detected_language} for original query: {parsed_query.query_text}")
-                
-                # Prepare context string
-                context_str = ""
-                if context:
-                    context_str = "\n\n".join([
-                        f"Context {i+1}:\n{ctx}" 
-                        for i, ctx in enumerate(context)
-                    ])
-                
-                # Prepare tool results string
-                tools_str = ""
-                successful_tools = [tr for tr in tool_results if tr["success"]]
-                if successful_tools:
-                    tools_str = "\n\n".join([
-                        f"Tool {tr['tool_id']} result:\n{json.dumps(tr['result'])}"
-                        for tr in successful_tools
-                    ])
-                
-                # Prepare the prompt
-                context_part = ""
-                if context_str:
-                    context_part = f"Context:\n{context_str}\n\n"
-                
-                tools_part = ""
-                if tools_str:
-                    tools_part = f"Tool Analysis Results:\n{tools_str}\n\n"
-                
-                prompt = f"""
-                Original Query: {parsed_query.query_text}
-                
-                {tools_part}{context_part}Please provide a helpful response to the query based on the provided information.
-                If the context doesn't contain relevant information, say so and provide a general response.
-                If you're using information from the context, cite the relevant context numbers.
-                Consider any tool analysis results when crafting your response.
-                """
-                
-                # Call the LLM with explicit language instruction and disable auto-detection
-                self.logger.info("Generating response with LLM")
-                llm_response = await self.llm_client.generate(
-                    prompt, 
-                    system_message=language_instruction,
-                    auto_language_detection=False  # Disable auto-detection since we're providing explicit instruction
-                )
-                
-                if llm_response:
-                    response_content = llm_response
-                else:
-                    response_content = "I wasn't able to generate a response. Please try again."
-            except Exception as e:
-                self.logger.error(f"Error generating response with LLM: {str(e)}")
-                response_content = "I encountered an error while generating a response. Please try again."
-        else:
-            # Fallback if no LLM client is available
-            if context:
-                response_content = (
-                    f"I found {len(context)} relevant documents for your query '{parsed_query.query_text}'. "
-                    f"However, I cannot provide a detailed analysis as the language model is not available. "
-                    f"Please check the system configuration."
-                )
+                self.logger.info(f"RAG retrieval returned {len(rag_context)} context items and {len(rag_sources)} sources")
             else:
-                response_content = (
-                    f"I processed your query '{parsed_query.query_text}' but couldn't find relevant information "
-                    f"and the language model is not available for generating a response. "
-                    f"Please check the system configuration or try a different query."
-                )
+                self.logger.warning("No retrieval system available, using empty context")
+                rag_context = []
+                rag_sources = []
+            
+            # Add any context from tools
+            if context:
+                rag_context.extend(context)
+            if sources:
+                rag_sources.extend(sources)
+                
+            await self._emit_step("context_analysis", f"Analyzing {len(rag_context)} relevant documents...", 
+                                f"Found {len(rag_sources)} sources", progress=70)
+            
+        except Exception as e:
+            self.logger.error(f"Error in RAG retrieval: {str(e)}")
+            await self._emit_step("retrieval_error", "Error during knowledge base search", str(e))
+            rag_context = []
+            rag_sources = []
         
-        # Create the final response
-        response = AgentResponse(
-            content=response_content,
-            tools_used=[tr["tool_id"] for tr in tool_results if tr["success"]],
-            context_used=len(context) > 0,
-            metadata={
-                "sources": sources,
-                "context_count": len(context),
-                "tool_count": len([tr for tr in tool_results if tr["success"]]),
-                "enhanced_query": enhanced_query,
-                "tool_results": tool_results
-            }
-        )
+        # Step 3: Response Generation
+        await self._emit_step("response_generation", "Generating comprehensive response...", 
+                            "Combining retrieved information with AI reasoning", progress=85)
         
-        return response 
+        try:
+            # Import LLM integration
+            from .integrations.llm_integration import get_llm_integration
+            
+            # Get LLM client
+            llm_client = get_llm_integration(model="gpt-4")
+            
+            # Prepare context for the LLM
+            context_text = ""
+            if rag_context:
+                context_text = "\n\n".join([str(ctx) for ctx in rag_context])
+            
+            # Prepare tool results summary
+            tools_summary = ""
+            if tool_results:
+                successful_tools = [r for r in tool_results if r.get('success')]
+                if successful_tools:
+                    tools_summary = f"\n\nI used {len(successful_tools)} specialized tools: {', '.join([r['tool_id'] for r in successful_tools])}"
+            
+            # Create a comprehensive prompt for the LLM
+            system_prompt = """You are RegulAIte, an AI assistant specialized in regulatory compliance, cybersecurity, and governance. 
+
+Your role is to provide accurate, helpful, and comprehensive responses based on the user's query and any available context or tool results.
+
+CRITICAL FORMATTING REQUIREMENTS:
+- ALWAYS start your response with a markdown header (## or ###), never with plain text
+- Use proper markdown syntax throughout your entire response
+- Ensure clean separation between sections with proper spacing
+- Never mix plain text with markdown headers in the same paragraph
+
+Response Structure Guidelines:
+- Always structure your responses with clear sections using markdown headers (##)
+- Start with a brief summary or key points if the topic is complex
+- Use bullet points, numbered lists, and formatting to improve readability
+- Include specific examples or actionable recommendations when relevant
+- If discussing regulations or compliance, organize by categories or requirements
+- For technical topics, provide both high-level overview and detailed explanations
+
+Content Guidelines:
+- Be precise and professional in your responses
+- If you have relevant context or sources, reference them appropriately
+- If you used specialized tools, mention how they helped inform your response
+- Provide actionable insights when possible
+- If you're uncertain about something, acknowledge it clearly
+- Respond in the same language as the user's query
+- Use proper markdown formatting for better readability
+
+MANDATORY Structure for ALL responses:
+## [Main Topic/Summary]
+[Brief overview or key points]
+
+## [Detailed Analysis/Requirements/Content]
+[Main content with subsections as needed]
+
+## [Recommendations/Next Steps]
+[Actionable recommendations when applicable]
+
+## [Important Considerations/Limitations]
+[Risks, limitations, or additional factors when relevant]
+
+Remember: NEVER start with plain text - ALWAYS begin with a markdown header (##)."""
+
+            # Build the user prompt with context
+            user_prompt = f"User Query: {parsed_query.query_text}"
+            
+            if context_text:
+                user_prompt += f"\n\nRelevant Context:\n{context_text}"
+            
+            if tools_summary:
+                user_prompt += f"\n\nTool Analysis:{tools_summary}"
+                
+            if tool_results:
+                # Add detailed tool results if available
+                tool_details = []
+                for result in tool_results:
+                    if result.get('success') and result.get('result'):
+                        tool_details.append(f"- {result['tool_id']}: {str(result['result'])[:200]}...")
+                if tool_details:
+                    user_prompt += f"\n\nDetailed Tool Results:\n" + "\n".join(tool_details)
+            
+            user_prompt += f"\n\nPlease provide a comprehensive, well-structured response to the user's query using proper markdown formatting with clear sections and organization."
+            
+            # Generate response using LLM
+            await self._emit_step("llm_generation", "Generating AI response...", 
+                                f"Using {llm_client.model} to process query and context")
+            
+            response_content = await llm_client.generate(
+                prompt=user_prompt,
+                system_message=system_prompt,
+                temperature=0.7,
+                max_tokens=2048
+            )
+            
+            # Ensure we have a valid response
+            if not response_content or not response_content.strip():
+                response_content = "I apologize, but I wasn't able to generate a meaningful response to your query. Please try rephrasing your question."
+            
+            # Create the agent response with all collected information
+            agent_response = AgentResponse(
+                content=response_content,
+                tools_used=[r["tool_id"] for r in tool_results if r.get("success")],
+                context_used=len(rag_context) > 0,
+                sources=rag_sources,
+                metadata={
+                    "tool_results": tool_results,
+                    "context_count": len(rag_context),
+                    "enhanced_query": enhanced_query,
+                    "processing_time": time.time(),
+                    "llm_model": llm_client.model
+                }
+            )
+            
+            await self._emit_step("completion", "Response generation completed successfully!", 
+                                f"Generated {len(response_content)} character response", progress=100)
+            
+            return agent_response
+            
+        except Exception as e:
+            self.logger.error(f"Error in response generation: {str(e)}")
+            await self._emit_step("generation_error", "Error during response generation", str(e))
+            
+            # Return a fallback response
+            return AgentResponse(
+                content=f"I apologize, but I encountered an error while processing your query: {str(e)}",
+                tools_used=[],
+                context_used=False,
+                error=True
+            ) 

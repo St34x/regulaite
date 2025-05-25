@@ -27,10 +27,10 @@ import ModelParamsSelector from './ModelParamsSelector';
  * Advanced settings component for autonomous agent and LLM parameters
  */
 const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings = {} }) => {
-  // Default settings - never changes
+  // Default settings - agents always enabled
   const defaultSettings = {
     agent: {
-      use_agent: true
+      use_agent: true  // Always true, no user control
     },
     llm: {
       model: 'gpt-4',
@@ -42,8 +42,7 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
     }
   };
   
-  // Local state
-  const [agentSettings, setAgentSettings] = useState({...defaultSettings.agent});
+  // Local state - only LLM settings are configurable
   const [llmSettings, setLlmSettings] = useState({...defaultSettings.llm});
   
   // Colors
@@ -53,12 +52,7 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
   // Initialize settings when drawer opens
   useEffect(() => {
     if (isOpen) {
-      // Initialize from props, with fallbacks
-      setAgentSettings({
-        ...defaultSettings.agent,
-        ...(initialSettings.agent || {})
-      });
-      
+      // Initialize LLM settings from props, with fallbacks
       setLlmSettings({
         ...defaultSettings.llm,
         ...(initialSettings.llm || {})
@@ -68,9 +62,9 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
   
   // Handle Apply button click
   const handleApply = () => {
-    // Create a new combined settings object
+    // Create a new combined settings object with agents always enabled
     const newSettings = {
-      agent: agentSettings,
+      agent: { use_agent: true },  // Always enabled
       llm: llmSettings
     };
     
@@ -83,20 +77,17 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
 
   // Handle Reset button click
   const handleReset = () => {
-    // Reset to defaults
-    setAgentSettings({...defaultSettings.agent});
+    // Reset LLM settings to defaults, keep agents enabled
     setLlmSettings({...defaultSettings.llm});
     
-    // Apply the defaults
-    onSettingsChange({...defaultSettings});
+    // Apply the defaults with agents always enabled
+    onSettingsChange({
+      agent: { use_agent: true },  // Always enabled
+      llm: {...defaultSettings.llm}
+    });
     
     // Close the drawer
     onClose();
-  };
-  
-  // Agent selector only updates local state
-  const handleAgentChange = (newAgentSettings) => {
-    setAgentSettings(newAgentSettings);
   };
   
   // Model parameters only update local state
@@ -124,17 +115,17 @@ const AdvancedSettings = ({ isOpen, onClose, onSettingsChange, initialSettings =
         <DrawerBody>
           <Tabs colorScheme="purple" variant="enclosed">
             <TabList>
-              <Tab>Autonomous Agent</Tab>
+              <Tab>Agent Status</Tab>
               <Tab>Model Parameters</Tab>
             </TabList>
             
             <TabPanels>
-              {/* Agent Settings Tab */}
+              {/* Agent Status Tab - Informational Only */}
               <TabPanel p={3}>
-                <AgentSelector 
-                  onAgentChange={handleAgentChange} 
-                  initialAgent={agentSettings} 
-                />
+                <AgentSelector />
+                <Text fontSize="xs" color={secondaryText} mt={3} fontStyle="italic">
+                  Agents are always enabled to provide the best possible responses.
+                </Text>
               </TabPanel>
               
               {/* Model Parameters Tab */}

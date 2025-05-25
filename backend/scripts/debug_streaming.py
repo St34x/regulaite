@@ -21,7 +21,7 @@ def debug_streaming_response(query="quels risques sont considerés comme critiqu
         "temperature": 0.7,
         "max_tokens": 2048,
         "include_context": True,
-        "use_agent": False
+        "use_agent": True
     }
     
     headers = {"Content-Type": "application/json"}

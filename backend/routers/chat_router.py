@@ -53,7 +53,7 @@ class ChatRequest(BaseModel):
     include_context: bool = Field(True, description="Whether to include RAG context")
     context_query: Optional[str] = Field(None, description="Query to use for retrieving context")
     retrieval_type: Optional[str] = Field("auto", description="Type of retrieval to use: 'hybrid', 'vector', or 'auto' (default)")
-    use_agent: bool = Field(True, description="Whether to use an agent for processing")
+    use_agent: bool = Field(True, description="Whether to use an agent for processing (always enabled)")
     use_tree_reasoning: bool = Field(False, description="Whether to use tree-based reasoning")
     tree_template: Optional[str] = Field(None, description="ID of the decision tree template to use")
     custom_tree: Optional[Dict[str, Any]] = Field(None, description="Custom decision tree for reasoning")
@@ -74,7 +74,7 @@ class ChatResponse(BaseModel):
     """Response for a chat completion."""
     message: str = Field(..., description="Assistant response message")
     model: str = Field(..., description="Model used for generation")
-    agent_used: bool = Field(False, description="Whether an agent was used")
+    agent_used: bool = Field(True, description="Whether an agent was used (always true)")
     tree_reasoning_used: bool = Field(False, description="Whether tree reasoning was used")
     context_used: bool = Field(False, description="Whether context was used")
     session_id: str = Field(..., description="Session ID for chat history")
@@ -549,7 +549,10 @@ You will be provided with context information from various sources. When answeri
         internal_thoughts = None
         assistant_message = ""  # Initialize to ensure it always has a value
 
-        # If agent-based processing is requested
+        # Force agent usage - agents are always enabled
+        request.use_agent = True
+        
+        # If agent-based processing is requested (which is always now)
         if request.use_agent and not request.stream:
             # Agent processing only works with non-streaming requests for now
             try:
@@ -563,7 +566,7 @@ You will be provided with context information from various sources. When answeri
                     "session_id": session_id,
                     "include_context": request.include_context,
                     "context_query": request.context_query,
-                    "response_format": "text"
+                    "response_format": "markdown"
                 }
                 
                 # Process with the agent framework
@@ -642,6 +645,160 @@ You will be provided with context information from various sources. When answeri
                 # Set a fallback error message and fall through to standard RAG processing
                 logger.info("Falling back to standard RAG processing due to agent error")
                 assistant_message = ""  # Reset to trigger standard processing
+                
+        # Enhanced agent streaming support (always enabled)
+        if request.use_agent and request.stream:
+            # Handle streaming agent processing
+            async def generate_agent_stream():
+                try:
+                    # Start streaming response with request tracking
+                    request_start = time.time()
+                    request_id = f"agent_stream_{int(request_start)}_{uuid.uuid4().hex[:8]}"
+                    
+                    yield json.dumps({
+                        "type": "start",
+                        "timestamp": datetime.now().isoformat(),
+                        "request_id": request_id,
+                        "agent_mode": True
+                    }) + "\n"
+                    
+                    # Use the chat integration for agent processing with streaming
+                    chat_integration = get_chat_integration()
+                    
+                    # Set up step callback to stream agent steps
+                    async def step_callback(step_data):
+                        # This callback will be called by the agent during processing
+                        # We need to yield the step data through the generator
+                        nonlocal step_queue
+                        await step_queue.put(step_data)
+                    
+                    # Create a queue to handle step data from the callback
+                    step_queue = asyncio.Queue()
+                    chat_integration.set_step_callback(step_callback)
+                    
+                    # Prepare request data for the chat integration
+                    request_data = {
+                        "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+                        "model": request.model,
+                        "session_id": session_id,
+                        "include_context": request.include_context,
+                        "context_query": request.context_query,
+                        "response_format": "markdown"
+                    }
+                    
+                    # Start agent processing in a task
+                    async def process_agent():
+                        try:
+                            agent_response = await chat_integration.process_chat_request(
+                                request_data=request_data,
+                                use_agent=True
+                            )
+                            await step_queue.put({"type": "agent_complete", "response": agent_response})
+                        except Exception as e:
+                            await step_queue.put({"type": "agent_error", "error": str(e)})
+                    
+                    # Start the agent processing task
+                    agent_task = asyncio.create_task(process_agent())
+                    
+                    # Stream steps as they come in
+                    agent_response = None
+                    while True:
+                        try:
+                            # Wait for step data with timeout
+                            step_data = await asyncio.wait_for(step_queue.get(), timeout=1.0)
+                            
+                            if step_data.get("type") == "agent_complete":
+                                agent_response = step_data.get("response")
+                                break
+                            elif step_data.get("type") == "agent_error":
+                                yield json.dumps({
+                                    "type": "error",
+                                    "message": f"Agent processing failed: {step_data.get('error')}",
+                                    "error_code": "AGENT_ERROR"
+                                }) + "\n"
+                                return
+                            else:
+                                # Regular step data
+                                yield json.dumps({
+                                    "type": "agent_step",
+                                    "step": step_data.get("step"),
+                                    "message": step_data.get("message"),
+                                    "details": step_data.get("details"),
+                                    "progress": step_data.get("progress"),
+                                    "execution_id": step_data.get("execution_id"),
+                                    "timestamp": datetime.now().isoformat()
+                                }) + "\n"
+                                
+                        except asyncio.TimeoutError:
+                            # Check if agent task is still running
+                            if agent_task.done():
+                                break
+                            # Send heartbeat
+                            yield json.dumps({
+                                "type": "processing",
+                                "state": "Agent processing in progress...",
+                                "step": "heartbeat",
+                                "timestamp": datetime.now().isoformat()
+                            }) + "\n"
+                    
+                    # Wait for agent task to complete if not already done
+                    if not agent_task.done():
+                        await agent_task
+                    
+                    if not agent_response:
+                        yield json.dumps({
+                            "type": "error",
+                            "message": "Agent processing completed but no response received",
+                            "error_code": "NO_RESPONSE"
+                        }) + "\n"
+                        return
+                    
+                    if agent_response.get("error"):
+                        yield json.dumps({
+                            "type": "error",
+                            "message": agent_response.get("message", "Agent processing failed"),
+                            "error_code": "AGENT_ERROR"
+                        }) + "\n"
+                        return
+                    
+                    # Stream the final response
+                    assistant_message = agent_response.get("message", "")
+                    
+                    # Send the response as tokens for consistent UI handling
+                    if assistant_message:
+                        # Split into chunks for streaming effect
+                        chunk_size = 10
+                        for i in range(0, len(assistant_message), chunk_size):
+                            chunk = assistant_message[i:i + chunk_size]
+                            yield json.dumps({
+                                "type": "token",
+                                "content": chunk
+                            }) + "\n"
+                            await asyncio.sleep(0.01)  # Small delay for streaming effect
+                    
+                    # Send completion event
+                    yield json.dumps({
+                        "type": "end",
+                        "message": assistant_message,
+                        "model": request.model,
+                        "context_used": agent_response.get("context_used", False),
+                        "session_id": session_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "sources": agent_response.get("sources", []),
+                        "tools_used": agent_response.get("tools_used", []),
+                        "agent_used": True,  # Always true since agents are always enabled
+                        "execution_id": agent_response.get("execution_id")
+                    }) + "\n"
+                    
+                except Exception as e:
+                    logger.error(f"Error in agent streaming: {str(e)}")
+                    yield json.dumps({
+                        "type": "error",
+                        "message": f"Agent streaming error: {str(e)}",
+                        "error_code": "AGENT_STREAM_ERROR"
+                    }) + "\n"
+            
+            return StreamingResponse(generate_agent_stream(), media_type="text/event-stream")
                 
         if not assistant_message:
             # Standard RAG-based processing (used when no agent or agent failed or streaming enabled)
@@ -904,7 +1061,8 @@ You will be provided with context information from various sources. When answeri
                             "sources": sources,
                             "context_quality": context_result.get("context_quality") if context_result else None,
                             "hallucination_risk": context_result.get("hallucination_risk") if context_result else None,
-                            "internal_thoughts": final_internal_thoughts
+                            "internal_thoughts": final_internal_thoughts,
+                            "agent_used": True  # Always true since agents are always enabled
                         }) + "\n"
                         
                         logger.info("Streaming response completed successfully")
@@ -975,7 +1133,7 @@ You will be provided with context information from various sources. When answeri
             return ChatResponse(
                 message=assistant_message,
                 model=request.model,
-                agent_used=request.use_agent,
+                agent_used=True,  # Always true since agents are always enabled
                 tree_reasoning_used=request.use_tree_reasoning,
                 context_used=context_used,
                 session_id=session_id,
@@ -1909,7 +2067,7 @@ async def chat_with_rag(
         include_context=True,  # Always include context for RAG
         context_query=payload.get("context_query"),
         retrieval_type=payload.get("retrieval_type", "auto"),
-        use_agent=payload.get("use_agent", False),  # Disable agent by default to prevent hanging
+        use_agent=True,  # Always enable agents - no user control
         use_tree_reasoning=payload.get("use_tree_reasoning", False),
         tree_template=payload.get("tree_template"),
         custom_tree=payload.get("custom_tree"),

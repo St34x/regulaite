@@ -62,6 +62,7 @@ class AgentResponse(BaseModel):
     content: str
     tools_used: List[str] = Field(default_factory=list)
     context_used: bool = False
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
     confidence: float = 1.0
     thinking: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)

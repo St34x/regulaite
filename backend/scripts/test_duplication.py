@@ -17,7 +17,7 @@ def test_chat_duplication():
         "temperature": 0.7,
         "max_tokens": 2048,
         "include_context": True,
-        "use_agent": False
+        "use_agent": True
     }
     
     headers = {

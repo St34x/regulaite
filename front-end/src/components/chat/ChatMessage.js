@@ -29,35 +29,126 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   const codeBg = useColorModeValue('gray.100', 'gray.700');
   const sourceBg = useColorModeValue('gray.50', 'gray.700');
   
-  // Clean message content
+  // Clean message content - remove any leaked internal thoughts but preserve markdown structure
   const cleanMessageContent = () => {
-    if (message.role === 'user' || !message.content) return message.content;
+    if (!message.content) return '';
     
     let cleanedContent = message.content;
     
     // Remove any internal thoughts tags that might have leaked through
     cleanedContent = cleanedContent.replace(/<internal_thoughts>[\s\S]*?<\/internal_thoughts>/g, '');
-    
-    // Remove malformed internal thoughts patterns
     cleanedContent = cleanedContent.replace(/<internal[^>]*thoughts[^>]*>/g, '');
     cleanedContent = cleanedContent.replace(/<\/internal[^>]*thoughts[^>]*>/g, '');
-    
-    // Remove any orphaned internal_thoughts text
     cleanedContent = cleanedContent.replace(/internal_thoughts/g, '');
     
-    // Only handle basic formatting issues without aggressive duplicate detection
-    // since the backend now handles streaming properly
+    // Preserve double line breaks (paragraph breaks) but clean up excessive spaces
+    cleanedContent = cleanedContent.replace(/\n\n\n+/g, '\n\n'); // Max 2 consecutive newlines
+    cleanedContent = cleanedContent.replace(/ {3,}/g, ' '); // Replace 3+ spaces with single space
+    cleanedContent = cleanedContent.replace(/\t+/g, ' '); // Replace tabs with spaces
     
-    // Clean up excessive whitespace
-    cleanedContent = cleanedContent.replace(/\s+/g, ' ').trim();
-    
-    // Remove multiple consecutive punctuation marks (keep intentional ones)
+    // Remove multiple consecutive punctuation marks
     cleanedContent = cleanedContent.replace(/([.!?])\1{2,}/g, '$1');
     
-    // Fix obvious character repetition (like "aaa" -> "a")
+    // Fix obvious character repetition
     cleanedContent = cleanedContent.replace(/(\w)\1{3,}/g, '$1');
     
-    return cleanedContent;
+    return cleanedContent.trim();
+  };
+
+  // Custom markdown components for better rendering
+  const markdownComponents = {
+    // Custom paragraph component to handle spacing
+    p: ({ children }) => (
+      <Text mb={3} lineHeight="1.7">
+        {children}
+      </Text>
+    ),
+    
+    // Custom heading components
+    h1: ({ children }) => (
+      <Text as="h1" fontSize="2xl" fontWeight="bold" mb={4} mt={6} color={textColor}>
+        {children}
+      </Text>
+    ),
+    h2: ({ children }) => (
+      <Text as="h2" fontSize="xl" fontWeight="semibold" mb={3} mt={5} color={textColor}>
+        {children}
+      </Text>
+    ),
+    h3: ({ children }) => (
+      <Text as="h3" fontSize="lg" fontWeight="semibold" mb={3} mt={4} color={textColor}>
+        {children}
+      </Text>
+    ),
+    
+    // Custom list components
+    ul: ({ children }) => (
+      <Box as="ul" pl={6} mb={3}>
+        {children}
+      </Box>
+    ),
+    ol: ({ children }) => (
+      <Box as="ol" pl={6} mb={3}>
+        {children}
+      </Box>
+    ),
+    li: ({ children }) => (
+      <Text as="li" mb={1} lineHeight="1.6">
+        {children}
+      </Text>
+    ),
+    
+    // Custom code components
+    code: ({ inline, children }) => (
+      <Text
+        as={inline ? 'code' : 'pre'}
+        bg={codeBg}
+        px={inline ? 2 : 4}
+        py={inline ? 1 : 3}
+        borderRadius="md"
+        fontSize="sm"
+        fontFamily="mono"
+        display={inline ? 'inline' : 'block'}
+        overflowX={inline ? 'visible' : 'auto'}
+        mb={inline ? 0 : 3}
+        whiteSpace={inline ? 'nowrap' : 'pre'}
+      >
+        {children}
+      </Text>
+    ),
+    
+    // Custom blockquote component
+    blockquote: ({ children }) => (
+      <Box
+        borderLeft="4px solid"
+        borderLeftColor="gray.300"
+        pl={4}
+        py={2}
+        fontStyle="italic"
+        mb={3}
+        bg={sourceBg}
+        borderRadius="md"
+      >
+        {children}
+      </Box>
+    ),
+    
+    // Custom strong/bold component
+    strong: ({ children }) => (
+      <Text as="strong" fontWeight="bold">
+        {children}
+      </Text>
+    ),
+    
+    // Custom emphasis/italic component
+    em: ({ children }) => (
+      <Text as="em" fontStyle="italic">
+        {children}
+      </Text>
+    ),
+    
+    // Custom break component
+    br: () => <Box height="1em" />
   };
 
   return (
@@ -144,7 +235,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             }
           }}
         >
-          <ReactMarkdown>{cleanMessageContent()}</ReactMarkdown>
+          <ReactMarkdown components={markdownComponents}>{cleanMessageContent()}</ReactMarkdown>
         </Box>
         
         
