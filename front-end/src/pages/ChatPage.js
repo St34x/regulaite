@@ -1032,15 +1032,6 @@ const ChatPage = () => {
           </Text>
         </HStack>
         
-        {/* Optional: Add session info or controls here */}
-        {activeStreamId && (
-          <HStack spacing={2}>
-            <Spinner size="sm" color={accentColor} />
-            <Text fontSize="sm" color={secondaryTextColor}>
-              Processing...
-            </Text>
-          </HStack>
-        )}
       </Box>
             
       <Flex flex="1" h="calc(100vh - 60px)" overflow="hidden">
@@ -1075,24 +1066,7 @@ const ChatPage = () => {
           overflow="hidden"
           bg={chatBg}
         >
-          {/* Simplified Loading Indicator */}
-          {isLoading && (
-            <Box 
-              bg={loadingBg} 
-              borderBottom="1px solid" 
-              borderBottomColor={loadingBorderColor} 
-              px={4} 
-              py={2}
-            >
-              <HStack spacing={2}>
-                <Spinner size="sm" color={accentColor} />
-                <Text fontSize="sm" color={loadingTextColor}>
-                  Processing...
-                </Text>
-              </HStack>
-            </Box>
-          )}
-          
+                   
           {/* Error notification - Simplified */}
           {error && (
             <Box 

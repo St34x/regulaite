@@ -13,7 +13,6 @@ import {
  */
 const LoadingOverlay = ({
   isVisible = false,
-  message = "Processing...",
   subMessage = null,
   zIndex = 1000
 }) => {
@@ -45,14 +44,6 @@ const LoadingOverlay = ({
           thickness="3px"
           speed="0.8s"
         />
-        
-        <Text
-          fontSize="lg"
-          fontWeight="semibold"
-          color={textColor}
-        >
-          {message}
-        </Text>
         
         {subMessage && (
           <Text

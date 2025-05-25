@@ -71,6 +71,41 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
+// Add response interceptor to handle token expiration
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config;
+    
+    // If we get a 401 error and haven't already tried to refresh
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+      
+      try {
+        // Try to refresh the token
+        await authService.refreshToken();
+        
+        // Update the authorization header with the new token
+        const newToken = localStorage.getItem('token');
+        if (newToken) {
+          originalRequest.headers['Authorization'] = `Bearer ${newToken}`;
+        }
+        
+        // Retry the original request
+        return api(originalRequest);
+      } catch (refreshError) {
+        // If refresh fails, redirect to login
+        console.error('Token refresh failed:', refreshError);
+        authService.logout();
+        // Don't redirect here as it might interfere with the chat interface
+        // Let the component handle the authentication state
+      }
+    }
+    
+    return Promise.reject(error);
+  }
+);
+
 /**
  * Service to handle interactions with the chat API
  */

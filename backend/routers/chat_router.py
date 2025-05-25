@@ -354,8 +354,18 @@ async def extract_user_id_from_request(req: Request, provided_user_id: Optional[
                     # Decode token and extract user ID
                     payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
                     user_id = payload.get("sub") or payload.get("user_id")
+                except jwt.ExpiredSignatureError:
+                    logger.warning(f"JWT token has expired - user will need to refresh")
+                    # Don't fail completely, just return None to indicate no valid auth
+                    user_id = None
+                except jwt.InvalidTokenError:
+                    logger.warning(f"Invalid JWT token provided")
+                    # Don't fail completely, just return None to indicate no valid auth
+                    user_id = None
                 except Exception as e:
                     logger.error(f"Error extracting user ID from token: {str(e)}")
+                    # Don't fail completely, just return None to indicate no valid auth
+                    user_id = None
     
     return user_id
 
@@ -776,6 +786,27 @@ You will be provided with context information from various sources. When answeri
                             }) + "\n"
                             await asyncio.sleep(0.01)  # Small delay for streaming effect
                     
+                    # Store the assistant response in chat history
+                    try:
+                        # Create a new database connection for storing the response
+                        stream_conn = await get_db_connection()
+                        stream_cursor = stream_conn.cursor()
+                        
+                        stream_cursor.execute(
+                            """
+                            INSERT INTO chat_history (user_id, session_id, message_text, message_role)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (user_id, session_id, assistant_message, "assistant")
+                        )
+                        stream_conn.commit()
+                        stream_cursor.close()
+                        stream_conn.close()
+                        logger.info(f"Stored agent streaming response in chat history for session {session_id}")
+                    except Exception as e:
+                        logger.error(f"Error storing agent streaming response in chat history: {str(e)}")
+                        # Continue anyway, as this is not critical
+                    
                     # Send completion event
                     yield json.dumps({
                         "type": "end",
@@ -1042,8 +1073,20 @@ You will be provided with context information from various sources. When answeri
                                 (user_id, session_id, cleaned_response, "assistant")
                             )
                             conn.commit()
+                            # Close database connection after storing the response
+                            cursor.close()
+                            conn.close()
+                            logger.info(f"Stored streaming response in chat history for session {session_id}")
                         except Exception as e:
                             logger.error(f"Error storing assistant message in chat history: {str(e)}")
+                            # Ensure connection is closed even on error
+                            try:
+                                if cursor:
+                                    cursor.close()
+                                if conn:
+                                    conn.close()
+                            except:
+                                pass
                         
                         # Extract sources from context result if available
                         sources = []
@@ -1278,13 +1321,16 @@ async def get_chat_sessions(
         offset: Offset for pagination
     """
     try:
-        # Authentication is required for viewing sessions
+        # Authentication is preferred but not required for viewing sessions
         user_id = await extract_user_id_from_request(req, user_id)
         
+        # If no user_id is available, try to continue with a warning but don't fail
         if not user_id:
-            raise HTTPException(
-                status_code=401, 
-                detail="Authentication required to view chat sessions"
+            logger.warning("No user authentication available for viewing chat sessions")
+            # Return empty sessions list instead of failing
+            return ChatSessionsResponse(
+                sessions=[],
+                count=0
             )
 
         conn = await get_db_connection()
