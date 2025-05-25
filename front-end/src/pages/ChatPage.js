@@ -829,8 +829,7 @@ const ChatPage = () => {
       
       // If the session was a fallback session, we don't need to delete from server
       const isFallbackSession = sessionToDelete.is_fallback === true || 
-                                sessionId.startsWith('fallback-') || 
-                                !sessionId.includes('-');
+                                sessionId.startsWith('fallback-');
       
       if (isFallbackSession) {
         console.log('Skipping server delete for fallback session:', sessionId);
