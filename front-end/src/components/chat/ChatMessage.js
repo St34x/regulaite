@@ -31,7 +31,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
   
   // Clean message content
   const cleanMessageContent = () => {
-    if (isUser || !message.content) return message.content;
+    if (message.role === 'user' || !message.content) return message.content;
     
     let cleanedContent = message.content;
     
@@ -45,31 +45,17 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
     // Remove any orphaned internal_thoughts text
     cleanedContent = cleanedContent.replace(/internal_thoughts/g, '');
     
-    // Clean up duplication patterns that can occur during streaming
-    
-    // Pattern 1: Immediate word duplication "word word" -> "word"
-    cleanedContent = cleanedContent.replace(/(\b\w+)\s+\1\b/g, '$1');
-    
-    // Pattern 2: Character-level duplication within words "D'D'après" -> "D'après"  
-    cleanedContent = cleanedContent.replace(/(\w+)('\w+)\1\2/g, '$1$2');
-    
-    // Pattern 3: Partial word duplication "aprèsaprès" -> "après"
-    cleanedContent = cleanedContent.replace(/(\w{3,})\1/g, '$1');
-    
-    // Pattern 4: Complex pattern like "Les risLes risques" -> "Les risques"
-    cleanedContent = cleanedContent.replace(/(\w{3,})\s+\1(\w+)/g, '$1$2');
-    
-    // Pattern 5: Syllable duplication like "sontques sont" -> "sont"
-    cleanedContent = cleanedContent.replace(/(\w+)(\w{3,})\s+\1\s+\2/g, '$1 $2');
-    
-    // Pattern 6: Number duplication like "15 à15 à 25 25" -> "15 à 25"
-    cleanedContent = cleanedContent.replace(/(\d+)\s+à\1\s+à\s+(\d+)\s+\2/g, '$1 à $2');
-    
-    // Pattern 7: Phrase duplication "dans la dans la" -> "dans la"
-    cleanedContent = cleanedContent.replace(/(\w+\s+\w+)\s+\1/g, '$1');
+    // Only handle basic formatting issues without aggressive duplicate detection
+    // since the backend now handles streaming properly
     
     // Clean up excessive whitespace
     cleanedContent = cleanedContent.replace(/\s+/g, ' ').trim();
+    
+    // Remove multiple consecutive punctuation marks (keep intentional ones)
+    cleanedContent = cleanedContent.replace(/([.!?])\1{2,}/g, '$1');
+    
+    // Fix obvious character repetition (like "aaa" -> "a")
+    cleanedContent = cleanedContent.replace(/(\w)\1{3,}/g, '$1');
     
     return cleanedContent;
   };
@@ -104,7 +90,7 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
       
       <Box flex="1" minW={0}>
         {/* Header */}
-        <Flex alignItems="center" gap={2} mb={2}>
+        <Flex alignItems="center" gap={2} mb={2} className={isUser ? '' : 'assistant-message'}>
           <Text fontSize="sm" fontWeight="medium" color={isUser ? 'blue.600' : accentColor}>
             {isUser ? 'You' : 'RegulAIte'}
           </Text>
@@ -120,8 +106,13 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             </Badge>
           )}
           
-          {isLoading && (
-            <Spinner size="xs" color={accentColor} />
+          {/* Processing Status - Simplified */}
+          {isProcessing && (
+            <ProcessingStatus
+              processingState={message.processingState}
+              isProcessing={isProcessing}
+              startTime={message.metadata?.startTime}
+            />
           )}
         </Flex>
         
@@ -156,14 +147,6 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
           <ReactMarkdown>{cleanMessageContent()}</ReactMarkdown>
         </Box>
         
-        {/* Processing Status - Simplified */}
-        {isProcessing && (
-          <ProcessingStatus
-            processingState={message.processingState}
-            isProcessing={isProcessing}
-            startTime={message.metadata?.startTime}
-          />
-        )}
         
         {/* Sources - Simplified */}
         {hasSources && (

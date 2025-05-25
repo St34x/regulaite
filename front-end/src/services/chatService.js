@@ -476,14 +476,9 @@ const chatService = {
                   type: 'agent_progress',
                   data: eventData.data
                 });
-              } else if (eventData.content) {
-                // Direct content in event data (for compatibility)
-                const chunk = eventData.content;
-                fullResponse += chunk;
-                onChunk({
-                  type: 'token',
-                  content: chunk
-                });
+              } else {
+                // Log unexpected event types for debugging
+                console.warn('Unexpected event type:', eventData.type, eventData);
               }
             } catch (e) {
               console.error('Error parsing server event:', e, 'Line:', line);

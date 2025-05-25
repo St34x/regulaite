@@ -27,7 +27,7 @@ import {
 import { InfoIcon } from '@chakra-ui/icons';
 import axios from 'axios';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8090';
 
 /**
  * Component for selecting and configuring LLM parameters

@@ -733,119 +733,115 @@ You will be provided with context information from various sources. When answeri
                             # Advanced token collection with real-time deduplication
                             collected_tokens = []
                             full_response = ""  # Track full accumulated response
-                            internal_thought_content = []
+                            internal_thought_tokens = []
                             in_internal_thoughts = False
-                            last_sent_content = ""  # Track what we've already sent to prevent duplication
+                            
+                            # Heartbeat variables for better streaming responsiveness
+                            heartbeat_interval = 5.0  # Send heartbeat every 5 seconds
+                            last_heartbeat = time.time()
+                            last_chunk_time = time.time()
                             
                             # Process stream chunks with improved logic
                             async for chunk in stream:
-                                if (hasattr(chunk, 'choices') and 
-                                    len(chunk.choices) > 0 and 
-                                    hasattr(chunk.choices[0], 'delta') and 
-                                    hasattr(chunk.choices[0].delta, 'content') and 
-                                    chunk.choices[0].delta.content is not None):
+                                try:
+                                    current_time = time.time()
                                     
-                                    content = chunk.choices[0].delta.content
+                                    # Send periodic heartbeat
+                                    if current_time - last_heartbeat > heartbeat_interval:
+                                        yield json.dumps({
+                                            "type": "processing",
+                                            "state": "Generating response... (receiving data from AI)",
+                                            "step": "generation_active",
+                                            "timestamp": datetime.now().isoformat()
+                                        }) + "\n"
+                                        last_heartbeat = current_time
                                     
-                                    # Skip empty content
-                                    if not content:
-                                        continue
+                                    last_chunk_time = current_time
                                     
-                                    # Accumulate all content for full tracking
-                                    full_response += content
-                                    collected_tokens.append(content)
-                                    
-                                    # Real-time internal thoughts detection
-                                    if "<internal_thoughts>" in content:
-                                        in_internal_thoughts = True
-                                        # Split content at the tag
-                                        parts = content.split("<internal_thoughts>", 1)
-                                        if parts[0]:
-                                            # Send the part before the tag
-                                            new_content = parts[0]
-                                            # Check for duplication against last sent content
-                                            if not last_sent_content or not new_content.startswith(last_sent_content[-min(len(last_sent_content), 50):]):
+                                    if (hasattr(chunk, 'choices') and 
+                                        len(chunk.choices) > 0 and 
+                                        hasattr(chunk.choices[0], 'delta') and 
+                                        hasattr(chunk.choices[0].delta, 'content') and 
+                                        chunk.choices[0].delta.content is not None):
+                                        
+                                        content = chunk.choices[0].delta.content
+                                        
+                                        # Skip empty content
+                                        if not content:
+                                            continue
+                                        
+                                        # CRITICAL FIX: Remove all duplicate detection logic that was causing issues
+                                        # The OpenAI API should not send duplicates, so we don't need to check
+                                        
+                                        # Accumulate all content for full tracking
+                                        full_response += content
+                                        
+                                        # Track if we're inside internal thoughts tags
+                                        if "<internal_thoughts>" in content:
+                                            in_internal_thoughts = True
+                                            parts = content.split("<internal_thoughts>", 1)
+                                            if parts[0]:
+                                                collected_tokens.append(parts[0])
                                                 yield json.dumps({
                                                     "type": "token",
-                                                    "content": new_content
+                                                    "content": parts[0]
                                                 }) + "\n"
-                                                last_sent_content += new_content
-                                        
-                                        # Start collecting internal thoughts
-                                        if len(parts) > 1:
-                                            internal_thought_content.append(parts[1])
-                                        continue
-                                    
-                                    elif "</internal_thoughts>" in content and in_internal_thoughts:
-                                        # End of internal thoughts
-                                        parts = content.split("</internal_thoughts>", 1)
-                                        if parts[0]:
-                                            internal_thought_content.append(parts[0])
-                                        
-                                        # Send internal thoughts as processing update
-                                        if internal_thought_content:
-                                            thoughts_text = "".join(internal_thought_content)
+                                            if len(parts) > 1 and parts[1]:
+                                                internal_thought_tokens.append(parts[1])
+                                            continue
+                                            
+                                        if "</internal_thoughts>" in content and in_internal_thoughts:
+                                            parts = content.split("</internal_thoughts>", 1)
+                                            if parts[0]:
+                                                internal_thought_tokens.append(parts[0])
+                                            if len(parts) > 1 and parts[1]:
+                                                collected_tokens.append(parts[1])
+                                                yield json.dumps({
+                                                    "type": "token", 
+                                                    "content": parts[1]
+                                                }) + "\n"
+                                            in_internal_thoughts = False
+                                            
+                                            # Send processing update with current internal thoughts
+                                            current_thoughts = "".join(internal_thought_tokens)
                                             yield json.dumps({
                                                 "type": "processing",
                                                 "state": "Processing internal reasoning",
                                                 "step": "reasoning",
-                                                "internal_thoughts": thoughts_text,
+                                                "internal_thoughts": current_thoughts,
                                                 "timestamp": datetime.now().isoformat()
                                             }) + "\n"
-                                        
-                                        in_internal_thoughts = False
-                                        
-                                        # Send content after the closing tag
-                                        if len(parts) > 1 and parts[1]:
-                                            new_content = parts[1]
-                                            # Check for duplication
-                                            if not last_sent_content or not new_content.startswith(last_sent_content[-min(len(last_sent_content), 50):]):
+                                            continue
+                                            
+                                        if in_internal_thoughts:
+                                            internal_thought_tokens.append(content)
+                                            if len(internal_thought_tokens) % 30 == 0:
+                                                current_thoughts = "".join(internal_thought_tokens)
                                                 yield json.dumps({
-                                                    "type": "token",
-                                                    "content": new_content
+                                                    "type": "processing",
+                                                    "state": "Developing reasoning and analysis",
+                                                    "step": "reasoning", 
+                                                    "internal_thoughts": current_thoughts,
+                                                    "timestamp": datetime.now().isoformat()
                                                 }) + "\n"
-                                                last_sent_content += new_content
-                                        continue
-                                    
-                                    elif in_internal_thoughts:
-                                        # Accumulate internal thoughts content
-                                        internal_thought_content.append(content)
-                                        continue
-                                    
-                                    else:
-                                        # Normal content - apply real-time deduplication
-                                        # Check if this content would create a duplication
-                                        if last_sent_content:
-                                            # Look for duplications where the new content starts with the end of the last sent content
-                                            overlap_check_length = min(len(last_sent_content), 100)
-                                            recent_content = last_sent_content[-overlap_check_length:] if overlap_check_length > 0 else ""
-                                            
-                                            # If the new content is a repetition of recent content, skip it
-                                            if recent_content and content in recent_content:
-                                                logger.debug(f"Skipping duplicate content: '{content}'")
-                                                continue
-                                                
-                                            # Check for partial overlaps at word boundaries
-                                            words_recent = recent_content.split()
-                                            words_new = content.split()
-                                            
-                                            # If new content starts with the same words as recent content ends, it might be a duplication
-                                            if (len(words_recent) > 0 and len(words_new) > 0 and 
-                                                len(words_recent) >= 2 and len(words_new) >= 2):
-                                                
-                                                # Check if last 2-3 words of recent content match start of new content
-                                                for check_len in [3, 2]:
-                                                    if (len(words_recent) >= check_len and len(words_new) >= check_len and
-                                                        words_recent[-check_len:] == words_new[:check_len]):
-                                                        logger.debug(f"Skipping overlapping duplicate: '{content}'")
-                                                        continue
+                                            continue
                                         
-                                        # Content passes deduplication checks - send it
+                                        # Normal content - add to collected tokens and send immediately
+                                        collected_tokens.append(content)
                                         yield json.dumps({
                                             "type": "token",
                                             "content": content
                                         }) + "\n"
-                                        last_sent_content += content
+                                            
+                                except Exception as chunk_error:
+                                    logger.error(f"Error processing chunk: {str(chunk_error)}")
+                                    yield json.dumps({
+                                        "type": "processing",
+                                        "state": "Recovering from chunk processing error...",
+                                        "step": "error_recovery",
+                                        "timestamp": datetime.now().isoformat()
+                                    }) + "\n"
+                                    continue
                             
                             logger.info(f"OpenAI streaming completed successfully")
                             
@@ -859,12 +855,12 @@ You will be provided with context information from various sources. When answeri
                             return
                         
                         # Process the final accumulated response
-                        final_response = full_response
+                        final_response = "".join(collected_tokens)
                         final_internal_thoughts = None
                         
-                        # Extract internal thoughts from full response if any were missed
-                        if internal_thought_content:
-                            final_internal_thoughts = "".join(internal_thought_content)
+                        # Extract internal thoughts from collected tokens if any were found
+                        if internal_thought_tokens:
+                            final_internal_thoughts = "".join(internal_thought_tokens)
                         else:
                             # Fallback: extract from full response
                             internal_thoughts_match = re.search(r'<internal_thoughts>(.*?)</internal_thoughts>', final_response, re.DOTALL)
@@ -875,37 +871,7 @@ You will be provided with context information from various sources. When answeri
                         cleaned_response = re.sub(r'<internal_thoughts>.*?</internal_thoughts>', '', final_response, flags=re.DOTALL).strip()
                         cleaned_response = re.sub(r'</?internal[^>]*thoughts[^>]*>', '', cleaned_response).strip()
                         
-                        # Advanced deduplication on the final response
-                        # This handles any remaining issues that real-time deduplication missed
-                        words = cleaned_response.split()
-                        deduplicated_words = []
-                        i = 0
-                        
-                        while i < len(words):
-                            current_word = words[i]
-                            
-                            # Look ahead for potential duplications
-                            skip_count = 0
-                            
-                            # Check for immediate word repetition
-                            if i + 1 < len(words) and words[i] == words[i + 1]:
-                                skip_count = 1
-                            
-                            # Check for phrase repetitions (2-3 words)
-                            elif i + 3 < len(words):
-                                # Check 2-word phrase repetition
-                                if (words[i:i+2] == words[i+2:i+4]):
-                                    skip_count = 2
-                                # Check 3-word phrase repetition
-                                elif i + 5 < len(words) and words[i:i+3] == words[i+3:i+6]:
-                                    skip_count = 3
-                            
-                            deduplicated_words.append(current_word)
-                            i += 1 + skip_count
-                        
-                        cleaned_response = ' '.join(deduplicated_words).strip()
-                        
-                        # Additional cleanup for punctuation duplications
+                        # Basic cleanup for any remaining formatting issues
                         cleaned_response = re.sub(r'([.!?])\s*\1+', r'\1', cleaned_response)  # Remove repeated punctuation
                         cleaned_response = re.sub(r'\s+', ' ', cleaned_response).strip()  # Clean excessive whitespace
                         
