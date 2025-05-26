@@ -10,20 +10,6 @@ import sys
 import os
 from pathlib import Path
 
-# Add the backend directory to the path so we can import from it
-backend_dir = Path(__file__).parent.parent.parent
-if str(backend_dir) not in sys.path:
-    sys.path.append(str(backend_dir))
-
-# Import the RAG system
-try:
-    from rag.query_engine import get_query_engine, QueryEngine
-except ImportError:
-    # If the RAG system can't be imported, provide a mock version
-    QueryEngine = object
-    def get_query_engine():
-        return None
-
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -35,44 +21,19 @@ class RAGIntegration:
     existing RAG system.
     """
     
-    def __init__(self, query_engine=None):
+    def __init__(self, query_engine=None, rag_system=None):
         """
         Initialize the RAG integration.
         
         Args:
             query_engine: An existing QueryEngine instance to use
+            rag_system: An existing RAG system instance to use
         """
         self.query_engine = query_engine
+        self.rag_system = rag_system
         
-        # Try to initialize the query engine if not provided
-        if self.query_engine is None:
-            try:
-                # Try to get the query engine from the main application
-                try:
-                    import sys
-                    if 'main' in sys.modules:
-                        main_module = sys.modules['main']
-                        if hasattr(main_module, 'rag_query_engine') and main_module.rag_query_engine is not None:
-                            self.query_engine = main_module.rag_query_engine
-                            logger.info("Successfully initialized RAG query engine from main application")
-                        else:
-                            logger.warning("RAG query engine not available in main application")
-                    else:
-                        logger.warning("Main module not found in sys.modules")
-                except Exception as e:
-                    logger.warning(f"Could not import RAG query engine from main application: {str(e)}")
-                
-                # If still no query engine, try the generic get_query_engine function
-                if self.query_engine is None:
-                    self.query_engine = get_query_engine()
-                    if self.query_engine:
-                        logger.info("Successfully initialized RAG query engine from get_query_engine")
-                    else:
-                        logger.warning("get_query_engine returned None")
-                        
-            except Exception as e:
-                logger.error(f"Failed to initialize RAG query engine: {str(e)}")
-                self.query_engine = None
+        if self.query_engine is None and self.rag_system is None:
+            logger.warning("RAG integration initialized without query engine or RAG system")
                 
     async def retrieve(self, query: str, top_k: int = 5, search_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -86,39 +47,58 @@ class RAGIntegration:
         Returns:
             Dictionary with retrieval results and sources
         """
-        if self.query_engine is None:
-            logger.error("Cannot retrieve documents: RAG query engine not initialized")
+        # Check if we have a query engine or RAG system available
+        if self.query_engine is None and self.rag_system is None:
+            logger.error("Cannot retrieve documents: Neither RAG query engine nor RAG system is initialized")
             return {"results": [], "sources": []}
             
         try:
             logger.info(f"Retrieving documents for query: {query}")
             
-            # Call the query engine with the appropriate parameters
-            # The interface might vary based on the actual implementation
-            if hasattr(self.query_engine, 'retrieve'):
-                # If the query engine has a retrieve method, use it
-                retrieval_result = await self.query_engine.retrieve(
-                    query, 
-                    top_k=top_k, 
-                    search_filter=search_filter
-                )
-                
-                # Process the results into a standard format
-                return self._process_retrieval_result(retrieval_result)
-            elif hasattr(self.query_engine, 'query'):
-                # If the query engine only has a query method, use it
-                # and extract the context used for the response
-                query_result = await self.query_engine.query(
-                    query,
-                    top_k=top_k,
-                    search_filter=search_filter
-                )
-                
-                # Process the query result to extract context
-                return self._process_query_result(query_result)
+            # First try using the query engine if available
+            if self.query_engine is not None:
+                # Call the query engine with the appropriate parameters
+                if hasattr(self.query_engine, 'retrieve'):
+                    # If the query engine has a retrieve method, use it
+                    retrieval_result = await self.query_engine.retrieve(
+                        query, 
+                        top_k=top_k, 
+                        search_filter=search_filter
+                    )
+                    
+                    # Process the results into a standard format
+                    return self._process_retrieval_result(retrieval_result)
+                elif hasattr(self.query_engine, 'query'):
+                    # If the query engine only has a query method, use it
+                    # and extract the context used for the response
+                    query_result = await self.query_engine.query(
+                        query,
+                        top_k=top_k,
+                        search_filter=search_filter
+                    )
+                    
+                    # Process the query result to extract context
+                    return self._process_query_result(query_result)
+                else:
+                    logger.warning("RAG query engine does not have retrieve or query methods, trying RAG system")
+            
+            # If query engine is not available or doesn't work, try using RAG system directly
+            if self.rag_system is not None:
+                if hasattr(self.rag_system, 'retrieve'):
+                    # Use RAG system retrieve method
+                    retrieval_result = self.rag_system.retrieve(query, top_k=top_k)
+                    return self._process_retrieval_result(retrieval_result)
+                elif hasattr(self.rag_system, 'search'):
+                    # Use RAG system search method
+                    search_result = self.rag_system.search(query, limit=top_k)
+                    return self._process_retrieval_result(search_result)
+                else:
+                    logger.error("RAG system does not have retrieve or search methods")
+                    return {"results": [], "sources": []}
             else:
-                logger.error("RAG query engine does not have retrieve or query methods")
+                logger.error("No RAG system available for retrieval")
                 return {"results": [], "sources": []}
+                
         except Exception as e:
             logger.error(f"Error retrieving documents: {str(e)}")
             return {"results": [], "sources": []}
@@ -134,29 +114,71 @@ class RAGIntegration:
         Returns:
             The response from the RAG system
         """
-        if self.query_engine is None:
-            logger.error("Cannot query: RAG query engine not initialized")
+        # Check if we have a query engine or RAG system available
+        if self.query_engine is None and self.rag_system is None:
+            logger.error("Cannot query: Neither RAG query engine nor RAG system is initialized")
             return "I'm sorry, but I cannot access the knowledge base at the moment."
             
         try:
             logger.info(f"Querying RAG system: {query}")
             
-            # Call the query engine
-            if hasattr(self.query_engine, 'query'):
-                response = await self.query_engine.query(query, **kwargs)
-                
-                # If the response is a dictionary, extract the response text
-                if isinstance(response, dict) and "response" in response:
-                    return response["response"]
-                elif isinstance(response, dict) and "answer" in response:
-                    return response["answer"]
-                elif isinstance(response, str):
-                    return response
+            # First try using the query engine if available
+            if self.query_engine is not None:
+                if hasattr(self.query_engine, 'query'):
+                    response = await self.query_engine.query(query, **kwargs)
+                    
+                    # If the response is a dictionary, extract the response text
+                    if isinstance(response, dict) and "response" in response:
+                        return response["response"]
+                    elif isinstance(response, dict) and "answer" in response:
+                        return response["answer"]
+                    elif isinstance(response, str):
+                        return response
+                    else:
+                        return str(response)
                 else:
-                    return str(response)
+                    logger.warning("RAG query engine does not have a query method, trying RAG system")
+            
+            # If query engine is not available or doesn't work, try using RAG system directly
+            if self.rag_system is not None:
+                if hasattr(self.rag_system, 'query'):
+                    # Use RAG system query method
+                    response = self.rag_system.query(query, **kwargs)
+                    if isinstance(response, dict) and "response" in response:
+                        return response["response"]
+                    elif isinstance(response, dict) and "answer" in response:
+                        return response["answer"]
+                    elif isinstance(response, str):
+                        return response
+                    else:
+                        return str(response)
+                elif hasattr(self.rag_system, 'retrieve'):
+                    # Use retrieve + generate approach
+                    retrieval_result = self.rag_system.retrieve(query, top_k=5)
+                    
+                    # Format context from retrieval
+                    if retrieval_result and len(retrieval_result) > 0:
+                        context_parts = []
+                        for node in retrieval_result:
+                            if isinstance(node, dict):
+                                text = node.get('text', str(node))
+                                metadata = node.get('metadata', {})
+                                source = metadata.get('doc_name', 'Unknown document')
+                                context_parts.append(f"Source: {source}\nContent: {text}")
+                            else:
+                                context_parts.append(str(node))
+                        
+                        context = "\n\n".join(context_parts)
+                        return f"Based on the available information:\n\n{context}\n\nPlease note that this is a direct retrieval from the knowledge base. For a more comprehensive answer, please use the chat interface."
+                    else:
+                        return "I couldn't find relevant information in the knowledge base for your query."
+                else:
+                    logger.error("RAG system does not have query or retrieve methods")
+                    return "I'm sorry, but I cannot process your query with the available RAG system methods."
             else:
-                logger.error("RAG query engine does not have a query method")
-                return "I'm sorry, but I cannot process your query at the moment."
+                logger.error("No RAG system available for querying")
+                return "I'm sorry, but I cannot access the knowledge base at the moment."
+                
         except Exception as e:
             logger.error(f"Error querying RAG system: {str(e)}")
             return f"I encountered an error while processing your query: {str(e)}"
@@ -317,9 +339,35 @@ class RAGIntegration:
 # Singleton instance
 _rag_integration = None
 
-def get_rag_integration():
+def initialize_rag_integration(rag_system=None, rag_query_engine=None):
+    """
+    Initialize the global RAG integration with explicit systems.
+    
+    Args:
+        rag_system: The RAG system instance from main
+        rag_query_engine: The RAG query engine instance from main
+    """
+    global _rag_integration
+    
+    logger.info("Initializing global RAG integration with explicit systems")
+    
+    # Create integration with the provided systems
+    _rag_integration = RAGIntegration(query_engine=rag_query_engine, rag_system=rag_system)
+    
+    # If we have a rag_system but no query_engine, add the rag_system
+    if rag_system is not None and rag_query_engine is None:
+        _rag_integration.rag_system = rag_system
+        logger.info("RAG system set in integration")
+    
+    return _rag_integration
+
+def get_rag_integration(rag_system=None, rag_query_engine=None):
     """
     Get the RAG integration instance.
+    
+    Args:
+        rag_system: Optional RAG system to use if creating new instance
+        rag_query_engine: Optional RAG query engine to use if creating new instance
     
     Returns:
         The RAG integration instance
@@ -327,6 +375,11 @@ def get_rag_integration():
     global _rag_integration
     
     if _rag_integration is None:
-        _rag_integration = RAGIntegration()
+        if rag_system is not None or rag_query_engine is not None:
+            # Initialize with provided systems
+            _rag_integration = initialize_rag_integration(rag_system, rag_query_engine)
+        else:
+            # Initialize with auto-discovery
+            _rag_integration = RAGIntegration()
         
     return _rag_integration 

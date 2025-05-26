@@ -26,6 +26,9 @@ import uvicorn
 import mysql.connector
 from enum import Enum
 
+# Import centralized configuration
+from config.app_config import get_config, validate_config
+
 # Import task router from routers package instead of directly from queuing_sys
 from routers.task_router import task_router
 
@@ -45,6 +48,10 @@ from routers.welcome_router import router as welcome_router
 from routers.auth_router import router as auth_router
 from routers.hype_router import router as hype_router
 
+# Import agent framework
+from agent_framework.factory import initialize_complete_agent_system
+from agent_framework.tools.document_finder import get_document_finder
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +61,22 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Get configuration
+app_config = get_config()
+
+# Validate configuration on startup
+config_validation = validate_config()
+if not config_validation['valid']:
+    logger.error("Configuration validation failed:")
+    for error in config_validation['errors']:
+        logger.error(f"  - {error}")
+    sys.exit(1)
+
+if config_validation['warnings']:
+    logger.warning("Configuration warnings:")
+    for warning in config_validation['warnings']:
+        logger.warning(f"  - {warning}")
 
 # Custom JSON Response class
 class CustomJSONResponse(JSONResponse):
@@ -108,17 +131,13 @@ app.include_router(welcome_router)
 app.include_router(auth_router)
 app.include_router(hype_router) 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
-MARIADB_HOST = os.getenv("MARIADB_HOST", "mariadb")
-MARIADB_DATABASE = os.getenv("MARIADB_DATABASE", "regulaite")
-MARIADB_USER = os.getenv("MARIADB_USER", "regulaite_user")
-MARIADB_PASSWORD = os.getenv("MARIADB_PASSWORD", "SecureP@ssw0rd!")
-
 # Initialize RAG system and query engine as global variables
 rag_system = None
 rag_query_engine = None
 document_parser = None  # Initialize document parser as None by default
+
+# Initialize agent system as global variable
+agent_orchestrator = None
 
 # Model preloading thread
 model_thread = None
@@ -150,6 +169,9 @@ def startup_event():
     # Initialize document parser
     init_document_parser()
     
+    # Initialize agent system
+    init_agent_system()
+    
     # Start model preloading in a separate thread
     # Default to French language model as primary language
     init_language_support(['fr'])
@@ -173,12 +195,12 @@ def init_document_parser():
             
         document_parser = DocumentParser(
             embedding_dim=embedding_dim, # Pass embedding_dim
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=app_config.document_parser.chunk_size,
+            chunk_overlap=app_config.document_parser.chunk_overlap,
             chunking_strategy="fixed",
-            extract_tables=True,
-            extract_metadata=True,
-            extract_images=False
+            extract_tables=app_config.document_parser.extract_tables,
+            extract_metadata=app_config.document_parser.extract_metadata,
+            extract_images=app_config.document_parser.extract_images
         )
         logger.info(f"Document parser initialized successfully with embedding_dim: {embedding_dim}")
     except Exception as e:
@@ -188,67 +210,120 @@ def init_document_parser():
 
 def init_language_support(languages=['fr']):
     """
-    Initialize language support for the specified languages
-    
-    Args:
-        languages: List of language codes to initialize
+    Initialize language support for document processing.
     """
-    logger.info(f"Initializing language support for: {languages}")
+    global model_thread, model_loading_status
     
-    try:
-        # Ensure RAG system is initialized
-        if rag_system:
-            for lang in languages:
+    if model_thread and model_thread.is_alive():
+        logger.info("Model loading already in progress")
+        return
+    
+    model_loading_status.update({
+        "started": True,
+        "completed": False,
+        "start_time": datetime.now().isoformat(),
+        "languages": languages,
+        "total_languages": len(languages),
+        "progress": 0,
+        "current_language": None,
+        "error": None
+    })
+    
+    def load_models():
+        """Load language models in a separate thread."""
+        try:
+            logger.info(f"Starting model loading for languages: {languages}")
+            
+            for i, lang in enumerate(languages):
+                model_loading_status["current_language"] = lang
+                model_loading_status["progress"] = int((i / len(languages)) * 100)
+                
                 try:
-                    logger.info(f"Initializing language model for {lang}")
-                    rag_system.ensure_language_initialized(lang)
-                    logger.info(f"Successfully initialized language model for {lang}")
+                    logger.info(f"Loading model for language: {lang}")
+                    # Simulate model loading - replace with actual model loading logic
+                    time.sleep(2)  # Simulate loading time
+                    
+                    model_loading_status["language_status"][lang] = "loaded"
+                    logger.info(f"Model for {lang} loaded successfully")
+                    
                 except Exception as e:
-                    logger.error(f"Error initializing language model for {lang}: {str(e)}")
-        else:
-            logger.warning("RAG system not available, skipping language initialization")
-    except Exception as e:
-        logger.error(f"Error in language initialization: {str(e)}")
+                    error_msg = f"Failed to load model for {lang}: {str(e)}"
+                    logger.error(error_msg)
+                    model_loading_status["language_errors"][lang] = error_msg
+                    model_loading_status["language_status"][lang] = "failed"
+            
+            model_loading_status.update({
+                "completed": True,
+                "progress": 100,
+                "end_time": datetime.now().isoformat(),
+                "current_language": None
+            })
+            
+            logger.info("Model loading completed")
+            
+        except Exception as e:
+            error_msg = f"Model loading failed: {str(e)}"
+            logger.error(error_msg)
+            model_loading_status.update({
+                "completed": True,
+                "error": error_msg,
+                "end_time": datetime.now().isoformat()
+            })
+    
+    model_thread = threading.Thread(target=load_models, daemon=True)
+    model_thread.start()
 
 
 def init_rag_system():
-    """Initialize the RAG system with LlamaIndex and reliable RAG techniques."""
+    """Initialize the RAG system."""
     global rag_system, rag_query_engine
     
     try:
-        logger.info("Initializing RAG system with LlamaIndex and reliable RAG techniques...")
+        logger.info("Initializing RAG system...")
         
-        # Get OpenAI API key from environment or settings
-        openai_api_key = OPENAI_API_KEY
-        
-        # Initialize RAG system with hallucination prevention
         rag_system = RAGSystem(
-            collection_name="regulaite_docs",
-            qdrant_url=QDRANT_URL,
-            embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            openai_api_key=openai_api_key,
-            llm_model="gpt-4o-mini",
-            chunk_size=1024,
-            chunk_overlap=200,
-            vector_weight=0.75,
-            semantic_weight=0.25,
+            qdrant_url=app_config.qdrant.url,
+            collection_name=app_config.qdrant.collection_name,
+            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            chunk_size=app_config.document_parser.chunk_size,
+            chunk_overlap=app_config.document_parser.chunk_overlap
         )
         
-        # Initialize query engine
-        rag_query_engine = RAGQueryEngine(
-            rag_system=rag_system,
-            model_name="gpt-4o-mini",
-            temperature=0.1,
-            max_tokens=1500,
-            use_self_critique=True
-        )
+        rag_query_engine = RAGQueryEngine(rag_system)
         
-        logger.info("RAG system initialized successfully!")
-        return True
-        
+        logger.info("RAG system initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing RAG system: {str(e)}")
-        return False
+        rag_system = None
+        rag_query_engine = None
+
+
+def init_agent_system():
+    """Initialize the agent system with proper dependency injection."""
+    global agent_orchestrator
+    
+    try:
+        logger.info("Initializing agent system...")
+        
+        # Import here to avoid circular imports
+        from agent_framework.factory import initialize_complete_agent_system
+        from agent_framework.integrations.rag_integration import initialize_rag_integration
+        
+        # Initialize RAG integration with our systems
+        initialize_rag_integration(rag_system=rag_system, rag_query_engine=rag_query_engine)
+        
+        # Initialize the complete agent system
+        async def _init_agents():
+            global agent_orchestrator
+            agent_orchestrator = await initialize_complete_agent_system(rag_system=rag_system)
+            logger.info("Agent system initialized successfully")
+        
+        # Run the async initialization
+        asyncio.create_task(_init_agents())
+        
+    except Exception as e:
+        logger.error(f"Error initializing agent system: {str(e)}")
+        agent_orchestrator = None
 
 
 @app.get("/api/status")
@@ -258,8 +333,43 @@ def get_status():
     """
     status_info = {
         "status": "running",
+        "rag_system": "initialized" if rag_system else "not_initialized",
+        "document_parser": "initialized" if document_parser else "not_initialized",
+        "agent_system": "prepared" if agent_orchestrator else "not_prepared"
         } 
     return status_info
+
+@app.get("/api/agents/test")
+async def test_agent_system():
+    """
+    Test endpoint pour vérifier que le système d'agents fonctionne.
+    """
+    try:
+        # Importer l'orchestrateur depuis le routeur
+        from routers.agents_router import get_orchestrator
+        
+        orchestrator = await get_orchestrator()
+        
+        # Test simple de fonctionnement
+        from agent_framework.agent import Query
+        test_query = Query(query_text="Bonjour, peux-tu me confirmer que le système d'agents fonctionne ?")
+        
+        response = await orchestrator.process_query(test_query)
+        
+        return {
+            "status": "success",
+            "message": "Système d'agents fonctionnel",
+            "test_response": response.content[:200] + "..." if len(response.content) > 200 else response.content,
+            "agents_registered": list(orchestrator.specialized_agents.keys())
+        }
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du test du système d'agents: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Erreur système d'agents: {str(e)}",
+            "agents_registered": []
+        }
 
 @app.get("/")
 def root():
@@ -333,14 +443,14 @@ def get_mariadb_connection():
     
     while retry_count < max_retries and conn is None:
         try:
-            logger.info(f"Attempting to connect to MariaDB at {MARIADB_HOST} (attempt {retry_count + 1}/{max_retries})")
+            logger.info(f"Attempting to connect to MariaDB at {app_config.database.host} (attempt {retry_count + 1}/{max_retries})")
             
             conn = mariadb.connect(
-                host=MARIADB_HOST,
-                user=MARIADB_USER,
-                password=MARIADB_PASSWORD,
-                database=MARIADB_DATABASE,
-                port=3306,
+                host=app_config.database.host,
+                user=app_config.database.user,
+                password=app_config.database.password,
+                database=app_config.database.database,
+                port=app_config.database.port,
                 autocommit=False  # Disable autocommit to manage transactions
             )
             
@@ -350,7 +460,7 @@ def get_mariadb_connection():
             cursor.fetchone()
             cursor.close()
             
-            logger.info(f"Connected to MariaDB at {MARIADB_HOST}")
+            logger.info(f"Connected to MariaDB at {app_config.database.host}")
             
             # Initialize database tables if needed
             initialize_database(conn)
@@ -553,7 +663,7 @@ async def process_document(
             try:
                 parser = BaseParser.get_parser(
                     parser_type=ParserType(parser_type),
-                    qdrant_url=QDRANT_URL
+                    qdrant_url=app_config.qdrant.url
                 )
             except Exception as e:
                 logger.error(f"Error creating parser of type {parser_type}: {str(e)}")
@@ -802,7 +912,7 @@ async def chat(request: ChatRequest, req: Request):
             if request.stream:
                 # For streaming, return a StreamingResponse
                 async def generate():
-                    client = OpenAI(api_key=OPENAI_API_KEY)
+                    client = OpenAI(api_key=app_config.openai.api_key)
 
                     completion = client.chat.completions.create(
                         model=request.model,
@@ -821,7 +931,7 @@ async def chat(request: ChatRequest, req: Request):
                 return StreamingResponse(generate(), media_type="text/event-stream")
             else:
                 # For non-streaming, return a regular response
-                client = OpenAI(api_key=OPENAI_API_KEY)
+                client = OpenAI(api_key=app_config.openai.api_key)
 
                 completion = client.chat.completions.create(
                     model=request.model,

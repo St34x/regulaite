@@ -774,6 +774,18 @@ You will be provided with context information from various sources. When answeri
                     # Stream the final response
                     assistant_message = agent_response.get("message", "")
                     
+                    # Ensure assistant_message is a string (handle FormattedResponse objects)
+                    if hasattr(assistant_message, 'content'):
+                        # If it's a FormattedResponse object, extract the content
+                        assistant_message = assistant_message.content
+                    elif not isinstance(assistant_message, str):
+                        # If it's any other type, convert to string
+                        assistant_message = str(assistant_message)
+                    
+                    # Ensure we have a valid string
+                    if not assistant_message:
+                        assistant_message = "I apologize, but I wasn't able to generate a response to your query."
+                    
                     # Send the response as tokens for consistent UI handling
                     if assistant_message:
                         # Split into chunks for streaming effect
@@ -2357,13 +2369,32 @@ def detect_language(text: str) -> str:
     # Simple language detection based on common words and patterns
     text_lower = text.lower()
     
-    # French indicators
+    # French indicators - enhanced with more common French words
     french_indicators = [
+        # Articles and basic words
         'le ', 'la ', 'les ', 'de ', 'du ', 'des ', 'et ', 'est ', 'un ', 'une ',
         'dans ', 'pour ', 'avec ', 'sur ', 'par ', 'ce ', 'qui ', 'que ', 'comment ',
         'où ', 'quand ', 'pourquoi ', 'qu\'', 'c\'', 'd\'', 'l\'', 'n\'', 'tion ',
-        'ment ', 'ées ', 'ent ', 'sont ', 'ont', 'était', 'avait', 'sera', 'sécurité',
-        'réseau', 'conformité', 'réglementation', 'politique', 'gestion', 'contrôle'
+        'ment ', 'ées ', 'ent ', 'sont ', 'ont', 'était', 'avait', 'sera',
+        # Common French words often missed
+        'bonjour', 'salut', 'bonsoir', 'au revoir', 'merci', 'oui', 'non',
+        'je ', 'tu ', 'il ', 'elle ', 'nous ', 'vous ', 'ils ', 'elles ',
+        'me ', 'te ', 'se ', 'lui ', 'leur ', 'mes ', 'tes ', 'ses ', 'nos ', 'vos ',
+        'mon ', 'ton ', 'son ', 'ma ', 'ta ', 'sa ', 'notre ', 'votre ',
+        'peux', 'peut', 'peuvent', 'pouvoir', 'veux', 'veut', 'vouloir',
+        'suis', 'es', 'sommes', 'êtes', 'être', 'avoir', 'ai', 'as', 'a', 'avons', 'avez',
+        'faire', 'fais', 'fait', 'faisons', 'faites', 'font',
+        'dire', 'dis', 'dit', 'disons', 'dites', 'disent',
+        'aller', 'vais', 'va', 'allons', 'allez', 'vont',
+        'savoir', 'sais', 'sait', 'savons', 'savez', 'savent',
+        'voir', 'vois', 'voit', 'voyons', 'voyez', 'voient',
+        'donner', 'donne', 'donnes', 'donnons', 'donnez', 'donnent',
+        'présenter', 'présente', 'présentes', 'présentons', 'présentez', 'présentent',
+        'capacité', 'capacités', 'fonctionnalité', 'fonctionnalités',
+        'système', 'service', 'aide', 'aider', 'assistance', 'question', 'réponse',
+        # Professional/technical terms
+        'sécurité', 'réseau', 'conformité', 'réglementation', 'politique', 'gestion', 'contrôle',
+        'analyse', 'rapport', 'document', 'fichier', 'données', 'information'
     ]
     
     # Spanish indicators
@@ -2371,6 +2402,9 @@ def detect_language(text: str) -> str:
         'el ', 'la ', 'los ', 'las ', 'de ', 'del ', 'y ', 'es ', 'un ', 'una ',
         'en ', 'con ', 'por ', 'para ', 'que ', 'como ', 'donde ', 'cuando ',
         'por qué ', 'cómo ', 'ción ', 'mente ', 'ado ', 'ida ', 'son ', 'han',
+        'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'adiós', 'gracias', 'sí', 'no',
+        'yo ', 'tú ', 'él ', 'ella ', 'nosotros ', 'vosotros ', 'ellos ', 'ellas ',
+        'me ', 'te ', 'se ', 'le ', 'les ', 'mis ', 'tus ', 'sus ', 'nuestros ', 'vuestros ',
         'seguridad', 'red', 'cumplimiento'
     ]
     
@@ -2379,6 +2413,15 @@ def detect_language(text: str) -> str:
         'the ', 'and ', 'is ', 'are ', 'was ', 'were ', 'a ', 'an ', 'in ', 'on ',
         'at ', 'by ', 'for ', 'with ', 'to ', 'of ', 'that ', 'this ', 'what ',
         'how ', 'when ', 'where ', 'why ', 'tion ', 'ment ', 'ing ', 'ed ',
+        'hello', 'hi', 'good morning', 'good afternoon', 'good evening', 'goodbye', 'thanks', 'yes', 'no',
+        'i ', 'you ', 'he ', 'she ', 'we ', 'they ', 'me ', 'him ', 'her ', 'us ', 'them ',
+        'my ', 'your ', 'his ', 'her ', 'our ', 'their ', 'mine ', 'yours ',
+        'can', 'could', 'will', 'would', 'should', 'must', 'have', 'has', 'had',
+        'do', 'does', 'did', 'be', 'am', 'is', 'are', 'was', 'were',
+        'go', 'goes', 'went', 'come', 'comes', 'came', 'get', 'gets', 'got',
+        'say', 'says', 'said', 'tell', 'tells', 'told', 'know', 'knows', 'knew',
+        'present', 'show', 'display', 'capability', 'capabilities', 'feature', 'features',
+        'system', 'service', 'help', 'assist', 'assistance', 'question', 'answer',
         'security', 'network', 'compliance', 'regulation', 'policy', 'management'
     ]
     

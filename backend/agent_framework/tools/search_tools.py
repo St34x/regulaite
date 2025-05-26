@@ -334,3 +334,260 @@ def _extract_entities_with_regex(query: str) -> Dict[str, List[str]]:
     entities["keywords"] = keywords
     
     return entities 
+
+
+class SearchTools:
+    """
+    Search tools collection for the RegulAIte Agent Framework.
+    
+    This class provides various search capabilities including semantic, keyword,
+    and hybrid search methods.
+    """
+    
+    def __init__(self, rag_system=None):
+        """
+        Initialize the search tools.
+        
+        Args:
+            rag_system: The RAG system to use for semantic search
+        """
+        self.rag_system = rag_system
+        
+    async def semantic_search(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Perform semantic search using the RAG system.
+        
+        Args:
+            query: The search query
+            top_k: Number of results to return
+            filters: Optional filters to apply
+            
+        Returns:
+            Dictionary with search results
+        """
+        if not self.rag_system:
+            logger.warning("RAG system not available for semantic search")
+            return {"results": [], "message": "Semantic search not available"}
+        
+        try:
+            results = self.rag_system.retrieve(query, top_k=top_k, filter=filters)
+            return {
+                "results": results,
+                "search_type": "semantic",
+                "query": query,
+                "total_results": len(results)
+            }
+        except Exception as e:
+            logger.error(f"Semantic search failed: {str(e)}")
+            return {"results": [], "error": str(e)}
+    
+    async def keyword_search(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Perform keyword-based search.
+        
+        Args:
+            query: The search query
+            top_k: Number of results to return
+            filters: Optional filters to apply
+            
+        Returns:
+            Dictionary with search results
+        """
+        # For now, this is a placeholder implementation
+        # In a real system, this would use BM25 or similar keyword search
+        logger.info(f"Performing keyword search for: {query}")
+        
+        # Reformulate query for better keyword matching
+        reformulation_result = await query_reformulation(query, strategy="simplify")
+        simplified_query = reformulation_result["reformulations"][1] if len(reformulation_result["reformulations"]) > 1 else query
+        
+        return {
+            "results": [],
+            "search_type": "keyword",
+            "query": query,
+            "processed_query": simplified_query,
+            "total_results": 0,
+            "message": "Keyword search implementation pending"
+        }
+    
+    async def hybrid_search(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None, 
+                           semantic_weight: float = 0.7, keyword_weight: float = 0.3) -> Dict[str, Any]:
+        """
+        Perform hybrid search combining semantic and keyword search.
+        
+        Args:
+            query: The search query
+            top_k: Number of results to return
+            filters: Optional filters to apply
+            semantic_weight: Weight for semantic search results (0-1)
+            keyword_weight: Weight for keyword search results (0-1)
+            
+        Returns:
+            Dictionary with combined search results
+        """
+        logger.info(f"Performing hybrid search for: {query}")
+        
+        # Perform both searches
+        semantic_results = await self.semantic_search(query, top_k, filters)
+        keyword_results = await self.keyword_search(query, top_k, filters)
+        
+        # Combine and weight results
+        combined_results = []
+        
+        # For now, prioritize semantic results since keyword search is not fully implemented
+        if semantic_results.get("results"):
+            for i, result in enumerate(semantic_results["results"][:top_k]):
+                # Add semantic score weighted
+                if isinstance(result, dict):
+                    result["hybrid_score"] = semantic_weight * result.get("score", 1.0)
+                    result["search_type"] = "hybrid"
+                combined_results.append(result)
+        
+        return {
+            "results": combined_results,
+            "search_type": "hybrid",
+            "query": query,
+            "semantic_weight": semantic_weight,
+            "keyword_weight": keyword_weight,
+            "total_results": len(combined_results)
+        }
+
+
+# Tool function implementations
+from ..tool_registry import tool
+
+@tool(
+    id="semantic_search",
+    name="Semantic Search",
+    description="Perform semantic search using vector embeddings",
+    tags=["search", "semantic", "retrieval"],
+    requires_context=False
+)
+async def semantic_search_tool(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Perform semantic search using the RAG system.
+    
+    Args:
+        query: The search query
+        top_k: Number of results to return
+        filters: Optional filters to apply
+        
+    Returns:
+        Dictionary with search results
+    """
+    from ..integrations.rag_integration import get_rag_integration
+    
+    rag_integration = get_rag_integration()
+    
+    try:
+        # Use RAG integration for semantic search
+        retrieval_result = await rag_integration.retrieve(query, top_k=top_k, search_filter=filters)
+        
+        return {
+            "results": retrieval_result.get("results", []),
+            "sources": retrieval_result.get("sources", []),
+            "search_type": "semantic",
+            "query": query,
+            "total_results": len(retrieval_result.get("results", []))
+        }
+    except Exception as e:
+        logger.error(f"Semantic search tool failed: {str(e)}")
+        return {
+            "results": [],
+            "sources": [],
+            "error": str(e),
+            "search_type": "semantic",
+            "query": query
+        }
+
+@tool(
+    id="keyword_search",
+    name="Keyword Search",
+    description="Perform keyword-based search",
+    tags=["search", "keyword", "retrieval"],
+    requires_context=False
+)
+async def keyword_search_tool(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Perform keyword-based search.
+    
+    Args:
+        query: The search query
+        top_k: Number of results to return
+        filters: Optional filters to apply
+        
+    Returns:
+        Dictionary with search results
+    """
+    logger.info(f"Performing keyword search for: {query}")
+    
+    # Reformulate query for better keyword matching
+    reformulation_result = await query_reformulation(query, strategy="simplify")
+    simplified_query = reformulation_result["reformulations"][1] if len(reformulation_result["reformulations"]) > 1 else query
+    
+    return {
+        "results": [],
+        "search_type": "keyword",
+        "query": query,
+        "processed_query": simplified_query,
+        "total_results": 0,
+        "message": "Keyword search implementation pending"
+    }
+
+@tool(
+    id="hybrid_search",
+    name="Hybrid Search",
+    description="Perform hybrid search combining semantic and keyword search",
+    tags=["search", "hybrid", "retrieval"],
+    requires_context=False
+)
+async def hybrid_search_tool(query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None,
+                            semantic_weight: float = 0.7, keyword_weight: float = 0.3) -> Dict[str, Any]:
+    """
+    Perform hybrid search combining semantic and keyword search.
+    
+    Args:
+        query: The search query
+        top_k: Number of results to return
+        filters: Optional filters to apply
+        semantic_weight: Weight for semantic search results (0-1)
+        keyword_weight: Weight for keyword search results (0-1)
+        
+    Returns:
+        Dictionary with combined search results
+    """
+    logger.info(f"Performing hybrid search for: {query}")
+    
+    # Perform both searches
+    semantic_results = await semantic_search_tool(query, top_k, filters)
+    keyword_results = await keyword_search_tool(query, top_k, filters)
+    
+    # Combine and weight results
+    combined_results = []
+    
+    # For now, prioritize semantic results since keyword search is not fully implemented
+    if semantic_results.get("results"):
+        for i, result in enumerate(semantic_results["results"][:top_k]):
+            # Add semantic score weighted
+            if isinstance(result, dict):
+                combined_results.append({
+                    **result,
+                    "hybrid_score": semantic_weight * result.get("score", 1.0),
+                    "search_type": "hybrid"
+                })
+            else:
+                combined_results.append({
+                    "content": result,
+                    "hybrid_score": semantic_weight,
+                    "search_type": "hybrid"
+                })
+    
+    return {
+        "results": combined_results,
+        "sources": semantic_results.get("sources", []),
+        "search_type": "hybrid",
+        "query": query,
+        "semantic_weight": semantic_weight,
+        "keyword_weight": keyword_weight,
+        "total_results": len(combined_results)
+    } 

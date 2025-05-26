@@ -1,60 +1,134 @@
--- RegulAite Database Initialization Script
--- Creates all necessary tables for the RegulAite GRC platform
--- Including: Core tables, Organization management, Agent system, Analytics
+-- Migration Script: Upgrade to Comprehensive RegulAite Schema
+-- This script safely migrates existing RegulAite databases to the new comprehensive schema
+-- Run this script if you have an existing RegulAite installation
 
--- Create or check regulaite database
-CREATE DATABASE IF NOT EXISTS regulaite CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE regulaite;
-
--- =============================================
--- CORE SYSTEM TABLES
--- =============================================
-
--- Table for global settings
-CREATE TABLE IF NOT EXISTS regulaite_settings (
-    setting_key VARCHAR(255) PRIMARY KEY,
-    setting_value TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    description TEXT,
-    category VARCHAR(50) DEFAULT 'general',
-    is_system BOOLEAN DEFAULT FALSE,
-    
-    INDEX idx_category (category),
-    INDEX idx_is_system (is_system)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- Set session variables for safety
+SET FOREIGN_KEY_CHECKS = 0;
+SET AUTOCOMMIT = 0;
+START TRANSACTION;
 
 -- =============================================
--- USER MANAGEMENT TABLES
+-- BACKUP EXISTING DATA (Create backup tables)
 -- =============================================
 
--- Create user table for authentication and user management
-CREATE TABLE IF NOT EXISTS users (
-    user_id VARCHAR(255) PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    full_name VARCHAR(255) NOT NULL,
-    company VARCHAR(255),
-    username VARCHAR(255) UNIQUE,
-    role ENUM('admin', 'analyst', 'auditor', 'viewer') DEFAULT 'analyst',
-    organization_id VARCHAR(50),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    last_login TIMESTAMP NULL,
-    settings JSON,
-    is_active BOOLEAN DEFAULT TRUE,
+-- Backup existing tables before migration
+CREATE TABLE IF NOT EXISTS backup_chat_history_pre_migration AS SELECT * FROM chat_history WHERE 1=0;
+CREATE TABLE IF NOT EXISTS backup_users_pre_migration AS SELECT * FROM users WHERE 1=0;
+CREATE TABLE IF NOT EXISTS backup_tasks_pre_migration AS SELECT * FROM tasks WHERE 1=0;
 
-    INDEX idx_username (username),
-    INDEX idx_email (email),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_role (role),
-    INDEX idx_is_active (is_active)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- Insert existing data into backup tables
+INSERT IGNORE INTO backup_chat_history_pre_migration SELECT * FROM chat_history;
+INSERT IGNORE INTO backup_users_pre_migration SELECT * FROM users;
+INSERT IGNORE INTO backup_tasks_pre_migration SELECT * FROM tasks;
 
 -- =============================================
--- ORGANIZATION MANAGEMENT TABLES
+-- MODIFY EXISTING TABLES
 -- =============================================
 
--- Table principale des organisations
+-- Update regulaite_settings table
+ALTER TABLE regulaite_settings 
+ADD COLUMN IF NOT EXISTS category VARCHAR(50) DEFAULT 'general',
+ADD COLUMN IF NOT EXISTS is_system BOOLEAN DEFAULT FALSE,
+ADD INDEX IF NOT EXISTS idx_category (category),
+ADD INDEX IF NOT EXISTS idx_is_system (is_system);
+
+-- Update users table
+ALTER TABLE users 
+ADD COLUMN IF NOT EXISTS role ENUM('admin', 'analyst', 'auditor', 'viewer') DEFAULT 'analyst',
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE,
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id),
+ADD INDEX IF NOT EXISTS idx_role (role),
+ADD INDEX IF NOT EXISTS idx_is_active (is_active);
+
+-- Update chat_sessions table
+ALTER TABLE chat_sessions 
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS context_type ENUM('general', 'analysis', 'document_review', 'compliance_check') DEFAULT 'general',
+ADD COLUMN IF NOT EXISTS context_data JSON,
+ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE,
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id),
+ADD INDEX IF NOT EXISTS idx_is_archived (is_archived);
+
+-- Update chat_history table
+ALTER TABLE chat_history 
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS agent_id VARCHAR(64),
+ADD COLUMN IF NOT EXISTS context_used BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS tokens_used INT,
+ADD COLUMN IF NOT EXISTS processing_time_ms INT,
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id),
+ADD INDEX IF NOT EXISTS idx_agent_id (agent_id);
+
+-- Update tasks table
+ALTER TABLE tasks 
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS user_id VARCHAR(255),
+ADD COLUMN IF NOT EXISTS title VARCHAR(255),
+ADD COLUMN IF NOT EXISTS description TEXT,
+ADD COLUMN IF NOT EXISTS priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
+ADD COLUMN IF NOT EXISTS progress_percent FLOAT DEFAULT 0,
+ADD COLUMN IF NOT EXISTS started_at TIMESTAMP NULL,
+ADD COLUMN IF NOT EXISTS estimated_duration INT,
+ADD COLUMN IF NOT EXISTS actual_duration INT,
+ADD COLUMN IF NOT EXISTS assigned_agent VARCHAR(64),
+ADD INDEX IF NOT EXISTS idx_user_id (user_id),
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id),
+ADD INDEX IF NOT EXISTS idx_priority (priority),
+ADD INDEX IF NOT EXISTS idx_assigned_agent (assigned_agent);
+
+-- Modify tasks status enum to include new values
+ALTER TABLE tasks MODIFY COLUMN status ENUM('queued', 'processing', 'completed', 'failed', 'cancelled', 'pending_review') NOT NULL;
+
+-- Update agent_executions table if it exists
+ALTER TABLE agent_executions 
+ADD COLUMN IF NOT EXISTS execution_id VARCHAR(255) UNIQUE,
+ADD COLUMN IF NOT EXISTS user_id VARCHAR(255),
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS input_data JSON,
+ADD COLUMN IF NOT EXISTS output_data JSON,
+ADD COLUMN IF NOT EXISTS cost_estimate DECIMAL(10,6),
+ADD COLUMN IF NOT EXISTS context_used BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS context_sources JSON,
+ADD INDEX IF NOT EXISTS idx_execution_id (execution_id),
+ADD INDEX IF NOT EXISTS idx_user_id (user_id),
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id),
+ADD INDEX IF NOT EXISTS idx_error (error);
+
+-- Update agent_feedback table if it exists
+ALTER TABLE agent_feedback 
+ADD COLUMN IF NOT EXISTS execution_id VARCHAR(255),
+ADD COLUMN IF NOT EXISTS user_id VARCHAR(255),
+ADD COLUMN IF NOT EXISTS feedback_type ENUM('accuracy', 'helpfulness', 'completeness', 'performance', 'other') DEFAULT 'other',
+ADD INDEX IF NOT EXISTS idx_execution_id (execution_id),
+ADD INDEX IF NOT EXISTS idx_user_id (user_id);
+
+-- Modify rating constraint
+ALTER TABLE agent_feedback ADD CONSTRAINT chk_rating CHECK (rating >= 1 AND rating <= 5);
+
+-- Update agent_progress table if it exists
+ALTER TABLE agent_progress 
+ADD COLUMN IF NOT EXISTS step_name VARCHAR(255),
+ADD COLUMN IF NOT EXISTS total_steps INT,
+ADD COLUMN IF NOT EXISTS current_step INT,
+ADD INDEX IF NOT EXISTS idx_timestamp (timestamp);
+
+-- Update agent_analytics table if it exists  
+ALTER TABLE agent_analytics 
+ADD COLUMN IF NOT EXISTS organization_id VARCHAR(50),
+ADD COLUMN IF NOT EXISTS success_count INT DEFAULT 0,
+ADD COLUMN IF NOT EXISTS error_count INT DEFAULT 0,
+ADD COLUMN IF NOT EXISTS total_tokens INT DEFAULT 0,
+ADD COLUMN IF NOT EXISTS total_cost DECIMAL(10,6) DEFAULT 0,
+DROP INDEX IF EXISTS agent_analytics_unique_key,
+ADD UNIQUE KEY unique_agent_org_day (agent_id, organization_id, day),
+ADD INDEX IF NOT EXISTS idx_organization_id (organization_id);
+
+-- =============================================
+-- CREATE NEW TABLES (IF NOT EXISTS)
+-- =============================================
+
+-- Organizations table
 CREATE TABLE IF NOT EXISTS organizations (
     id VARCHAR(50) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -78,7 +152,7 @@ CREATE TABLE IF NOT EXISTS organizations (
     INDEX idx_active (active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table des actifs organisationnels
+-- Organization assets table
 CREATE TABLE IF NOT EXISTS organization_assets (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
@@ -103,7 +177,7 @@ CREATE TABLE IF NOT EXISTS organization_assets (
     INDEX idx_active (active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table des profils de menaces organisationnelles
+-- Organization threat profiles table
 CREATE TABLE IF NOT EXISTS organization_threat_profiles (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
@@ -124,16 +198,16 @@ CREATE TABLE IF NOT EXISTS organization_threat_profiles (
     INDEX idx_active (active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table de l'environnement réglementaire
+-- Organization regulatory environment table
 CREATE TABLE IF NOT EXISTS organization_regulatory_env (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
-    frameworks JSON, -- Liste des frameworks applicables
+    frameworks JSON,
     regulatory_pressure ENUM('low', 'medium', 'high', 'very_high') DEFAULT 'medium',
     audit_frequency ENUM('quarterly', 'bi_annual', 'annual', 'ad_hoc') DEFAULT 'annual',
     penalties_exposure ENUM('low', 'medium', 'high', 'very_high') DEFAULT 'medium',
-    external_oversight JSON, -- Liste des autorités de supervision
-    certification_requirements JSON, -- Liste des certifications requises
+    external_oversight JSON,
+    certification_requirements JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     
@@ -143,15 +217,15 @@ CREATE TABLE IF NOT EXISTS organization_regulatory_env (
     INDEX idx_regulatory_pressure (regulatory_pressure)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table de maturité de gouvernance
+-- Organization governance maturity table
 CREATE TABLE IF NOT EXISTS organization_governance_maturity (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
-    domain VARCHAR(50) NOT NULL, -- strategic, risk, compliance, etc.
+    domain VARCHAR(50) NOT NULL,
     maturity_level ENUM('initial', 'developing', 'defined', 'managed', 'optimized') DEFAULT 'developing',
     assessment_date DATE,
     assessor VARCHAR(255),
-    score INT, -- Score numérique optionnel (0-100)
+    score INT,
     comments TEXT,
     active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -165,11 +239,7 @@ CREATE TABLE IF NOT EXISTS organization_governance_maturity (
     INDEX idx_active (active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- =============================================
--- DOCUMENT AND KNOWLEDGE MANAGEMENT
--- =============================================
-
--- Table for document metadata (content stored in Qdrant)
+-- Documents table
 CREATE TABLE IF NOT EXISTS documents (
     id VARCHAR(255) PRIMARY KEY,
     organization_id VARCHAR(50),
@@ -182,8 +252,8 @@ CREATE TABLE IF NOT EXISTS documents (
     document_type ENUM('policy', 'procedure', 'risk_assessment', 'audit_report', 'compliance_report', 'framework', 'evidence', 'other') DEFAULT 'other',
     classification ENUM('public', 'internal', 'confidential', 'restricted') DEFAULT 'internal',
     status ENUM('pending', 'processing', 'processed', 'failed', 'archived') DEFAULT 'pending',
-    processing_status JSON, -- Detailed processing information
-    metadata JSON, -- Document-specific metadata
+    processing_status JSON,
+    metadata JSON,
     uploaded_by VARCHAR(255),
     processed_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -199,17 +269,13 @@ CREATE TABLE IF NOT EXISTS documents (
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- =============================================
--- FRAMEWORK MANAGEMENT
--- =============================================
-
--- Table de configuration des frameworks personnalisés
+-- Organization custom frameworks table
 CREATE TABLE IF NOT EXISTS organization_custom_frameworks (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
     framework_name VARCHAR(100) NOT NULL,
     framework_version VARCHAR(20),
-    framework_data JSON NOT NULL, -- Structure complète du framework
+    framework_data JSON NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_by VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -223,29 +289,25 @@ CREATE TABLE IF NOT EXISTS organization_custom_frameworks (
     INDEX idx_is_active (is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- =============================================
--- ANALYSIS AND RESULTS TABLES
--- =============================================
-
--- Table des résultats d'analyse
+-- Analysis results table
 CREATE TABLE IF NOT EXISTS analysis_results (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
     analysis_type ENUM('risk_assessment', 'compliance_analysis', 'governance_analysis', 'gap_analysis', 'vulnerability_assessment', 'audit_preparation') NOT NULL,
-    analysis_id VARCHAR(100), -- ID unique de l'analyse
+    analysis_id VARCHAR(100),
     title VARCHAR(255),
     description TEXT,
-    result_data JSON NOT NULL, -- Résultats complets de l'analyse
-    summary JSON, -- Résumé pour affichage rapide
-    recommendations JSON, -- Recommandations structurées
-    metadata JSON, -- Métadonnées (versions, paramètres, etc.)
+    result_data JSON NOT NULL,
+    summary JSON,
+    recommendations JSON,
+    metadata JSON,
     status ENUM('pending', 'processing', 'completed', 'failed', 'archived') DEFAULT 'completed',
     priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
     created_by VARCHAR(255),
     assigned_to VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP NULL,
-    expires_at TIMESTAMP NULL, -- Optionnel pour l'archivage automatique
+    expires_at TIMESTAMP NULL,
     
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES users(user_id) ON DELETE SET NULL,
@@ -258,7 +320,7 @@ CREATE TABLE IF NOT EXISTS analysis_results (
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table d'historique des évaluations
+-- Organization assessment history table
 CREATE TABLE IF NOT EXISTS organization_assessment_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50) NOT NULL,
@@ -267,7 +329,7 @@ CREATE TABLE IF NOT EXISTS organization_assessment_history (
     methodology VARCHAR(50),
     scope TEXT,
     assessor VARCHAR(255),
-    score DECIMAL(5,2), -- Score global (ex: 85.50)
+    score DECIMAL(5,2),
     summary TEXT,
     detailed_results JSON,
     recommendations JSON,
@@ -282,124 +344,15 @@ CREATE TABLE IF NOT EXISTS organization_assessment_history (
     INDEX idx_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- =============================================
--- CHAT AND MESSAGING SYSTEM
--- =============================================
-
--- Table for storing chat sessions
-CREATE TABLE IF NOT EXISTS chat_sessions (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    session_id VARCHAR(255) NOT NULL UNIQUE,
-    user_id VARCHAR(255) NOT NULL,
-    organization_id VARCHAR(50),
-    title VARCHAR(255) DEFAULT 'New Conversation',
-    context_type ENUM('general', 'analysis', 'document_review', 'compliance_check') DEFAULT 'general',
-    context_data JSON, -- Additional context information
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_message_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    preview TEXT,
-    message_count INT DEFAULT 0,
-    is_archived BOOLEAN DEFAULT FALSE,
-    
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
-    INDEX idx_session_id (session_id),
-    INDEX idx_user_id (user_id),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_last_message_time (last_message_time),
-    INDEX idx_is_archived (is_archived)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Table for chat messages history
-CREATE TABLE IF NOT EXISTS chat_history (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id VARCHAR(255) NOT NULL,
-    session_id VARCHAR(255) NOT NULL,
-    organization_id VARCHAR(50),
-    message_text TEXT NOT NULL,
-    message_role ENUM('user', 'assistant', 'system') NOT NULL,
-    agent_id VARCHAR(64), -- Which agent generated the response
-    context_used BOOLEAN DEFAULT FALSE, -- Whether RAG context was used
-    tokens_used INT,
-    processing_time_ms INT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    metadata JSON,
-
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
-    INDEX idx_user_id (user_id),
-    INDEX idx_session_id (session_id),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_timestamp (timestamp),
-    INDEX idx_agent_id (agent_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =============================================
--- TASK MANAGEMENT SYSTEM
--- =============================================
-
--- Create task tracking table
-CREATE TABLE IF NOT EXISTS tasks (
-    task_id VARCHAR(255) PRIMARY KEY,
-    organization_id VARCHAR(50),
-    user_id VARCHAR(255),
-    task_type VARCHAR(100) NOT NULL,
-    title VARCHAR(255),
-    description TEXT,
-    status ENUM('queued', 'processing', 'completed', 'failed', 'cancelled', 'pending_review') NOT NULL,
-    priority ENUM('low', 'medium', 'high', 'critical') DEFAULT 'medium',
-    progress_percent FLOAT DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    started_at TIMESTAMP NULL,
-    completed_at TIMESTAMP NULL,
-    estimated_duration INT, -- In minutes
-    actual_duration INT, -- In minutes
-    result JSON,
-    error TEXT,
-    message TEXT,
-    parameters JSON,
-    assigned_agent VARCHAR(64),
-    
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
-    INDEX idx_status (status),
-    INDEX idx_task_type (task_type),
-    INDEX idx_priority (priority),
-    INDEX idx_user_id (user_id),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_created_at (created_at),
-    INDEX idx_assigned_agent (assigned_agent)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Table for task chat messages
-CREATE TABLE IF NOT EXISTS task_chat_messages (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    message_id VARCHAR(255) NOT NULL UNIQUE,
-    task_id VARCHAR(255) NOT NULL,
-    content TEXT NOT NULL,
-    role ENUM('user', 'assistant', 'system') NOT NULL,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
-    INDEX idx_message_id (message_id),
-    INDEX idx_task_id (task_id),
-    INDEX idx_timestamp (timestamp)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =============================================
--- AGENT SYSTEM TABLES
--- =============================================
-
--- Table for agent definitions and configurations
+-- Agents table
 CREATE TABLE IF NOT EXISTS agents (
     agent_id VARCHAR(64) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     description TEXT,
     agent_type ENUM('universal_tool', 'risk_assessment', 'compliance_analysis', 'governance_analysis', 'gap_analysis', 'document_processor') NOT NULL,
-    capabilities JSON, -- List of capabilities
-    configuration JSON, -- Agent-specific configuration
-    model_config JSON, -- LLM model configuration
+    capabilities JSON,
+    configuration JSON,
+    model_config JSON,
     is_active BOOLEAN DEFAULT TRUE,
     version VARCHAR(20) DEFAULT '1.0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -409,111 +362,7 @@ CREATE TABLE IF NOT EXISTS agents (
     INDEX idx_is_active (is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Table for tracking agent executions
-CREATE TABLE IF NOT EXISTS agent_executions (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    execution_id VARCHAR(255) UNIQUE NOT NULL,
-    agent_id VARCHAR(64) NOT NULL,
-    user_id VARCHAR(255),
-    organization_id VARCHAR(50),
-    session_id VARCHAR(64) NOT NULL,
-    task VARCHAR(500) NOT NULL,
-    input_data JSON,
-    output_data JSON,
-    model VARCHAR(64),
-    response_time_ms INT,
-    token_count INT,
-    prompt_token_count INT,
-    completion_token_count INT,
-    cost_estimate DECIMAL(10,6), -- Estimated cost in USD
-    error BOOLEAN DEFAULT FALSE,
-    error_message TEXT,
-    context_used BOOLEAN DEFAULT FALSE,
-    context_sources JSON, -- Sources used for RAG
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL,
-    INDEX idx_execution_id (execution_id),
-    INDEX idx_agent_id (agent_id),
-    INDEX idx_user_id (user_id),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_session_id (session_id),
-    INDEX idx_timestamp (timestamp),
-    INDEX idx_error (error)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Table for tracking agent execution progress (for long-running tasks)
-CREATE TABLE IF NOT EXISTS agent_progress (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    execution_id INT NOT NULL,
-    progress_percent FLOAT,
-    status VARCHAR(32) NOT NULL,
-    status_message TEXT,
-    step_name VARCHAR(255),
-    total_steps INT,
-    current_step INT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (execution_id) REFERENCES agent_executions(id) ON DELETE CASCADE,
-    INDEX idx_execution_id (execution_id),
-    INDEX idx_timestamp (timestamp)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Table for storing feedback on agent responses
-CREATE TABLE IF NOT EXISTS agent_feedback (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    execution_id VARCHAR(255),
-    agent_id VARCHAR(64) NOT NULL,
-    user_id VARCHAR(255),
-    session_id VARCHAR(64) NOT NULL,
-    message_id VARCHAR(64) DEFAULT '',
-    rating INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
-    feedback_text TEXT,
-    feedback_type ENUM('accuracy', 'helpfulness', 'completeness', 'performance', 'other') DEFAULT 'other',
-    context_used BOOLEAN,
-    model VARCHAR(64),
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
-    INDEX idx_execution_id (execution_id),
-    INDEX idx_agent_id (agent_id),
-    INDEX idx_user_id (user_id),
-    INDEX idx_session_id (session_id),
-    INDEX idx_timestamp (timestamp)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- =============================================
--- ANALYTICS AND REPORTING TABLES
--- =============================================
-
--- Table for agent usage analytics (daily aggregations)
-CREATE TABLE IF NOT EXISTS agent_analytics (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    agent_id VARCHAR(64) NOT NULL,
-    organization_id VARCHAR(50),
-    day DATE NOT NULL,
-    execution_count INT DEFAULT 0,
-    success_count INT DEFAULT 0,
-    error_count INT DEFAULT 0,
-    avg_response_time_ms FLOAT,
-    avg_rating FLOAT,
-    total_tokens INT DEFAULT 0,
-    total_cost DECIMAL(10,6) DEFAULT 0,
-    unique_users INT DEFAULT 0,
-    success_rate FLOAT,
-    
-    FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
-    UNIQUE KEY unique_agent_org_day (agent_id, organization_id, day),
-    INDEX idx_agent_id (agent_id),
-    INDEX idx_organization_id (organization_id),
-    INDEX idx_day (day)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Table for system-wide analytics
+-- System analytics table
 CREATE TABLE IF NOT EXISTS system_analytics (
     id INT AUTO_INCREMENT PRIMARY KEY,
     metric_name VARCHAR(100) NOT NULL,
@@ -531,11 +380,7 @@ CREATE TABLE IF NOT EXISTS system_analytics (
     INDEX idx_day (day)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- =============================================
--- AUDIT AND COMPLIANCE TABLES
--- =============================================
-
--- Table for audit trails
+-- Audit trail table
 CREATE TABLE IF NOT EXISTS audit_trail (
     id INT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(50),
@@ -558,23 +403,22 @@ CREATE TABLE IF NOT EXISTS audit_trail (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================
--- INITIALIZE DEFAULT DATA
+-- ADD NEW SETTINGS AND DEFAULT DATA
 -- =============================================
 
--- Insert default settings
+-- Insert new settings
 INSERT IGNORE INTO regulaite_settings (setting_key, setting_value, description, category, is_system) VALUES
-('llm_model', 'gpt-4', 'Default LLM model', 'ai', TRUE),
-('llm_temperature', '0.7', 'Default temperature for LLM', 'ai', TRUE),
-('llm_max_tokens', '2048', 'Default max tokens for LLM', 'ai', TRUE),
-('llm_top_p', '1', 'Default top_p value for LLM', 'ai', TRUE),
-('enable_chat_history', 'true', 'Whether to save chat history', 'general', FALSE),
 ('max_file_size_mb', '50', 'Maximum file upload size in MB', 'documents', FALSE),
 ('supported_file_types', '["pdf", "docx", "doc", "txt", "xlsx", "csv"]', 'Supported file types for upload', 'documents', FALSE),
 ('rag_chunk_size', '1000', 'Default chunk size for RAG processing', 'ai', TRUE),
 ('rag_chunk_overlap', '200', 'Default chunk overlap for RAG processing', 'ai', TRUE),
 ('default_analysis_retention_days', '365', 'Default retention period for analysis results', 'general', FALSE);
 
--- Insert default organization
+-- Update existing settings categories
+UPDATE regulaite_settings SET category = 'ai', is_system = TRUE 
+WHERE setting_key IN ('llm_model', 'llm_temperature', 'llm_max_tokens', 'llm_top_p');
+
+-- Insert default organization if none exists
 INSERT IGNORE INTO organizations (
     id, name, sector, size, organization_type, 
     business_model, digital_maturity, risk_appetite
@@ -615,54 +459,38 @@ INSERT IGNORE INTO agents (agent_id, name, description, agent_type, capabilities
  JSON_ARRAY('document_parsing', 'content_extraction', 'classification', 'metadata_enrichment'),
  JSON_OBJECT('supported_formats', JSON_ARRAY('pdf', 'docx', 'doc', 'txt', 'xlsx'), 'extraction_methods', JSON_ARRAY('unstructured', 'llamaparse', 'doctly')));
 
--- Insert sample organizational assets for default org
-INSERT IGNORE INTO organization_assets (
-    organization_id, asset_id, asset_name, asset_type, criticality, description
-) VALUES 
-    ('default_org', 'SYS-001', 'Information Systems', 'system', 'high', 'Core IT infrastructure'),
-    ('default_org', 'DATA-001', 'Customer Data', 'data', 'very_high', 'Customer and business data'),
-    ('default_org', 'APP-001', 'Business Applications', 'application', 'high', 'Critical business applications'),
-    ('default_org', 'NET-001', 'Network Infrastructure', 'network', 'medium', 'Network and telecommunications'),
-    ('default_org', 'HR-001', 'Human Resources', 'human', 'high', 'Personnel and competencies');
-
--- Insert sample threat profiles for default org
-INSERT IGNORE INTO organization_threat_profiles (
-    organization_id, threat_type, likelihood, sophistication, motivation
-) VALUES 
-    ('default_org', 'Cybercriminals', 'medium', 'intermediate', 'financial'),
-    ('default_org', 'Insider Threats', 'low', 'basic', 'financial'),
-    ('default_org', 'Hacktivists', 'low', 'intermediate', 'activism'),
-    ('default_org', 'Human Error', 'high', 'basic', 'disruption');
-
--- Insert default regulatory environment
-INSERT IGNORE INTO organization_regulatory_env (
-    organization_id, frameworks, regulatory_pressure, audit_frequency
-) VALUES (
-    'default_org', 
-    JSON_ARRAY('iso27001', 'gdpr'), 
-    'medium', 
-    'annual'
-);
-
--- Insert default governance maturity
-INSERT IGNORE INTO organization_governance_maturity (
-    organization_id, domain, maturity_level, assessment_date
-) VALUES 
-    ('default_org', 'strategic', 'defined', CURDATE()),
-    ('default_org', 'risk', 'developing', CURDATE()),
-    ('default_org', 'compliance', 'defined', CURDATE()),
-    ('default_org', 'security', 'developing', CURDATE());
-
--- Add foreign key constraints for users table
-ALTER TABLE users ADD CONSTRAINT fk_users_organization 
-    FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL;
-
 -- =============================================
--- CREATE USEFUL VIEWS
+-- ADD FOREIGN KEY CONSTRAINTS SAFELY
 -- =============================================
 
--- Vue complète des organisations avec leurs contextes
-CREATE OR REPLACE VIEW organization_complete_profiles AS
+-- Add foreign key constraint for users table if organizations exist
+SET @fk_exists = (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE 
+                  WHERE TABLE_SCHEMA = DATABASE() 
+                  AND TABLE_NAME = 'users' 
+                  AND CONSTRAINT_NAME = 'fk_users_organization');
+
+SET @sql = IF(@fk_exists = 0, 
+    'ALTER TABLE users ADD CONSTRAINT fk_users_organization FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE SET NULL', 
+    'SELECT "Foreign key already exists" as message');
+
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- Update existing users to default organization if they don't have one
+UPDATE users SET organization_id = 'default_org' WHERE organization_id IS NULL;
+
+-- =============================================
+-- CREATE OR REPLACE VIEWS
+-- =============================================
+
+-- Drop existing views if they exist
+DROP VIEW IF EXISTS organization_complete_profiles;
+DROP VIEW IF EXISTS recent_analyses_by_org;
+DROP VIEW IF EXISTS agent_performance_summary;
+
+-- Create comprehensive organization profiles view
+CREATE VIEW organization_complete_profiles AS
 SELECT 
     o.*,
     ore.frameworks,
@@ -686,8 +514,8 @@ LEFT JOIN organization_governance_maturity ogm ON o.id = ogm.organization_id AND
 WHERE o.active = 1
 GROUP BY o.id, ore.frameworks, ore.regulatory_pressure, ore.audit_frequency;
 
--- Vue des analyses récentes par organisation
-CREATE OR REPLACE VIEW recent_analyses_by_org AS
+-- Create recent analyses view
+CREATE VIEW recent_analyses_by_org AS
 SELECT 
     organization_id,
     analysis_type,
@@ -699,8 +527,8 @@ WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
     AND status = 'completed'
 GROUP BY organization_id, analysis_type;
 
--- Vue des performances des agents
-CREATE OR REPLACE VIEW agent_performance_summary AS
+-- Create agent performance summary view
+CREATE VIEW agent_performance_summary AS
 SELECT 
     a.agent_id,
     a.name,
@@ -717,6 +545,30 @@ WHERE a.is_active = TRUE
     AND ae.timestamp >= DATE_SUB(NOW(), INTERVAL 30 DAY)
 GROUP BY a.agent_id, a.name, a.agent_type;
 
--- Grant privileges to regulaite_user
-GRANT ALL PRIVILEGES ON regulaite.* TO 'regulaite_user'@'%';
-FLUSH PRIVILEGES;
+-- =============================================
+-- FINALIZE MIGRATION
+-- =============================================
+
+-- Re-enable foreign key checks
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- Commit the transaction
+COMMIT;
+
+-- Verify migration success
+SELECT 
+    'Migration completed successfully' as status,
+    COUNT(*) as table_count 
+FROM information_schema.tables 
+WHERE table_schema = DATABASE() 
+    AND table_name IN ('organizations', 'agents', 'analysis_results', 'documents');
+
+-- Show summary of new tables created
+SELECT 
+    table_name,
+    table_rows,
+    table_comment
+FROM information_schema.tables 
+WHERE table_schema = DATABASE() 
+    AND table_name LIKE 'organization%'
+ORDER BY table_name; 

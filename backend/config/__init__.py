@@ -1,7 +1,7 @@
 """
-Configuration module for RegulAite backend.
+Configuration package for RegulAIte.
 """
 
-from .llm_config import LLMConfig, get_provider_specific_config
+from .app_config import get_config, validate_config, config
 
-__all__ = ["LLMConfig", "get_provider_specific_config"]
+__all__ = ['get_config', 'validate_config', 'config']

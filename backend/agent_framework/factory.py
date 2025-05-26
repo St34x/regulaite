@@ -9,13 +9,17 @@ import logging
 
 from .agent import Agent
 from .rag_agent import RAGAgent
+from .orchestrator import OrchestratorAgent
 from .tool_registry import ToolRegistry
 from .query_parser import QueryParser
 from .integrations.rag_integration import get_rag_integration
-from .integrations.llm_integration import get_llm_integration
+from .integrations.llm_integration import get_llm_integration, LLMIntegration, get_llm_client
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Backward compatibility alias
+LLMClient = LLMIntegration
 
 async def create_rag_agent(agent_id: str = "rag_agent",
                      name: str = "RAG Agent",
@@ -93,6 +97,89 @@ async def create_rag_agent(agent_id: str = "rag_agent",
     
     return agent
 
+async def create_orchestrator_agent(
+    agent_id: str = "orchestrator",
+    name: str = "Orchestrateur Principal GRC",
+    llm_client: Optional[LLMClient] = None,
+    **kwargs
+) -> OrchestratorAgent:
+    """
+    Crée et initialise l'agent orchestrateur principal.
+    
+    Args:
+        agent_id: Identifiant unique de l'agent
+        name: Nom humain de l'agent
+        llm_client: Client LLM (si None, utilise le client par défaut)
+        **kwargs: Arguments supplémentaires
+        
+    Returns:
+        Agent orchestrateur initialisé
+    """
+    logger.info(f"Création de l'agent orchestrateur: {agent_id}")
+    
+    # Créer le client LLM si non fourni
+    if llm_client is None:
+        llm_client = get_llm_client()
+    
+    # Créer l'agent orchestrateur
+    orchestrator = OrchestratorAgent(llm_client=llm_client)
+    
+    return orchestrator
+
+async def create_specialized_agents(
+    orchestrator: OrchestratorAgent,
+    rag_system = None,
+    **kwargs
+) -> Dict[str, Agent]:
+    """
+    Crée et enregistre les agents spécialisés dans l'orchestrateur.
+    
+    Args:
+        orchestrator: Agent orchestrateur principal
+        rag_system: Système RAG pour les agents
+        **kwargs: Arguments supplémentaires
+        
+    Returns:
+        Dictionnaire des agents spécialisés créés
+    """
+    logger.info("Création des agents spécialisés")
+    
+    specialized_agents = {}
+    
+    # Pour l'instant, créer des agents RAG spécialisés avec des paramètres différents
+    # TODO: Implémenter les vrais agents spécialisés
+    
+    # Agent d'évaluation des risques
+    risk_agent = await create_rag_agent(
+        agent_id="risk_assessment",
+        name="Agent d'Évaluation des Risques",
+        **kwargs
+    )
+    specialized_agents["risk_assessment"] = risk_agent
+    orchestrator.register_agent("risk_assessment", risk_agent)
+    
+    # Agent d'analyse de conformité 
+    compliance_agent = await create_rag_agent(
+        agent_id="compliance_analysis",
+        name="Agent d'Analyse de Conformité",
+        **kwargs
+    )
+    specialized_agents["compliance_analysis"] = compliance_agent
+    orchestrator.register_agent("compliance_analysis", compliance_agent)
+    
+    # Agent d'analyse de gouvernance
+    governance_agent = await create_rag_agent(
+        agent_id="governance_analysis",
+        name="Agent d'Analyse de Gouvernance",
+        **kwargs
+    )
+    specialized_agents["governance_analysis"] = governance_agent
+    orchestrator.register_agent("governance_analysis", governance_agent)
+    
+    logger.info(f"Agents spécialisés créés: {list(specialized_agents.keys())}")
+    
+    return specialized_agents
+
 async def get_agent(agent_type: str, **kwargs) -> Agent:
     """
     Get an agent of the specified type.
@@ -106,6 +193,8 @@ async def get_agent(agent_type: str, **kwargs) -> Agent:
     """
     if agent_type == "rag":
         return await create_rag_agent(**kwargs)
+    elif agent_type == "orchestrator":
+        return await create_orchestrator_agent(**kwargs)
     else:
         logger.error(f"Unsupported agent type: {agent_type}")
         raise ValueError(f"Unsupported agent type: {agent_type}")
@@ -145,3 +234,30 @@ async def get_agent_instance(agent_type: str, agent_id: Optional[str] = None, **
     _agent_instances[cache_key] = agent
     
     return agent 
+
+async def initialize_complete_agent_system(rag_system=None, **kwargs) -> OrchestratorAgent:
+    """
+    Initialise le système complet d'agents avec orchestrateur et agents spécialisés.
+    
+    Args:
+        rag_system: Système RAG à utiliser
+        **kwargs: Arguments supplémentaires
+        
+    Returns:
+        Agent orchestrateur avec tous les agents spécialisés enregistrés
+    """
+    logger.info("Initialisation du système complet d'agents")
+    
+    # Créer l'orchestrateur
+    orchestrator = await create_orchestrator_agent(**kwargs)
+    
+    # Créer et enregistrer les agents spécialisés
+    specialized_agents = await create_specialized_agents(
+        orchestrator=orchestrator,
+        rag_system=rag_system,
+        **kwargs
+    )
+    
+    logger.info(f"Système d'agents initialisé avec {len(specialized_agents)} agents spécialisés")
+    
+    return orchestrator 

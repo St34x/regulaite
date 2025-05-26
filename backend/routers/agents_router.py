@@ -3,6 +3,7 @@ FastAPI router for agent metadata, capabilities and documentation.
 """
 import logging
 import json
+import time
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Body
 from pydantic import BaseModel, Field
@@ -16,9 +17,11 @@ if str(backend_dir) not in sys.path:
     sys.path.append(str(backend_dir))
 
 # Import the agent framework
-from agent_framework.factory import get_agent_instance
+from agent_framework.factory import get_agent_instance, initialize_complete_agent_system
 from agent_framework.tool_registry import ToolRegistry, ToolMetadata
 from agent_framework.agent import Agent, Query, AgentResponse
+from agent_framework.orchestrator import OrchestratorAgent
+from agent_framework.tools.document_finder import document_finder_tool
 
 # Configure logging
 logging.basicConfig(
@@ -148,13 +151,42 @@ class AgentResponse(BaseModel):
 # Singleton tool registry for the router
 _tool_registry = ToolRegistry()
 
+# Cache global pour l'orchestrateur
+_orchestrator_instance: Optional[OrchestratorAgent] = None
+
+async def get_orchestrator() -> OrchestratorAgent:
+    """Obtient l'instance de l'orchestrateur (singleton)."""
+    global _orchestrator_instance
+    
+    if _orchestrator_instance is None:
+        # Initialiser le système complet
+        try:
+            # Récupérer le système RAG depuis le main
+            from main import rag_system
+            _orchestrator_instance = await initialize_complete_agent_system(
+                rag_system=rag_system
+            )
+            logger.info("Orchestrateur initialisé avec succès")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'initialisation de l'orchestrateur: {str(e)}")
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Impossible d'initialiser l'orchestrateur: {str(e)}"
+            )
+    
+    return _orchestrator_instance
+
 # Dependency to get agent types from the agent framework
 async def get_agent_types():
     """Get available agent types from the agent framework."""
     return {
         "rag": "Retrieval-augmented generation agent",
-        "qa": "Question answering agent",
-        "summarization": "Document summarization agent"
+        "qa": "Question answering agent", 
+        "summarization": "Document summarization agent",
+        "orchestrator": "Agent orchestrateur principal GRC",
+        "risk_assessment": "Agent d'évaluation des risques",
+        "compliance_analysis": "Agent d'analyse de conformité",
+        "governance_analysis": "Agent d'analyse de gouvernance"
     }
 
 
@@ -201,12 +233,12 @@ async def get_agents_metadata():
             elif agent_id == "qa":
                 capabilities = [
                     AgentCapability(
-                        name="Direct questioning",
-                        description="Answer questions directly using the model's knowledge",
+                        name="Direct Q&A", 
+                        description="Answer questions directly without document context",
                         requires_context=False,
                         examples=[
-                            "What is the purpose of a compliance program?",
-                            "Explain the difference between regulations and directives"
+                            "What is GDPR?",
+                            "Explain the difference between data controller and processor"
                         ]
                     )
                 ]
@@ -214,11 +246,69 @@ async def get_agents_metadata():
                 capabilities = [
                     AgentCapability(
                         name="Document summarization",
-                        description="Summarize document content",
+                        description="Create summaries of documents",
                         requires_context=True,
                         examples=[
-                            "Summarize this document about Basel III",
-                            "Give me a summary of the MIFID II regulation"
+                            "Summarize this compliance policy",
+                            "Create an executive summary of the audit report"
+                        ]
+                    )
+                ]
+            elif agent_id == "orchestrator":
+                capabilities = [
+                    AgentCapability(
+                        name="Orchestration GRC",
+                        description="Coordonne les analyses GRC multi-agents",
+                        requires_context=True,
+                        examples=[
+                            "Analyser les risques dans les nouvelles politiques IT",
+                            "Préparer un rapport de conformité RGPD",
+                            "Identifier les gaps de documentation ISO 27001"
+                        ]
+                    ),
+                    AgentCapability(
+                        name="Délégation intelligente",
+                        description="Détermine quels agents mobiliser selon la requête",
+                        requires_context=False,
+                        examples=[
+                            "Quelle est notre conformité DORA ?",
+                            "Évaluer les risques de ce nouveau processus"
+                        ]
+                    )
+                ]
+            elif agent_id == "risk_assessment":
+                capabilities = [
+                    AgentCapability(
+                        name="Évaluation des risques",
+                        description="Analyse et évalue les risques selon EBIOS/MEHARI",
+                        requires_context=True,
+                        examples=[
+                            "Identifier les risques cybersécurité",
+                            "Évaluer l'impact d'une nouvelle technologie"
+                        ]
+                    )
+                ]
+            elif agent_id == "compliance_analysis":
+                capabilities = [
+                    AgentCapability(
+                        name="Analyse de conformité",
+                        description="Vérifie la conformité RGPD/ISO27001/DORA",
+                        requires_context=True,
+                        examples=[
+                            "Vérifier la conformité RGPD de ce processus",
+                            "Gaps d'analyse ISO 27001"
+                        ]
+                    )
+                ]
+            elif agent_id == "governance_analysis":
+                capabilities = [
+                    AgentCapability(
+                        name="Analyse de gouvernance",
+                        description="Évalue les dispositifs de gouvernance IT",
+                        requires_context=True,
+                        examples=[
+                            "Analyser l'efficacité des politiques de sécurité",
+                            "Évaluer la gouvernance des données"
                         ]
                     )
                 ]
@@ -332,6 +422,30 @@ async def get_agent_documentation(agent_id: str):
                 "Summary quality depends on the clarity and structure of the source document",
                 "May miss nuanced details in very technical documents",
                 "Length of summary is limited by token constraints"
+            ]
+        elif agent_id == "orchestrator":
+            limitations = [
+                "Responses are limited to the information available in the knowledge base",
+                "May not have the latest information if the knowledge base is not up-to-date",
+                "Complex reasoning across multiple documents may be limited"
+            ]
+        elif agent_id == "risk_assessment":
+            limitations = [
+                "Responses are limited to the information available in the knowledge base",
+                "May not have the latest information if the knowledge base is not up-to-date",
+                "Complex reasoning across multiple documents may be limited"
+            ]
+        elif agent_id == "compliance_analysis":
+            limitations = [
+                "Responses are limited to the information available in the knowledge base",
+                "May not have the latest information if the knowledge base is not up-to-date",
+                "Complex reasoning across multiple documents may be limited"
+            ]
+        elif agent_id == "governance_analysis":
+            limitations = [
+                "Responses are limited to the information available in the knowledge base",
+                "May not have the latest information if the knowledge base is not up-to-date",
+                "Complex reasoning across multiple documents may be limited"
             ]
 
         # Define best practices based on agent type
@@ -526,50 +640,136 @@ async def get_agent_health(agent_id: str):
 
 @router.post("/execute", response_model=AgentResponse)
 async def execute_agent(request: AgentRequest):
-    """Execute an agent with the given query."""
+    """Execute an agent with the given query and parameters."""
     try:
-        import time
         start_time = time.time()
-
-        # Get the agent instance
+        
+        # Si c'est une requête pour l'orchestrateur, utiliser le système d'orchestration
+        if request.agent_type == "orchestrator":
+            orchestrator = await get_orchestrator()
+            
+            # Créer une requête pour l'orchestrateur
+            query = Query(
+                query_text=request.query,
+                parameters=request.parameters or {},
+                context=None  # L'orchestrateur gère son propre contexte
+            )
+            
+            # Exécuter la requête
+            response = await orchestrator.process_query(query)
+            
+            execution_time = time.time() - start_time
+            
+            return AgentResponse(
+                agent_id="orchestrator",
+                query=request.query,
+                response=response.content,
+                sources=response.sources or [],
+                tools_used=response.tools_used or [],
+                context_used=response.context_used,
+                execution_time=execution_time,
+                model=request.model
+            )
+        
+        # Pour les autres agents, utiliser l'ancien système
         agent = await get_agent_instance(
             agent_type=request.agent_type,
-            model=request.model or "gpt-4"
+            model=request.model,
+            **request.parameters or {}
         )
-
-        # Create the query
+        
+        # Create query
         query = Query(
             query_text=request.query,
             parameters=request.parameters or {}
         )
-
-        # Add session_id to context if provided
-        if request.session_id:
-            query.context.session_id = request.session_id
-
-        # Execute the agent
-        agent_response = await agent.process_query(query)
-
-        # Calculate execution time
+        
+        # Execute query
+        response = await agent.process_query(query)
+        
         execution_time = time.time() - start_time
-
-        # Create the response
-        response = AgentResponse(
+        
+        return AgentResponse(
             agent_id=agent.agent_id,
             query=request.query,
-            response=agent_response.content,
-            sources=agent_response.metadata.get("sources"),
-            tools_used=agent_response.tools_used,
-            context_used=agent_response.context_used,
+            response=response.content,
+            sources=response.sources or [],
+            tools_used=response.tools_used or [],
+            context_used=response.context_used,
             execution_time=execution_time,
             model=request.model
         )
-
-        return response
-
+        
     except Exception as e:
         logger.error(f"Error executing agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+
+@router.post("/orchestrator/execute")
+async def execute_orchestrator(
+    query: str = Body(..., description="Requête à analyser"),
+    session_id: Optional[str] = Body(None, description="ID de session optionnel"),
+    include_details: bool = Body(True, description="Inclure les détails d'orchestration")
+):
+    """
+    Exécute une requête via l'orchestrateur principal.
+    Endpoint spécialisé pour l'orchestration avec plus de détails.
+    """
+    try:
+        orchestrator = await get_orchestrator()
+        
+        # Créer la requête
+        query_obj = Query(
+            query_text=query,
+            parameters={"session_id": session_id} if session_id else {}
+        )
+        
+        # Exécuter
+        start_time = time.time()
+        response = await orchestrator.process_query(query_obj)
+        execution_time = time.time() - start_time
+        
+        result = {
+            "query": query,
+            "response": response.content,
+            "execution_time": execution_time,
+            "sources": response.sources or [],
+            "tools_used": response.tools_used or [],
+            "context_used": response.context_used
+        }
+        
+        if include_details and response.metadata:
+            result["orchestration_details"] = response.metadata
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de l'exécution de l'orchestrateur: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Échec de l'orchestration: {str(e)}"
+        )
+
+@router.get("/tools/document-finder")
+async def test_document_finder(
+    query: str,
+    doc_types: Optional[List[str]] = None,
+    frameworks: Optional[List[str]] = None,
+    limit: int = 10
+):
+    """
+    Teste l'outil Document Finder.
+    """
+    try:
+        result = await document_finder_tool(
+            query=query,
+            doc_types=doc_types,
+            frameworks=frameworks,
+            limit=limit
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Erreur Document Finder: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error executing agent: {str(e)}"
+            detail=f"Erreur Document Finder: {str(e)}"
         )
