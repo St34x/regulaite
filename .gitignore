@@ -36,6 +36,8 @@ backend/nosetests.xml
 backend/coverage.xml
 backend/*.cover
 backend/.hypothesis/
+backend/database/
+backend/agent_framework/modules/__pycache__
 
 # React frontend (front_end)
 front-end/node_modules/

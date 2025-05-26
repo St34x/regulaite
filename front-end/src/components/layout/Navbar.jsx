@@ -73,6 +73,16 @@ const Navbar = () => {
               >
                 Documents
               </Link>
+              <Link
+                as={RouterLink}
+                to="/organization"
+                color={textColor}
+                fontSize="sm"
+                fontWeight="medium"
+                _hover={{ color: accentColor }}
+              >
+                Organization
+              </Link>
             </HStack>
           )}
         </Flex>

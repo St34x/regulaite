@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import logging
 import os
+import sys
 import time
 import uuid
 import json
@@ -15,7 +16,6 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 from unstructured_parser.base_parser import BaseParser, ParserType
 import threading
-import sys
 import random
 import string
 import shutil
@@ -25,6 +25,9 @@ import requests
 import uvicorn
 import mysql.connector
 from enum import Enum
+
+# Add current directory to Python path for Docker
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import centralized configuration
 from config.app_config import get_config, validate_config
@@ -48,16 +51,24 @@ from routers.welcome_router import router as welcome_router
 from routers.auth_router import router as auth_router
 from routers.hype_router import router as hype_router
 
-# Import agent framework
-from agent_framework.factory import initialize_complete_agent_system
-from agent_framework.tools.document_finder import get_document_finder
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+# Try to import organization router after logger is configured
+try:
+    from routers.organization_router import router as organization_router
+    logger.info("Organization router imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import organization router: {str(e)}")
+    organization_router = None
+
+# Import agent framework (after logger is configured)
+from agent_framework.factory import initialize_complete_agent_system
+from agent_framework.tools.document_finder import get_document_finder
 
 # Load environment variables
 load_dotenv()
@@ -129,7 +140,14 @@ app.include_router(document_router)
 app.include_router(config_router)
 app.include_router(welcome_router)
 app.include_router(auth_router)
-app.include_router(hype_router) 
+app.include_router(hype_router)
+
+# Include organization router if available
+if organization_router:
+    app.include_router(organization_router)
+    logger.info("Organization router included successfully")
+else:
+    logger.warning("Organization router not available, skipping include")
 
 # Initialize RAG system and query engine as global variables
 rag_system = None

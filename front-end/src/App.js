@@ -9,6 +9,8 @@ import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DocumentsPage from './pages/DocumentsPage';
+import OrganizationPage from './pages/OrganizationPage';
+import OrganizationSetupPage from './pages/OrganizationSetupPage';
 import { chakraTheme } from './theme';
 import './App.css';
 import './styles/chat.css';
@@ -35,6 +37,15 @@ function App() {
               />
               
               <Route 
+                path="/dashboard" 
+                element={
+                  <Layout>
+                    <DashboardPage />
+                  </Layout>
+                } 
+              />
+              
+              <Route 
                 path="/chat" 
                 element={
                   <Layout>
@@ -48,6 +59,24 @@ function App() {
                 element={
                   <Layout>
                     <DocumentsPage />
+                  </Layout>
+                } 
+              />
+
+              <Route 
+                path="/organization" 
+                element={
+                  <Layout>
+                    <OrganizationPage />
+                  </Layout>
+                } 
+              />
+
+              <Route 
+                path="/organization/setup" 
+                element={
+                  <Layout>
+                    <OrganizationSetupPage />
                   </Layout>
                 } 
               />

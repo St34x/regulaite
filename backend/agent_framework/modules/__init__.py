@@ -1,47 +1,49 @@
 """
-Agent Framework Modules - Modules spécialisés d'analyse GRC pour RegulAIte.
-Avec intégration complète du contexte organisationnel et configuration adaptative.
+Agent Framework Modules - Modules spécialisés pour l'analyse GRC.
+
+Chaque module fournit une expertise spécialisée pour différents aspects
+de l'analyse de gouvernance, risque et conformité.
 """
 
-# Configuration organisationnelle
+# Import the organization config module which is working
 from .organization_config import (
-    OrganizationConfigManager, OrganizationProfile, AssetTemplate, ThreatProfile,
-    RegulatoryEnvironment, OrganizationType, RegulatorySector, ComplianceFramework,
+    OrganizationConfigManager,
+    OrganizationType,
+    RegulatorySector,
+    ComplianceFramework,
+    OrganizationProfile,
     get_organization_config_manager
 )
 
-# Modules d'analyse spécialisés avec intégration organisationnelle
-from .compliance_analysis_module import ComplianceAnalysisModule, get_compliance_analysis_module
-from .governance_analysis_module import GovernanceAnalysisModule, get_governance_analysis_module
-from .risk_assessment_module import RiskAssessmentModule, get_risk_assessment_module
-from .gap_analysis_module import GapAnalysisModule, get_gap_analysis_module
+# Framework Parser avec support multi-frameworks (from tools directory)
+from ..tools.framework_parser import FrameworkParser, get_framework_parser
 
-# Framework Parser avec support multi-frameworks
-from .framework_parser import FrameworkParser, get_framework_parser
+# Comment out problematic modules for now - they have LLMIntegration vs LLMClient type issues
+# from .compliance_analysis_module import ComplianceAnalysisModule, get_compliance_analysis_module
+# from .governance_analysis_module import GovernanceAnalysisModule, get_governance_analysis_module
+# from .risk_assessment_module import RiskAssessmentModule, get_risk_assessment_module
+# from .gap_analysis_module import GapAnalysisModule, get_gap_analysis_module
 
 __all__ = [
-    # Configuration organisationnelle
+    # Organization Config (working)
     "OrganizationConfigManager",
-    "OrganizationProfile", 
-    "AssetTemplate",
-    "ThreatProfile",
-    "RegulatoryEnvironment",
-    "OrganizationType",
-    "RegulatorySector", 
+    "OrganizationType", 
+    "RegulatorySector",
     "ComplianceFramework",
+    "OrganizationProfile",
     "get_organization_config_manager",
     
-    # Modules d'analyse
-    "ComplianceAnalysisModule",
-    "GovernanceAnalysisModule", 
-    "RiskAssessmentModule",
-    "GapAnalysisModule",
+    # Framework Parser
     "FrameworkParser",
+    "get_framework_parser",
     
-    # Factory functions
-    "get_compliance_analysis_module",
-    "get_governance_analysis_module",
-    "get_risk_assessment_module", 
-    "get_gap_analysis_module",
-    "get_framework_parser"
+    # Commented out until LLM type issues are resolved
+    # "ComplianceAnalysisModule",
+    # "get_compliance_analysis_module",
+    # "GovernanceAnalysisModule", 
+    # "get_governance_analysis_module",
+    # "RiskAssessmentModule",
+    # "get_risk_assessment_module",
+    # "GapAnalysisModule",
+    # "get_gap_analysis_module"
 ] 

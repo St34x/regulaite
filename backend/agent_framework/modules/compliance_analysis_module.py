@@ -77,7 +77,7 @@ class ComplianceAnalysisModule(Agent):
     Module expert en analyse de conformité avec IA avancée.
     """
     
-    def __init__(self, llm_client: LLMIntegration = None):
+    def __init__(self, llm_client: LLMClient = None):
         super().__init__(
             agent_id="compliance_analysis",
             name="Expert Analyse de Conformité"
@@ -1816,6 +1816,6 @@ Retourne un plan JSON structuré et actionnable.
 
 
 # Factory function
-def get_compliance_analysis_module(llm_client: LLMIntegration = None):
+def get_compliance_analysis_module(llm_client: LLMClient = None):
     """Factory function pour obtenir une instance du module d'analyse de conformité."""
     return ComplianceAnalysisModule(llm_client=llm_client) 
