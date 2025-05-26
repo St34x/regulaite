@@ -1070,32 +1070,34 @@ class HyPERagSystem:
             # First, let's see what we're about to delete
             for collection in [self.collection_name, self.metadata_collection_name]:
                 try:
-                    # Count existing points before deletion
+                    # Count existing points before deletion using proper Qdrant filter format
+                    count_filter = qdrant_client.models.Filter(
+                        must=[
+                            qdrant_client.models.FieldCondition(
+                                key="doc_id",
+                                match=qdrant_client.models.MatchValue(value=doc_id)
+                            )
+                        ]
+                    )
+                    
                     count_result = self.qdrant_client.count(
                         collection_name=collection,
-                        count_filter={
-                            "must": [
-                                {
-                                    "key": "doc_id",
-                                    "match": {"value": doc_id}
-                                }
-                            ]
-                        }
+                        count_filter=count_filter
                     )
                     
                     existing_count = count_result.count if hasattr(count_result, 'count') else 0
                     logger.info(f"Found {existing_count} vectors for document {doc_id} in collection {collection}")
                     
                     if existing_count > 0:
-                        # Delete document chunks from this collection
-                        filter_doc_chunks = {
-                            "must": [
-                                {
-                                    "key": "doc_id",
-                                    "match": {"value": doc_id}
-                                }
+                        # Delete document chunks from this collection using proper filter format
+                        filter_doc_chunks = qdrant_client.models.Filter(
+                            must=[
+                                qdrant_client.models.FieldCondition(
+                                    key="doc_id",
+                                    match=qdrant_client.models.MatchValue(value=doc_id)
+                                )
                             ]
-                        }
+                        )
                         
                         # Perform the deletion
                         result = self.qdrant_client.delete(
@@ -1124,15 +1126,15 @@ class HyPERagSystem:
             try:
                 logger.info(f"Checking for orphaned vectors with doc_id in metadata for {doc_id}")
                 
-                # Alternative filter for doc_id in metadata (fallback for older data)
-                alt_filter = {
-                    "must": [
-                        {
-                            "key": "metadata.doc_id",
-                            "match": {"value": doc_id}
-                        }
+                # Alternative filter for doc_id in metadata (fallback for older data) using proper format
+                alt_filter = qdrant_client.models.Filter(
+                    must=[
+                        qdrant_client.models.FieldCondition(
+                            key="metadata.doc_id",
+                            match=qdrant_client.models.MatchValue(value=doc_id)
+                        )
                     ]
-                }
+                )
                 
                 for collection in [self.collection_name, self.metadata_collection_name]:
                     try:
