@@ -2,7 +2,7 @@
 
 ## ✅ Solution Implemented
 
-Your database backup and restore system is now fully implemented and ready to use! Here's what was created:
+Your database backup and restore system is now fully implemented and integrated into the setup process! Here's what was created:
 
 ### 📁 Files Created
 - `scripts/backup-databases.sh` - Creates backups from running containers
@@ -10,12 +10,34 @@ Your database backup and restore system is now fully implemented and ready to us
 - `backend/config/mariadb/initdb/restore_data.sh` - Auto-restore during MariaDB startup
 - `database-backups/` - Directory for backup files (git-tracked)
 - `database-backups/README.md` - Comprehensive documentation
+- **Updated `scripts/setup.sh`** - Now includes integrated database restoration
 
 ### 🔧 Configuration Changes
 - Updated `docker-compose.yml` to mount backup directory
 - Updated `.gitignore` to allow `database-backups/` but ignore `backend/database/`
+- **Enhanced `scripts/setup.sh`** with comprehensive database restoration options
 
 ## 🚀 How to Use
+
+### 🆕 Integrated Setup with Automatic Restoration
+```bash
+# Run the setup script - it now includes database restoration!
+./scripts/setup.sh
+
+# The setup script will:
+# 1. Set up environment and build containers
+# 2. Start all services 
+# 3. Initialize database schema
+# 4. Automatically detect and offer to restore backups
+# 5. Provide interactive restoration options
+```
+
+**Restoration Options in Setup:**
+1. **Restore all available backups automatically** (recommended)
+2. **Restore only MariaDB data**
+3. **Restore only Qdrant data** 
+4. **Skip restoration** (keep fresh databases)
+5. **View backup details** before deciding
 
 ### Creating Backups
 ```bash
@@ -30,7 +52,7 @@ git add database-backups/
 git commit -m "Update database backups"
 ```
 
-### Restoring Backups
+### Manual Restoring (if not using setup.sh)
 ```bash
 # Option 1: Manual restore (containers must be running)
 ./scripts/restore-databases.sh
@@ -45,14 +67,14 @@ docker-compose up -d  # Will auto-restore MariaDB if backup exists
 git clone <your-repo>
 cd regulaite
 
-# 2. Create database directories
-mkdir -p backend/database/mariadb backend/database/qdrant
+# 2. Run integrated setup (handles everything automatically!)
+./scripts/setup.sh
 
-# 3. Start services (MariaDB will auto-restore from backup)
-docker-compose up -d
-
-# 4. Restore Qdrant manually if needed
-./scripts/restore-databases.sh
+# That's it! The setup script will:
+# - Create necessary directories
+# - Build and start services
+# - Detect and restore backups automatically
+# - Provide complete environment setup
 ```
 
 ## 📊 Current Backup Status
@@ -60,6 +82,7 @@ docker-compose up -d
 - ✅ Qdrant: 12MB backup created  
 - ✅ Metadata: backup_info.json with timestamps and sizes
 - ✅ All files committed to git
+- ✅ **Integrated into setup.sh for automatic restoration**
 
 ## 🔒 Security Notes
 - SQL dumps may contain sensitive data - review before committing
@@ -73,5 +96,20 @@ docker-compose up -d
 4. **Versioned**: Full git history of database changes
 5. **Documented**: Comprehensive README and metadata
 6. **Tested**: Working backup/restore scripts included
+7. **🆕 Integrated**: Seamlessly integrated into main setup process
+8. **🆕 Interactive**: User-friendly restoration options during setup
+9. **🆕 Health Checks**: Post-restoration verification included
 
-Your database data is now preserved in git and will be automatically restored when setting up new environments! 
+## 🔄 Setup.sh Integration Features
+
+The enhanced `scripts/setup.sh` now includes:
+
+- **🔍 Automatic Backup Detection**: Scans for existing backups during setup
+- **📋 Backup Information Display**: Shows backup sizes, dates, and metadata  
+- **🎛️ Interactive Restoration Options**: Choose what to restore and when
+- **⚡ Intelligent Restoration**: Handles MariaDB and Qdrant differently for optimal results
+- **🔧 Post-Restoration Health Checks**: Verifies services are working after restoration
+- **📁 Directory Management**: Automatically creates required database directories
+- **💡 Helpful Guidance**: Provides backup system information and commands
+
+Your database data is now preserved in git and will be automatically detected and restored when setting up new environments! 
