@@ -36,8 +36,12 @@ backend/nosetests.xml
 backend/coverage.xml
 backend/*.cover
 backend/.hypothesis/
+# Ignore live database directories (they contain runtime data)
 backend/database/
 backend/agent_framework/modules/__pycache__
+
+# Allow database backups directory (these are meant to be committed)
+!database-backups/
 
 # React frontend (front_end)
 front-end/node_modules/

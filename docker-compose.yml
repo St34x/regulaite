@@ -16,6 +16,7 @@ services:
       - ./backend/config/mariadb:/etc/mysql/conf.d:ro
       - ./backend/config/mariadb/initdb:/docker-entrypoint-initdb.d:ro
       - ./backend/database/mariadb:/var/lib/mysql
+      - ./database-backups:/app/database-backups:ro
     ports:
       - "3306:3306"
     networks:
