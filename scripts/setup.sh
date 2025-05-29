@@ -21,6 +21,13 @@ FRONTEND_IMAGE="regulaite_frontend:latest"
 FRONTEND_DIR="$PLUGIN_DIR/front-end"
 BUILD_TARGET="development" # Default to development mode
 
+# Backup system configuration
+BACKUP_DIR="$PLUGIN_DIR/database-backups"
+BACKUP_SCRIPTS_DIR="$PLUGIN_DIR/scripts"
+
+# Service configuration
+MAX_WAIT=60  # Maximum time to wait for services to start (seconds)
+
 # Print banner
 echo -e "${BLUE}"
 echo "╔══════════════════════════════════════════════════════════════════════╗"
@@ -469,7 +476,7 @@ if ! docker exec regulaite-mariadb mariadb -u"$MARIADB_USER" -p"$MARIADB_PASSWOR
             "
 
             if [ $? -eq 0 ]; then
-                echo -e "${GREEN}✅ Fallback MariaDB schema initialized successfully${NC}"
+                echo -e "${GREEN}✅ MariaDB schema initialized successfully from init.sql${NC}"
             else
                 echo -e "${RED}Critical error initializing MariaDB schema${NC}"
             fi
@@ -497,7 +504,216 @@ else
     fi
 fi
 
-# Final status and information
+# Step 8: Database Restoration from Backups
+echo -e "${BLUE}===============================================${NC}"
+echo -e "${BLUE}🗄️  Database Restoration System${NC}"
+echo -e "${BLUE}===============================================${NC}"
+
+# Check if backup files exist
+MARIADB_BACKUP="$BACKUP_DIR/mariadb_backup.sql"
+QDRANT_BACKUP="$BACKUP_DIR/qdrant_backup.tar.gz"
+BACKUP_INFO="$BACKUP_DIR/backup_info.json"
+
+echo -e "${YELLOW}Checking for existing database backups...${NC}"
+
+HAS_MARIADB_BACKUP=false
+HAS_QDRANT_BACKUP=false
+HAS_BACKUP_INFO=false
+
+if [ -f "$MARIADB_BACKUP" ]; then
+    MARIADB_SIZE=$(du -h "$MARIADB_BACKUP" | cut -f1)
+    echo -e "${GREEN}✅ Found MariaDB backup: $MARIADB_SIZE${NC}"
+    HAS_MARIADB_BACKUP=true
+fi
+
+if [ -f "$QDRANT_BACKUP" ]; then
+    QDRANT_SIZE=$(du -h "$QDRANT_BACKUP" | cut -f1)
+    echo -e "${GREEN}✅ Found Qdrant backup: $QDRANT_SIZE${NC}"
+    HAS_QDRANT_BACKUP=true
+fi
+
+if [ -f "$BACKUP_INFO" ]; then
+    echo -e "${GREEN}✅ Found backup metadata${NC}"
+    HAS_BACKUP_INFO=true
+    
+    # Display backup information if available
+    if command -v jq &> /dev/null; then
+        echo -e "${YELLOW}Backup Information:${NC}"
+        jq -r '. | "  📅 Created: \(.backup_date)\n  👤 By: \(.created_by)\n  🔗 Git: \(.git_commit[0:8])"' "$BACKUP_INFO" 2>/dev/null || cat "$BACKUP_INFO"
+    else
+        echo -e "${YELLOW}Backup metadata:${NC}"
+        cat "$BACKUP_INFO"
+    fi
+fi
+
+# Determine restoration strategy
+if [ "$HAS_MARIADB_BACKUP" = true ] || [ "$HAS_QDRANT_BACKUP" = true ]; then
+    echo ""
+    echo -e "${YELLOW}Database backups detected! Choose restoration option:${NC}"
+    echo "1) Restore all available backups automatically"
+    echo "2) Restore only MariaDB data"
+    echo "3) Restore only Qdrant data"
+    echo "4) Skip restoration (keep fresh databases)"
+    echo "5) View backup details before deciding"
+    
+    read -rp "Enter your choice [1]: " restore_choice
+    restore_choice=${restore_choice:-1}
+    
+    case $restore_choice in
+        1)
+            echo -e "${YELLOW}🔄 Starting automatic restoration of all available backups...${NC}"
+            RESTORE_MARIADB=$HAS_MARIADB_BACKUP
+            RESTORE_QDRANT=$HAS_QDRANT_BACKUP
+            ;;
+        2)
+            echo -e "${YELLOW}🔄 Will restore only MariaDB data...${NC}"
+            RESTORE_MARIADB=$HAS_MARIADB_BACKUP
+            RESTORE_QDRANT=false
+            ;;
+        3)
+            echo -e "${YELLOW}🔄 Will restore only Qdrant data...${NC}"
+            RESTORE_MARIADB=false
+            RESTORE_QDRANT=$HAS_QDRANT_BACKUP
+            ;;
+        4)
+            echo -e "${YELLOW}⏭️ Skipping database restoration...${NC}"
+            RESTORE_MARIADB=false
+            RESTORE_QDRANT=false
+            ;;
+        5)
+            if [ "$HAS_BACKUP_INFO" = true ]; then
+                echo -e "${BLUE}📋 Detailed Backup Information:${NC}"
+                cat "$BACKUP_INFO"
+            else
+                echo -e "${YELLOW}No detailed backup information available${NC}"
+            fi
+            echo ""
+            echo -e "${YELLOW}Files found:${NC}"
+            [ "$HAS_MARIADB_BACKUP" = true ] && echo -e "  📊 MariaDB: $MARIADB_SIZE"
+            [ "$HAS_QDRANT_BACKUP" = true ] && echo -e "  🔍 Qdrant: $QDRANT_SIZE"
+            echo ""
+            echo -e "${YELLOW}Do you want to restore these backups? (y/N):${NC}"
+            read -r confirm_restore
+            if [[ "$confirm_restore" =~ ^[Yy]$ ]]; then
+                RESTORE_MARIADB=$HAS_MARIADB_BACKUP
+                RESTORE_QDRANT=$HAS_QDRANT_BACKUP
+            else
+                RESTORE_MARIADB=false
+                RESTORE_QDRANT=false
+            fi
+            ;;
+        *)
+            echo -e "${YELLOW}Invalid choice. Skipping restoration...${NC}"
+            RESTORE_MARIADB=false
+            RESTORE_QDRANT=false
+            ;;
+    esac
+    
+    # Perform MariaDB restoration
+    if [ "$RESTORE_MARIADB" = true ] && [ -f "$MARIADB_BACKUP" ]; then
+        echo -e "${YELLOW}📥 Restoring MariaDB database from backup...${NC}"
+        
+        # Wait a moment to ensure MariaDB is fully ready
+        echo -e "${YELLOW}⏳ Ensuring MariaDB is ready for restoration...${NC}"
+        sleep 5
+        
+        # Restore MariaDB backup
+        if docker exec -i regulaite-mariadb mysql -u root -p"$MARIADB_ROOT_PASSWORD" < "$MARIADB_BACKUP"; then
+            echo -e "${GREEN}✅ MariaDB data restored successfully from backup${NC}"
+        else
+            echo -e "${RED}❌ Failed to restore MariaDB data. Check backup file integrity.${NC}"
+            echo -e "${YELLOW}ℹ️ The system will continue with fresh database schema.${NC}"
+        fi
+    fi
+    
+    # Perform Qdrant restoration
+    if [ "$RESTORE_QDRANT" = true ] && [ -f "$QDRANT_BACKUP" ]; then
+        echo -e "${YELLOW}📥 Restoring Qdrant collections from backup...${NC}"
+        
+        # Check if Qdrant container is running
+        if docker ps | grep -q "regulaite-qdrant"; then
+            # Stop Qdrant to safely restore data
+            echo -e "${YELLOW}🛑 Stopping Qdrant container for data restoration...${NC}"
+            docker-compose -f "$DOCKER_COMPOSE_FILE" stop qdrant
+            
+            # Clear existing Qdrant data
+            QDRANT_DATA_DIR="$PLUGIN_DIR/backend/database/qdrant"
+            if [ -d "$QDRANT_DATA_DIR" ]; then
+                echo -e "${YELLOW}🗑️ Clearing existing Qdrant data...${NC}"
+                sudo rm -rf "$QDRANT_DATA_DIR"/*
+            fi
+            
+            # Create directory if it doesn't exist
+            mkdir -p "$QDRANT_DATA_DIR"
+            
+            # Extract backup
+            echo -e "${YELLOW}📂 Extracting Qdrant backup...${NC}"
+            if tar -xzf "$QDRANT_BACKUP" -C "$QDRANT_DATA_DIR"; then
+                # Fix permissions
+                echo -e "${YELLOW}🔧 Fixing permissions...${NC}"
+                sudo chown -R $(id -u):$(id -g) "$QDRANT_DATA_DIR"
+                
+                # Restart Qdrant
+                echo -e "${YELLOW}🚀 Starting Qdrant container...${NC}"
+                docker-compose -f "$DOCKER_COMPOSE_FILE" start qdrant
+                
+                # Wait for Qdrant to be ready
+                echo -e "${YELLOW}⏳ Waiting for Qdrant to initialize...${NC}"
+                sleep 15
+                
+                # Verify Qdrant is working
+                if curl -s "http://localhost:6333/healthz" > /dev/null 2>&1; then
+                    echo -e "${GREEN}✅ Qdrant data restored successfully from backup${NC}"
+                else
+                    echo -e "${YELLOW}⚠️ Qdrant restored but may need more time to initialize${NC}"
+                fi
+            else
+                echo -e "${RED}❌ Failed to extract Qdrant backup${NC}"
+                echo -e "${YELLOW}🚀 Starting Qdrant with fresh data...${NC}"
+                docker-compose -f "$DOCKER_COMPOSE_FILE" start qdrant
+            fi
+        else
+            echo -e "${YELLOW}⚠️ Qdrant container not found. Skipping Qdrant restoration.${NC}"
+        fi
+    fi
+    
+    # Wait for all services to be ready after restoration
+    if [ "$RESTORE_MARIADB" = true ] || [ "$RESTORE_QDRANT" = true ]; then
+        echo -e "${YELLOW}⏳ Waiting for all services to stabilize after restoration...${NC}"
+        sleep 10
+        
+        # Final health checks
+        echo -e "${YELLOW}🔍 Performing post-restoration health checks...${NC}"
+        
+        # Check MariaDB
+        if docker exec regulaite-mariadb mariadb-admin ping -h localhost -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" --silent; then
+            echo -e "${GREEN}✅ MariaDB is healthy after restoration${NC}"
+        else
+            echo -e "${YELLOW}⚠️ MariaDB health check failed - may need more time${NC}"
+        fi
+        
+        # Check Qdrant
+        if curl -s "http://localhost:6333/healthz" > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Qdrant is healthy after restoration${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Qdrant health check failed - may need more time${NC}"
+        fi
+    fi
+    
+else
+    echo -e "${YELLOW}ℹ️ No database backups found. Starting with fresh databases.${NC}"
+    echo -e "${BLUE}💡 You can create backups later using: ./scripts/backup-databases.sh${NC}"
+fi
+
+echo -e "${BLUE}===============================================${NC}"
+
+# Create database directories for future use
+echo -e "${YELLOW}📁 Ensuring database directories exist...${NC}"
+mkdir -p "$PLUGIN_DIR/backend/database/mariadb"
+mkdir -p "$PLUGIN_DIR/backend/database/qdrant"
+echo -e "${GREEN}✅ Database directories created${NC}"
+
+# Step 9: Final status and information
 echo -e "${GREEN}===============================================${NC}"
 echo -e "${BLUE}🎉 RegulAite setup completed!${NC}"
 echo -e "${GREEN}===============================================${NC}"
@@ -519,6 +735,16 @@ echo -e "  Root Password: $MARIADB_ROOT_PASSWORD"
 echo -e "  Username: $MARIADB_USER"
 echo -e "  Password: $MARIADB_PASSWORD"
 echo ""
+echo -e "${BLUE}📦 Database Backup System:${NC}"
+echo -e "  Create backups: ./scripts/backup-databases.sh${NC}"
+echo -e "  Restore backups: ./scripts/restore-databases.sh${NC}"
+echo -e "  Backup directory: ./database-backups/${NC}"
+if [ "$HAS_MARIADB_BACKUP" = true ] || [ "$HAS_QDRANT_BACKUP" = true ]; then
+    echo -e "${GREEN}  ✅ Backups available and can be restored${NC}"
+else
+    echo -e "${YELLOW}  ℹ️ No backups found - create them after adding data${NC}"
+fi
+echo ""
 echo -e "${YELLOW}If any services failed to start, check their logs:${NC}"
 echo -e "  docker logs regulaite-mariadb"
 echo -e "  docker logs regulaite-ai-backend"
@@ -531,3 +757,9 @@ echo -e "  docker logs regulaite-celery-flower"
 echo ""
 echo -e "${YELLOW}Navigate to your application at:${NC}"
 echo -e "  http://localhost:3000${NC}"
+echo ""
+echo -e "${BLUE}💡 Quick Commands:${NC}"
+echo -e "  View services: docker-compose ps${NC}"
+echo -e "  Stop services: docker-compose down${NC}"
+echo -e "  Restart services: docker-compose restart${NC}"
+echo -e "  Update and restart: ./scripts/setup.sh${NC}"
