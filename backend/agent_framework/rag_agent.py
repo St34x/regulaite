@@ -178,7 +178,9 @@ class RAGAgent(Agent):
                         if "context" in result:
                             context.extend(result["context"])
                         if "sources" in result:
-                            sources.extend(result["sources"])
+                            tool_sources = result["sources"]
+                            self.logger.info(f"Tool {tool_id} returned {len(tool_sources)} sources")
+                            sources.extend(tool_sources)
                         if "enhanced_query" in result:
                             enhanced_query = result["enhanced_query"]
                             
@@ -221,8 +223,25 @@ class RAGAgent(Agent):
             if context:
                 rag_context.extend(context)
             if sources:
-                rag_sources.extend(sources)
+                self.logger.info(f"Merging {len(sources)} tool sources with {len(rag_sources)} RAG sources")
+                # Deduplicate sources before extending
+                existing_source_ids = set()
+                for existing_source in rag_sources:
+                    # Create a unique identifier for each source
+                    source_id = f"{existing_source.get('doc_id', '')}_{existing_source.get('chunk_index', '')}_{existing_source.get('content', '')[:50]}"
+                    existing_source_ids.add(source_id)
                 
+                # Only add sources that aren't already present
+                for source in sources:
+                    source_id = f"{source.get('doc_id', '')}_{source.get('chunk_index', '')}_{source.get('content', '')[:50]}"
+                    if source_id not in existing_source_ids:
+                        rag_sources.append(source)
+                        existing_source_ids.add(source_id)
+                    else:
+                        self.logger.debug(f"Skipping duplicate source: {source.get('doc_id', 'unknown')}")
+                
+                self.logger.info(f"After deduplication: {len(rag_sources)} total unique sources")
+            
             await self._emit_step("context_analysis", f"Analyzing {len(rag_context)} relevant documents...", 
                                 f"Found {len(rag_sources)} sources", progress=70)
             
@@ -283,7 +302,7 @@ Content Guidelines:
 - Respond in the same language as the user's query
 - Use proper markdown formatting for better readability
 
-MANDATORY Structure for ALL responses:
+This is example of a good structure for ALL responses:
 ## [Main Topic/Summary]
 [Brief overview or key points]
 

@@ -359,7 +359,7 @@ const chatService = {
 
       // Use the enhanced streaming service
       const result = await streamingService.createStream(
-        `${API_URL}/chat/rag`,
+        `${API_URL}/chat`,
         requestData,
         callbacks,
         streamOptions
@@ -607,7 +607,7 @@ const chatService = {
         use_rag: true
       };
       
-      const response = await api.post(`/chat/rag`, requestPayload);
+      const response = await api.post(`/chat`, requestPayload);
       return response.data;
     } catch (error) {
       console.error('Error sending RAG-enabled message:', error);

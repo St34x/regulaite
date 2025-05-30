@@ -10,7 +10,7 @@ La présente politique a pour objet de définir les engagements de Neo Financia 
 * Loi Informatique et Libertés modifiée (FR)
 * Recommandations CNIL et EDPB
 * ISO/IEC 27001, ISO/IEC 27701
-* Règlement DORA (Digital Operational Resilience Act) – applicabilité limitée
+* Règlement DORA (Digital Operational Resilience Act)
 
 ## 3. Principes et engagements clés
 

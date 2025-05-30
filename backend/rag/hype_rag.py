@@ -318,7 +318,7 @@ class HyPERagSystem:
                         if self.bm25_nodes:
                             sample_texts = []
                             for i, node in enumerate(self.bm25_nodes[:5]):
-                                text_preview = getattr(node, 'text', 'NO_TEXT')[:50] if hasattr(node, 'text') else 'NO_TEXT_ATTR'
+                                text_preview = getattr(node, 'text', 'NO_TEXT')[:100] if hasattr(node, 'text') else 'NO_TEXT_ATTR'
                                 sample_texts.append(f"Node {i}: {text_preview}")
                             logger.debug(f"Sample node texts: {sample_texts}")
                         return False

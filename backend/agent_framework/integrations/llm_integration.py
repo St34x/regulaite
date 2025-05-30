@@ -11,6 +11,9 @@ import os
 import sys
 from pathlib import Path
 import asyncio
+import time
+import hashlib
+from functools import lru_cache
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -24,86 +27,215 @@ except ImportError:
     logger.warning("OpenAI package not found, falling back to HTTP requests")
     OPENAI_AVAILABLE = False
 
-def detect_language(text: str) -> str:
+# Language detection cache to avoid repeated LLM calls for similar text
+_language_cache = {}
+_cache_max_size = 1000
+_cache_expiry = 3600  # 1 hour
+
+class LanguageDetector:
     """
-    Detect the language of the input text.
-    Returns language code (en, fr, es, etc.)
+    Sophisticated LLM-powered language detection with fallbacks and caching.
     """
-    # Simple language detection based on common words and patterns
-    text_lower = text.lower()
     
-    # French indicators - enhanced with more common French words
-    french_indicators = [
-        # Articles and basic words
-        'le ', 'la ', 'les ', 'de ', 'du ', 'des ', 'et ', 'est ', 'un ', 'une ',
-        'dans ', 'pour ', 'avec ', 'sur ', 'par ', 'ce ', 'qui ', 'que ', 'comment ',
-        'où ', 'quand ', 'pourquoi ', 'qu\'', 'c\'', 'd\'', 'l\'', 'n\'', 'tion ',
-        'ment ', 'ées ', 'ent ', 'sont ', 'ont', 'était', 'avait', 'sera',
-        # Common French words often missed
-        'bonjour', 'salut', 'bonsoir', 'au revoir', 'merci', 'oui', 'non',
-        'je ', 'tu ', 'il ', 'elle ', 'nous ', 'vous ', 'ils ', 'elles ',
-        'me ', 'te ', 'se ', 'lui ', 'leur ', 'mes ', 'tes ', 'ses ', 'nos ', 'vos ',
-        'mon ', 'ton ', 'son ', 'ma ', 'ta ', 'sa ', 'notre ', 'votre ',
-        'peux', 'peut', 'peuvent', 'pouvoir', 'veux', 'veut', 'vouloir',
-        'suis', 'es', 'sommes', 'êtes', 'être', 'avoir', 'ai', 'as', 'a', 'avons', 'avez',
-        'faire', 'fais', 'fait', 'faisons', 'faites', 'font',
-        'dire', 'dis', 'dit', 'disons', 'dites', 'disent',
-        'aller', 'vais', 'va', 'allons', 'allez', 'vont',
-        'savoir', 'sais', 'sait', 'savons', 'savez', 'savent',
-        'voir', 'vois', 'voit', 'voyons', 'voyez', 'voient',
-        'donner', 'donne', 'donnes', 'donnons', 'donnez', 'donnent',
-        'présenter', 'présente', 'présentes', 'présentons', 'présentez', 'présentent',
-        'capacité', 'capacités', 'fonctionnalité', 'fonctionnalités',
-        'système', 'service', 'aide', 'aider', 'assistance', 'question', 'réponse',
-        # Professional/technical terms
-        'sécurité', 'réseau', 'conformité', 'réglementation', 'politique', 'gestion', 'contrôle',
-        'analyse', 'rapport', 'document', 'fichier', 'données', 'information'
-    ]
+    def __init__(self, llm_client=None):
+        self.llm_client = llm_client
+        self.fallback_enabled = True
+        
+    def _get_text_hash(self, text: str) -> str:
+        """Generate a hash for caching purposes."""
+        return hashlib.md5(text.lower().strip()[:200].encode()).hexdigest()
     
-    # Spanish indicators
-    spanish_indicators = [
-        'el ', 'la ', 'los ', 'las ', 'de ', 'del ', 'y ', 'es ', 'un ', 'una ',
-        'en ', 'con ', 'por ', 'para ', 'que ', 'como ', 'donde ', 'cuando ',
-        'por qué ', 'cómo ', 'ción ', 'mente ', 'ado ', 'ida ', 'son ', 'han',
-        'hola', 'buenos días', 'buenas tardes', 'buenas noches', 'adiós', 'gracias', 'sí', 'no',
-        'yo ', 'tú ', 'él ', 'ella ', 'nosotros ', 'vosotros ', 'ellos ', 'ellas ',
-        'me ', 'te ', 'se ', 'le ', 'les ', 'mis ', 'tus ', 'sus ', 'nuestros ', 'vuestros ',
-        'seguridad', 'red', 'cumplimiento'
-    ]
+    def _clean_cache(self):
+        """Clean expired cache entries."""
+        current_time = time.time()
+        expired_keys = [
+            key for key, (_, timestamp) in _language_cache.items()
+            if current_time - timestamp > _cache_expiry
+        ]
+        for key in expired_keys:
+            del _language_cache[key]
     
-    # English is default, but check for specific patterns
-    english_indicators = [
-        'the ', 'and ', 'is ', 'are ', 'was ', 'were ', 'a ', 'an ', 'in ', 'on ',
-        'at ', 'by ', 'for ', 'with ', 'to ', 'of ', 'that ', 'this ', 'what ',
-        'how ', 'when ', 'where ', 'why ', 'tion ', 'ment ', 'ing ', 'ed ',
-        'hello', 'hi', 'good morning', 'good afternoon', 'good evening', 'goodbye', 'thanks', 'yes', 'no',
-        'i ', 'you ', 'he ', 'she ', 'we ', 'they ', 'me ', 'him ', 'her ', 'us ', 'them ',
-        'my ', 'your ', 'his ', 'her ', 'our ', 'their ', 'mine ', 'yours ',
-        'can', 'could', 'will', 'would', 'should', 'must', 'have', 'has', 'had',
-        'do', 'does', 'did', 'be', 'am', 'is', 'are', 'was', 'were',
-        'go', 'goes', 'went', 'come', 'comes', 'came', 'get', 'gets', 'got',
-        'say', 'says', 'said', 'tell', 'tells', 'told', 'know', 'knows', 'knew',
-        'present', 'show', 'display', 'capability', 'capabilities', 'feature', 'features',
-        'system', 'service', 'help', 'assist', 'assistance', 'question', 'answer',
-        'security', 'network', 'compliance', 'regulation', 'policy', 'management'
-    ]
+    async def detect_language_llm(self, text: str) -> str:
+        """
+        Use LLM for sophisticated language detection.
+        """
+        if not self.llm_client:
+            logger.debug("No LLM client available for language detection")
+            return self._fallback_detect_language(text)
+        
+        try:
+            # Prepare a concise prompt for language detection
+            detection_prompt = f"""Analyze the following text and determine its primary language. 
+            
+Text: "{text[:300]}"
+
+Respond with ONLY the two-letter language code (en, fr, es, de, it, pt, etc.). 
+Consider:
+- Primary language used
+- Common words and phrases
+- Grammar and syntax patterns
+- Mixed language content (choose dominant language)
+
+Language code:"""
+
+            # Use a lightweight completion for speed
+            response = await self.llm_client._generate_openai(
+                detection_prompt,
+                max_tokens=10,
+                temperature=0.1,
+                model="gpt-3.5-turbo"  # Use faster model for detection
+            )
+            
+            # Extract language code
+            language_code = response.strip().lower()
+            
+            # Validate the response
+            valid_languages = ['en', 'fr', 'es', 'de', 'it', 'pt', 'ru', 'zh', 'ja', 'ko', 'ar', 'hi']
+            if language_code in valid_languages:
+                logger.debug(f"LLM detected language: {language_code} for text: '{text[:50]}...'")
+                return language_code
+            else:
+                logger.warning(f"LLM returned invalid language code: {language_code}, using fallback")
+                return self._fallback_detect_language(text)
+                
+        except Exception as e:
+            logger.warning(f"LLM language detection failed: {str(e)}, using fallback")
+            return self._fallback_detect_language(text)
     
-    # Count indicators for each language
-    french_score = sum(1 for indicator in french_indicators if indicator in text_lower)
-    spanish_score = sum(1 for indicator in spanish_indicators if indicator in text_lower)
-    english_score = sum(1 for indicator in english_indicators if indicator in text_lower)
+    def _fallback_detect_language(self, text: str) -> str:
+        """
+        Enhanced fallback language detection with improved patterns.
+        """
+        text_lower = text.lower()
+        
+        # Enhanced French indicators with better scoring
+        french_patterns = {
+            # High-confidence indicators (worth 3 points each)
+            'high': ['tion ', 'ment ', 'ées ', ' du ', ' des ', ' qu\'', ' c\'', ' d\'', ' l\'', ' n\''],
+            # Medium-confidence indicators (worth 2 points each)
+            'medium': ['le ', 'la ', 'les ', 'de ', 'et ', 'est ', 'un ', 'une ', 'dans ', 'pour ', 'avec ', 'sur ', 'par '],
+            # Low-confidence indicators (worth 1 point each)
+            'low': ['ce ', 'qui ', 'que ', 'comment ', 'où ', 'quand ', 'pourquoi ', 'sont ', 'ont']
+        }
+        
+        # Enhanced Spanish indicators
+        spanish_patterns = {
+            'high': ['ción ', 'mente ', 'ado ', 'ida ', ' del ', ' qué ', ' cómo '],
+            'medium': ['el ', 'la ', 'los ', 'las ', 'de ', 'y ', 'es ', 'un ', 'una ', 'en ', 'con '],
+            'low': ['por ', 'para ', 'que ', 'como ', 'donde ', 'cuando ', 'son ', 'han']
+        }
+        
+        # Enhanced English indicators
+        english_patterns = {
+            'high': ['tion ', 'ment ', 'ing ', 'ed ', ' the ', ' and ', ' is ', ' are '],
+            'medium': ['a ', 'an ', 'in ', 'on ', 'at ', 'by ', 'for ', 'with ', 'to ', 'of '],
+            'low': ['that ', 'this ', 'what ', 'how ', 'when ', 'where ', 'why ']
+        }
+        
+        # Calculate weighted scores
+        french_score = (
+            sum(3 for pattern in french_patterns['high'] if pattern in text_lower) +
+            sum(2 for pattern in french_patterns['medium'] if pattern in text_lower) +
+            sum(1 for pattern in french_patterns['low'] if pattern in text_lower)
+        )
+        
+        spanish_score = (
+            sum(3 for pattern in spanish_patterns['high'] if pattern in text_lower) +
+            sum(2 for pattern in spanish_patterns['medium'] if pattern in text_lower) +
+            sum(1 for pattern in spanish_patterns['low'] if pattern in text_lower)
+        )
+        
+        english_score = (
+            sum(3 for pattern in english_patterns['high'] if pattern in text_lower) +
+            sum(2 for pattern in english_patterns['medium'] if pattern in text_lower) +
+            sum(1 for pattern in english_patterns['low'] if pattern in text_lower)
+        )
+        
+        # Special handling for very short texts
+        if len(text.strip()) < 10:
+            # For very short texts, default to English unless clear French indicators
+            if any(pattern in text_lower for pattern in ['bonjour', 'salut', 'merci', 'oui', 'non']):
+                return 'fr'
+            return 'en'
+        
+        # Determine language with minimum threshold
+        scores = {'fr': french_score, 'es': spanish_score, 'en': english_score}
+        max_score = max(scores.values())
+        
+        # Require minimum confidence for non-English detection
+        if max_score < 2:
+            return 'en'  # Default to English if confidence is too low
+        
+        # Return language with highest score
+        detected_lang = max(scores, key=scores.get)
+        
+        logger.debug(f"Fallback language detection scores - FR: {french_score}, ES: {spanish_score}, EN: {english_score} -> {detected_lang}")
+        return detected_lang
+
+# Global language detector instance
+_language_detector = None
+
+def get_language_detector(llm_client=None) -> LanguageDetector:
+    """Get or create the global language detector instance."""
+    global _language_detector
+    if _language_detector is None:
+        _language_detector = LanguageDetector(llm_client)
+    elif llm_client and not _language_detector.llm_client:
+        _language_detector.llm_client = llm_client
+    return _language_detector
+
+async def detect_language(text: str, llm_client=None) -> str:
+    """
+    Detect the language of the input text using sophisticated LLM-powered detection.
     
-    # Debug logging to help troubleshoot detection issues
-    logger.debug(f"Language detection scores - French: {french_score}, Spanish: {spanish_score}, English: {english_score}")
-    logger.debug(f"Text being analyzed: '{text[:100]}...' (truncated)")
+    Args:
+        text: Text to analyze
+        llm_client: Optional LLM client for advanced detection
+        
+    Returns:
+        Language code (en, fr, es, etc.)
+    """
+    if not text or not text.strip():
+        return 'en'
     
-    # Determine language based on highest score
-    if french_score > english_score and french_score > spanish_score:
-        return 'fr'
-    elif spanish_score > english_score and spanish_score > french_score:
-        return 'es'
-    else:
-        return 'en'  # Default to English
+    # Clean and prepare text
+    text_clean = text.strip()
+    
+    # Check cache first
+    text_hash = hashlib.md5(text_clean.lower()[:200].encode()).hexdigest()
+    
+    # Clean expired cache entries periodically
+    if len(_language_cache) > _cache_max_size:
+        current_time = time.time()
+        expired_keys = [
+            key for key, (_, timestamp) in _language_cache.items()
+            if current_time - timestamp > _cache_expiry
+        ]
+        for key in expired_keys:
+            del _language_cache[key]
+    
+    # Check if we have a cached result
+    if text_hash in _language_cache:
+        cached_lang, timestamp = _language_cache[text_hash]
+        if time.time() - timestamp < _cache_expiry:
+            logger.debug(f"Using cached language detection: {cached_lang}")
+            return cached_lang
+    
+    # Get detector and detect language
+    detector = get_language_detector(llm_client)
+    
+    try:
+        # Use LLM detection for better accuracy
+        detected_lang = await detector.detect_language_llm(text_clean)
+    except Exception as e:
+        logger.warning(f"LLM language detection failed: {str(e)}, using fallback")
+        detected_lang = detector._fallback_detect_language(text_clean)
+    
+    # Cache the result
+    _language_cache[text_hash] = (detected_lang, time.time())
+    
+    logger.debug(f"Detected language: {detected_lang} for text: '{text_clean[:50]}...'")
+    return detected_lang
 
 def get_language_instruction(language: str) -> str:
     """
@@ -250,7 +382,7 @@ Tu maîtrises l'analyse de maturité et les indicateurs de performance GRC.
             
             # Detect language from the prompt (unless explicitly disabled)
             if kwargs.get("auto_language_detection", True):
-                detected_language = detect_language(prompt)
+                detected_language = await detect_language(prompt, llm_client=self)
                 logger.info(f"Agent framework detected language: {detected_language} for prompt")
                 
                 # Add language instruction to system message if not already provided
