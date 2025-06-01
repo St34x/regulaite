@@ -35,13 +35,25 @@ export const getDocuments = async (
       params,
     });
     
-    // The backend directly returns an array of documents, not an object with documents property
-    // Transform the response to match what the frontend expects
-    const documentsArray = response.data;
-    return {
-      documents: documentsArray,
-      total_count: documentsArray.length
-    };
+    // The backend now returns an object with documents and pagination metadata
+    const data = response.data;
+    
+    // Handle both old format (array) and new format (object with documents)
+    if (Array.isArray(data)) {
+      // Fallback for old format - this shouldn't happen with updated backend
+      return {
+        documents: data,
+        total_count: data.length
+      };
+    } else {
+      // New format with proper pagination
+      return {
+        documents: data.documents || [],
+        total_count: data.total_count || 0,
+        limit: data.limit || limit,
+        offset: data.offset || offset
+      };
+    }
   } catch (error) {
     throw error;
   }

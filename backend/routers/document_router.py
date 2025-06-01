@@ -153,6 +153,14 @@ class DocumentStatsResponse(BaseModel):
     total_storage_mb: float = Field(..., description="Total storage used in MB")
 
 
+class DocumentListResponse(BaseModel):
+    """Response for paginated document list."""
+    documents: List[DocumentMetadata] = Field(..., description="List of documents")
+    total_count: int = Field(..., description="Total number of documents")
+    limit: int = Field(..., description="Number of documents per page")
+    offset: int = Field(..., description="Current offset")
+
+
 # Dependency to get document parser
 async def get_document_parser():
     """Get the document parser from main application."""
@@ -299,8 +307,8 @@ async def process_document(
         )
 
 
-@router.get("/", response_model=List[DocumentMetadata])
-@router.get("", response_model=List[DocumentMetadata])  # Also handle URL without trailing slash
+@router.get("/", response_model=DocumentListResponse)
+@router.get("", response_model=DocumentListResponse)  # Also handle URL without trailing slash
 async def document_list(
     skip: int = Query(0, alias="offset"),
     limit: int = Query(100, alias="limit"),
@@ -331,6 +339,7 @@ async def document_list(
         sort_order = "desc"
 
     documents = []
+    total_count = 0
     unique_doc_ids = set()  # Track unique doc_ids to avoid duplicates
     try:
         # Get RAG system for Qdrant access
@@ -338,7 +347,12 @@ async def document_list(
         
         if not rag_system:
             logger.warning("RAG system not available for document listing")
-            return []
+            return DocumentListResponse(
+                documents=[],
+                total_count=0,
+                limit=limit,
+                offset=skip
+            )
         
         # Build filter criteria
         filter_conditions = []
@@ -398,10 +412,10 @@ async def document_list(
 
         # Get documents from Qdrant metadata collection
         try:
-            # Get all points from metadata collection
+            # Get all points from metadata collection to calculate total count
             scroll_params = {
                 "collection_name": rag_system.metadata_collection_name,
-                "limit": limit + skip,  # Fetch more to account for potential duplicates
+                "limit": 1000,  # Large limit to get all documents for count
                 "with_payload": True,
                 "with_vectors": False,
             }
@@ -457,14 +471,23 @@ async def document_list(
                 reverse=(sort_order == "desc")
             )
             
-            # Apply pagination and track unique documents
+            # Calculate total count of unique documents
+            all_unique_doc_ids = set()
+            for point in metadata_points:
+                payload = point.payload
+                if payload:
+                    doc_id = payload.get("doc_id", "")
+                    if doc_id:
+                        all_unique_doc_ids.add(doc_id)
+            
+            total_count = len(all_unique_doc_ids)
+            
+            # Apply pagination and track unique documents for current page
             documents = []
             count = 0
+            processed = 0
             
             for point in metadata_points:
-                if count >= limit:
-                    break
-                    
                 payload = point.payload
                 if not payload:
                     continue
@@ -476,6 +499,16 @@ async def document_list(
                     continue
                     
                 unique_doc_ids.add(doc_id)
+                
+                # Skip documents before the offset
+                if processed < skip:
+                    processed += 1
+                    continue
+                
+                # Stop if we've reached the limit
+                if count >= limit:
+                    break
+                    
                 count += 1
                 
                 # Extract document metadata
@@ -505,7 +538,12 @@ async def document_list(
         logger.error(f"Error fetching document list: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    return documents
+    return DocumentListResponse(
+        documents=documents,
+        total_count=total_count,
+        limit=limit,
+        offset=skip
+    )
 
 
 @router.get("/parsers", response_model=Dict[str, List[Dict[str, str]]])
