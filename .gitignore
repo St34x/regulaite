@@ -36,6 +36,7 @@ backend/nosetests.xml
 backend/coverage.xml
 backend/*.cover
 backend/.hypothesis/
+backend/agent_framework/intagration/__pycache__/
 # Ignore live database directories (they contain runtime data)
 backend/database/
 backend/agent_framework/modules/__pycache__

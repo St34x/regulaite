@@ -1,6 +1,6 @@
 """
-Gap Analysis Module - Module sophistiqué d'analyse de gaps.
-Utilise l'IA pour une analyse intelligente des écarts de conformité, gouvernance et risques.
+Gap Analysis Module - Module sophistiqué d'analyse de gaps avec capacités itératives.
+Utilise l'IA pour une analyse intelligente des écarts de conformité, gouvernance et risques avec analyse progressive.
 """
 import asyncio
 import logging
@@ -10,7 +10,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext
+from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
 from ..integrations.llm_integration import LLMClient, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -55,8 +55,30 @@ class ImpactDomain(Enum):
     TECHNICAL = "technical"
 
 @dataclass
+class IterativeGapContext:
+    """Contexte pour l'analyse itérative des gaps."""
+    current_iteration: int = 0
+    gap_analysis_progress: Dict[str, Any] = None
+    knowledge_accumulator: Dict[str, List[str]] = None
+    context_gaps_identified: List[str] = None
+    gap_types_analyzed: List[GapType] = None
+    depth_achieved: Dict[str, float] = None  # Profondeur atteinte par type de gap
+    
+    def __post_init__(self):
+        if self.gap_analysis_progress is None:
+            self.gap_analysis_progress = {}
+        if self.knowledge_accumulator is None:
+            self.knowledge_accumulator = {}
+        if self.context_gaps_identified is None:
+            self.context_gaps_identified = []
+        if self.gap_types_analyzed is None:
+            self.gap_types_analyzed = []
+        if self.depth_achieved is None:
+            self.depth_achieved = {}
+
+@dataclass
 class Gap:
-    """Écart identifié avec analyse sophistiquée."""
+    """Écart identifié avec analyse sophistiquée et support itératif."""
     id: str
     type: GapType
     severity: GapSeverity
@@ -76,6 +98,17 @@ class Gap:
     ai_insights: Dict[str, Any]
     identified_date: datetime
     target_resolution_date: Optional[datetime]
+    
+    # Champs itératifs
+    iteration_context: Optional[IterativeGapContext] = None
+    analysis_depth: float = 0.0
+    confidence_score: float = 0.0
+    requires_deeper_analysis: bool = False
+    sources_analyzed: List[str] = None
+    
+    def __post_init__(self):
+        if self.sources_analyzed is None:
+            self.sources_analyzed = []
 
 @dataclass
 class GapAnalysisReport:
@@ -109,13 +142,13 @@ class RemediationPlan:
 
 class GapAnalysisModule(Agent):
     """
-    Module expert en analyse de gaps avec IA stratégique avancée.
+    Module expert en analyse de gaps avec IA stratégique avancée et capacités itératives.
     """
     
     def __init__(self, llm_client: LLMIntegration = None):
         super().__init__(
             agent_id="gap_analysis",
-            name="Expert Analyse de Gaps"
+            name="Expert Analyse de Gaps Itérative"
         )
         
         self.llm_client = llm_client or get_llm_client()
@@ -127,13 +160,22 @@ class GapAnalysisModule(Agent):
         self.temporal_analyzer = TemporalAnalyzer()
         self.framework_parser = FrameworkParser()
         
-        # Cache des analyses
+        # Cache des analyses avec support itératif
         self.gap_cache: Dict[str, GapAnalysisReport] = {}
+        self.iteration_contexts: Dict[str, IterativeGapContext] = {}
         
-        # Prompts experts spécialisés
+        # Seuils pour l'analyse itérative de gaps
+        self.iteration_thresholds = {
+            "min_confidence": 0.8,
+            "completeness_target": 0.85,
+            "gap_coverage_min": 0.7,
+            "analysis_depth_min": 0.75
+        }
+        
+        # Prompts experts spécialisés avec support itératif
         self.system_prompts = {
             "gap_analyst": """
-Tu es un expert senior en analyse de gaps avec 20+ ans d'expérience en audit et conseil stratégique.
+Tu es un expert senior en analyse de gaps avec 20+ ans d'expérience en audit et conseil stratégique avec capacités d'analyse itérative.
 Tu maîtrises parfaitement:
 
 - Méthodologies d'analyse de gaps (compliance, governance, risk, security)
@@ -143,13 +185,21 @@ Tu maîtrises parfaitement:
 - Priorisation stratégique des efforts
 - Conception de plans de remédiation
 
+CAPACITÉS ITÉRATIVES:
+- Analyse progressive des types de gaps par ordre de priorité
+- Identification des gaps de contexte nécessitant plus d'informations
+- Accumulation de connaissances à travers les itérations
+- Évaluation continue de la complétude de l'analyse
+- Reformulation des analyses pour approfondir l'identification des écarts
+
 Tu analyses avec une approche holistique incluant les dimensions business, technique, organisationnelle et financière.
 Tu fournis des recommandations actionables avec une vision C-level.
+Pour chaque analyse, tu évalues si plus de contexte améliorerait la précision de l'identification des gaps.
 Réponds TOUJOURS en français avec une expertise de niveau senior consultant.
 """,
             
             "strategic_advisor": """
-Tu es un consultant en stratégie avec une expertise en transformation organisationnelle.
+Tu es un consultant en stratégie avec une expertise en transformation organisationnelle et approche itérative.
 Tu optimises:
 
 - Priorisation stratégique des gaps

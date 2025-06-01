@@ -1,6 +1,6 @@
 """
-Compliance Analysis Module - Module sophistiqué d'analyse de conformité.
-Utilise l'IA pour une analyse intelligente multi-frameworks avec raisonnement avancé.
+Compliance Analysis Module - Module sophistiqué d'analyse de conformité avec capacités itératives.
+Utilise l'IA pour une analyse intelligente multi-frameworks avec raisonnement avancé et iteration sur documents.
 """
 import asyncio
 import logging
@@ -10,7 +10,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext
+from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
 from ..integrations.llm_integration import LLMClient, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -36,8 +36,30 @@ class RegulatoryTrend(Enum):
     EMERGING = "emerging"
 
 @dataclass
+class IterativeAnalysisContext:
+    """Contexte pour l'analyse itérative de conformité."""
+    current_iteration: int = 0
+    document_analysis_progress: Dict[str, Any] = None
+    knowledge_accumulator: Dict[str, List[str]] = None
+    context_gaps_identified: List[str] = None
+    frameworks_analyzed: List[FrameworkType] = None
+    depth_achieved: Dict[str, float] = None  # Profondeur atteinte par domaine
+    
+    def __post_init__(self):
+        if self.document_analysis_progress is None:
+            self.document_analysis_progress = {}
+        if self.knowledge_accumulator is None:
+            self.knowledge_accumulator = {}
+        if self.context_gaps_identified is None:
+            self.context_gaps_identified = []
+        if self.frameworks_analyzed is None:
+            self.frameworks_analyzed = []
+        if self.depth_achieved is None:
+            self.depth_achieved = {}
+
+@dataclass
 class ComplianceAssessment:
-    """Évaluation de conformité avec analyse LLM."""
+    """Évaluation de conformité avec analyse LLM et support itératif."""
     framework: FrameworkType
     overall_score: float  # 0.0 - 100.0
     status: ComplianceStatus
@@ -50,10 +72,25 @@ class ComplianceAssessment:
     recommendations: List[str]
     confidence_level: float
     ai_insights: Dict[str, Any]
+    
+    # Champs itératifs
+    iteration_context: Optional[IterativeAnalysisContext] = None
+    documents_analyzed: List[str] = None
+    knowledge_sources: List[Dict[str, Any]] = None
+    requires_deeper_analysis: bool = False
+    suggested_focus_areas: List[str] = None
+    
+    def __post_init__(self):
+        if self.documents_analyzed is None:
+            self.documents_analyzed = []
+        if self.knowledge_sources is None:
+            self.knowledge_sources = []
+        if self.suggested_focus_areas is None:
+            self.suggested_focus_areas = []
 
 @dataclass
 class RegulatoryIntelligence:
-    """Intelligence réglementaire par LLM."""
+    """Intelligence réglementaire par LLM avec capacités itératives."""
     framework: FrameworkType
     recent_changes: List[Dict[str, Any]]
     upcoming_changes: List[Dict[str, Any]]
@@ -61,26 +98,49 @@ class RegulatoryIntelligence:
     preparation_recommendations: List[str]
     monitoring_priorities: List[str]
     last_updated: datetime
+    
+    # Champs itératifs
+    analysis_depth: str = "standard"  # surface, standard, deep, comprehensive
+    sources_consulted: List[str] = None
+    confidence_by_area: Dict[str, float] = None
+    requires_monitoring: bool = False
+    
+    def __post_init__(self):
+        if self.sources_consulted is None:
+            self.sources_consulted = []
+        if self.confidence_by_area is None:
+            self.confidence_by_area = {}
 
 @dataclass
 class CrossFrameworkMapping:
-    """Mapping sophistiqué entre frameworks."""
+    """Mapping sophistiqué entre frameworks avec analyse itérative."""
     primary_framework: FrameworkType
     mapped_frameworks: List[FrameworkType]
     convergence_analysis: Dict[str, Any]
     synergy_opportunities: List[str]
     conflict_resolution: List[str]
     optimization_strategy: str
+    
+    # Champs itératifs
+    analysis_completeness: float = 0.0  # 0.0 - 1.0
+    document_coverage: Dict[str, List[str]] = None
+    iteration_recommendations: List[str] = None
+    
+    def __post_init__(self):
+        if self.document_coverage is None:
+            self.document_coverage = {}
+        if self.iteration_recommendations is None:
+            self.iteration_recommendations = []
 
 class ComplianceAnalysisModule(Agent):
     """
-    Module expert en analyse de conformité avec IA avancée.
+    Module expert en analyse de conformité avec IA avancée et capacités itératives.
     """
     
     def __init__(self, llm_client: LLMClient = None):
         super().__init__(
             agent_id="compliance_analysis",
-            name="Expert Analyse de Conformité"
+            name="Expert Analyse de Conformité Itérative"
         )
         
         self.llm_client = llm_client or get_llm_client()
@@ -92,17 +152,25 @@ class ComplianceAnalysisModule(Agent):
         self.temporal_analyzer = TemporalAnalyzer()
         self.framework_parser = FrameworkParser()
         
-        # Cache des analyses
+        # Cache des analyses avec support itératif
         self.compliance_cache: Dict[str, ComplianceAssessment] = {}
         self.regulatory_intelligence_cache: Dict[str, RegulatoryIntelligence] = {}
+        self.iteration_contexts: Dict[str, IterativeAnalysisContext] = {}
         
-        # Prompts experts spécialisés
+        # Prompts experts spécialisés avec support itératif
         self.system_prompts = {
             "compliance_expert": """
 Tu es un expert senior en conformité réglementaire avec 20+ ans d'expérience internationale.
 Tu maîtrises parfaitement tous les frameworks majeurs (ISO27001, RGPD, DORA, NIST, SOX, PCI-DSS) et leurs évolutions.
-Tu analyses avec une approche stratégique incluant:
 
+CAPACITÉS ITÉRATIVES:
+- Analyse progressive des documents par ordre de priorité
+- Identification des gaps de contexte nécessitant plus d'informations
+- Accumulation de connaissances à travers les itérations
+- Reformulation des requêtes pour approfondir l'analyse
+- Évaluation continue de la complétude de l'analyse
+
+Tu analyses avec une approche stratégique incluant:
 - Vision holistique multi-frameworks
 - Impact business et opérationnel
 - Évolutions réglementaires et jurisprudentiel
@@ -112,11 +180,31 @@ Tu analyses avec une approche stratégique incluant:
 
 Tu raisonnes comme un CISO/DPO expert et fournis des recommandations actionables et stratégiques.
 Réponds TOUJOURS en français avec une expertise de niveau C-suite.
+
+Pour chaque analyse, tu évalues:
+1. La complétude des informations disponibles
+2. Les domaines nécessitant une analyse plus approfondie
+3. Les documents additionnels à consulter
+4. Les reformulations de requête pour combler les gaps
+""",
+            
+            "iterative_analyzer": """
+Tu es un analyste expert en approche itérative pour les analyses GRC.
+Tu évalues la progression de l'analyse et détermines les prochaines étapes.
+
+Tes responsabilités:
+- Évaluer la complétude de l'analyse actuelle
+- Identifier les gaps de contexte restants
+- Proposer des reformulations de requête ciblées
+- Prioriser les documents à analyser ensuite
+- Déterminer quand l'analyse est suffisamment complète
+
+Tu optimises le processus itératif pour maximiser la valeur de chaque itération.
 """,
             
             "regulatory_intelligence": """
 Tu es un analyste réglementaire expert avec une connaissance encyclopédique des évolutions légales.
-Tu surveilles et analyses:
+Tu surveilles et analyses avec approche itérative:
 
 - Nouvelles réglementations et amendements
 - Jurisprudence et décisions d'autorités
@@ -125,10 +213,11 @@ Tu surveilles et analyses:
 - Stratégies d'anticipation et préparation
 
 Tu fournis une veille réglementaire proactive et des analyses d'impact précises.
+Tu identifies les sources additionnelles à consulter pour compléter l'analyse.
 """,
             
             "strategic_advisor": """
-Tu es un consultant en stratégie de conformité avec une vision C-level.
+Tu es un consultant en stratégie de conformité avec une vision C-level et approche itérative.
 Tu optimises:
 
 - Synergies entre frameworks multiples
@@ -139,7 +228,16 @@ Tu optimises:
 - Avantage concurrentiel par la conformité
 
 Tu penses comme un Chief Compliance Officer stratégique.
+Tu évalues constamment si plus de contexte améliorerait tes recommandations.
 """
+        }
+        
+        # Seuils pour l'analyse itérative
+        self.iteration_thresholds = {
+            "min_confidence": 0.8,  # Seuil de confiance minimum
+            "completeness_target": 0.85,  # Objectif de complétude
+            "document_coverage_min": 0.7,  # Couverture documentaire minimum
+            "framework_depth_min": 0.75  # Profondeur d'analyse minimum par framework
         }
         
         # Secteurs et leurs spécificités réglementaires
@@ -148,177 +246,663 @@ Tu penses comme un Chief Compliance Officer stratégique.
                 "primary_frameworks": [FrameworkType.DORA, FrameworkType.SOX, FrameworkType.ISO27001],
                 "regulatory_density": "very_high",
                 "key_authorities": ["ACPR", "AMF", "ECB", "ESMA"],
-                "emerging_trends": ["ESG", "Digital Euro", "Crypto regulation"]
+                "emerging_trends": ["ESG", "Digital Euro", "Crypto regulation"],
+                "iteration_priority": ["risk_management", "operational_resilience", "data_protection"]
             },
             "healthcare": {
                 "primary_frameworks": [FrameworkType.ISO27001, FrameworkType.RGPD],
                 "regulatory_density": "high", 
                 "key_authorities": ["ANSM", "CNIL", "HAS"],
-                "emerging_trends": ["Health Data Hub", "AI Medical Devices"]
+                "emerging_trends": ["Health Data Hub", "AI Medical Devices"],
+                "iteration_priority": ["patient_data", "medical_devices", "clinical_trials"]
             },
             "technology": {
                 "primary_frameworks": [FrameworkType.RGPD, FrameworkType.ISO27001, FrameworkType.NIST],
                 "regulatory_density": "medium",
                 "key_authorities": ["CNIL", "ANSSI"],
-                "emerging_trends": ["AI Act", "Data Act", "Digital Services Act"]
+                "emerging_trends": ["AI Act", "Data Act", "Digital Services Act"],
+                "iteration_priority": ["data_processing", "ai_governance", "cybersecurity"]
             }
         }
 
     async def process_query(self, query: Query) -> AgentResponse:
         """
-        Traite une requête d'analyse de conformité.
+        Traite une requête d'analyse de conformité avec capacités itératives.
         """
-        logger.info(f"Traitement requête conformité: {query.query_text}")
+        logger.info(f"Traitement requête conformité itérative: {query.query_text}")
         
-        # Analyse sophistiquée de la demande par LLM
-        analysis_intent = await self._analyze_query_intent_with_llm(query.query_text)
+        # Initialiser ou récupérer le contexte itératif
+        session_id = query.context.session_id
+        if session_id not in self.iteration_contexts:
+            self.iteration_contexts[session_id] = IterativeAnalysisContext()
         
-        if analysis_intent["type"] == "compliance_assessment":
-            return await self._perform_compliance_assessment(query, analysis_intent)
-        elif analysis_intent["type"] == "gap_analysis":
-            return await self._perform_gap_analysis(query, analysis_intent)
-        elif analysis_intent["type"] == "regulatory_intelligence":
-            return await self._provide_regulatory_intelligence(query, analysis_intent)
-        elif analysis_intent["type"] == "multi_framework_optimization":
-            return await self._optimize_multi_framework_compliance(query, analysis_intent)
-        elif analysis_intent["type"] == "strategic_roadmap":
-            return await self._generate_strategic_compliance_roadmap(query, analysis_intent)
+        iteration_ctx = self.iteration_contexts[session_id]
+        iteration_ctx.current_iteration += 1
+        
+        # Analyser l'intention avec contexte itératif
+        analysis_intent = await self._analyze_query_intent_with_iterative_context(
+            query.query_text, iteration_ctx, query.parameters
+        )
+        
+        # Traitement basé sur l'intention et le mode itératif
+        if query.iteration_mode in [IterationMode.ITERATIVE, IterationMode.DEEP_ANALYSIS]:
+            return await self._process_iterative_compliance_query(query, analysis_intent, iteration_ctx)
         else:
-            return await self._general_compliance_analysis(query, analysis_intent)
+            return await self._process_standard_compliance_query(query, analysis_intent)
 
-    async def assess_multi_framework_compliance(
-        self,
-        frameworks: List[FrameworkType],
-        organization_profile: Dict[str, Any],
-        current_implementation: Dict[str, Any] = None
-    ) -> List[ComplianceAssessment]:
+    async def _process_iterative_compliance_query(self, query: Query, 
+                                                 analysis_intent: Dict[str, Any],
+                                                 iteration_ctx: IterativeAnalysisContext) -> AgentResponse:
         """
-        Évalue la conformité sur plusieurs frameworks avec analyse croisée.
+        Traite une requête de conformité avec approche itérative.
         """
-        logger.info(f"Évaluation multi-frameworks: {[f.value for f in frameworks]}")
+        logger.info(f"Analyse itérative - Itération {iteration_ctx.current_iteration}")
         
-        assessments = []
-        cross_framework_insights = {}
+        # 1. Évaluer les connaissances accumulées
+        knowledge_assessment = await self._assess_accumulated_knowledge(
+            query, iteration_ctx, analysis_intent
+        )
         
-        # 1. Évaluation individuelle enrichie par LLM
-        for framework in frameworks:
-            assessment = await self._assess_framework_compliance_with_llm(
-                framework, organization_profile, current_implementation
+        # 2. Identifier les documents à analyser dans cette itération
+        documents_to_analyze = await self._prioritize_documents_for_iteration(
+            query, iteration_ctx, knowledge_assessment
+        )
+        
+        # 3. Analyser les documents prioritaires
+        document_analysis_results = await self._analyze_documents_iteratively(
+            documents_to_analyze, query, iteration_ctx
+        )
+        
+        # 4. Intégrer les nouvelles connaissances
+        updated_knowledge = await self._integrate_new_knowledge(
+            document_analysis_results, iteration_ctx, analysis_intent
+        )
+        
+        # 5. Évaluer la complétude de l'analyse
+        completeness_assessment = await self._assess_analysis_completeness(
+            query, iteration_ctx, updated_knowledge
+        )
+        
+        # 6. Générer la réponse avec recommandations d'itération
+        if analysis_intent["type"] == "compliance_assessment":
+            return await self._perform_iterative_compliance_assessment(
+                query, analysis_intent, iteration_ctx, completeness_assessment
             )
-            assessments.append(assessment)
-        
-        # 2. Analyse des synergies et conflits entre frameworks
-        synergy_analysis = await self._analyze_framework_synergies_with_llm(
-            assessments, organization_profile
-        )
-        
-        # 3. Optimisation globale des efforts
-        optimization_strategy = await self._generate_optimization_strategy_with_llm(
-            assessments, synergy_analysis, organization_profile
-        )
-        
-        # 4. Enrichissement des évaluations avec insights croisés
-        for assessment in assessments:
-            assessment.ai_insights["cross_framework"] = {
-                "synergies": synergy_analysis.get(assessment.framework.value, {}),
-                "optimization": optimization_strategy.get(assessment.framework.value, {}),
-                "strategic_priority": self._calculate_strategic_priority(assessment, assessments)
+        elif analysis_intent["type"] == "gap_analysis":
+            return await self._perform_iterative_gap_analysis(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+        elif analysis_intent["type"] == "regulatory_intelligence":
+            return await self._provide_iterative_regulatory_intelligence(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+        else:
+            return await self._general_iterative_compliance_analysis(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+
+    async def _assess_accumulated_knowledge(self, query: Query, 
+                                          iteration_ctx: IterativeAnalysisContext,
+                                          analysis_intent: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Évalue les connaissances accumulées et leur pertinence.
+        """
+        assessment_prompt = f"""
+Évalue les connaissances accumulées pour cette analyse de conformité itérative.
+
+REQUÊTE ACTUELLE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+DOCUMENTS DÉJÀ ANALYSÉS:
+{iteration_ctx.document_analysis_progress}
+
+FRAMEWORKS COUVERTS: {[f.value for f in iteration_ctx.frameworks_analyzed]}
+
+PROFONDEUR ATTEINTE PAR DOMAINE:
+{iteration_ctx.depth_achieved}
+
+Évalue:
+1. La pertinence des connaissances existantes
+2. Les domaines bien couverts vs. ceux manquants
+3. La qualité des sources consultées
+4. Les gaps de contexte restants
+5. La cohérence des informations accumulées
+
+Réponds au format JSON:
+{{
+    "knowledge_quality": 0.0-1.0,
+    "coverage_assessment": {{
+        "well_covered_areas": ["area1", "area2"],
+        "gaps_identified": ["gap1", "gap2"],
+        "coverage_by_framework": {{"ISO27001": 0.8, "RGPD": 0.6}}
+    }},
+    "source_reliability": 0.0-1.0,
+    "consistency_score": 0.0-1.0,
+    "actionable_insights": ["insight1", "insight2"],
+    "priority_gaps": ["high_priority_gap1", "high_priority_gap2"]
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["iterative_analyzer"]},
+                    {"role": "user", "content": assessment_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation des connaissances: {str(e)}")
+            return {
+                "knowledge_quality": 0.5,
+                "coverage_assessment": {"well_covered_areas": [], "gaps_identified": ["error_in_assessment"]},
+                "source_reliability": 0.5,
+                "consistency_score": 0.5,
+                "actionable_insights": [],
+                "priority_gaps": ["assessment_error"]
             }
-        
-        return assessments
 
-    async def generate_regulatory_intelligence(
-        self,
-        frameworks: List[FrameworkType],
-        geographic_scope: List[str] = ["EU", "France"],
-        time_horizon: int = 12  # mois
-    ) -> List[RegulatoryIntelligence]:
+    async def _prioritize_documents_for_iteration(self, query: Query,
+                                                 iteration_ctx: IterativeAnalysisContext,
+                                                 knowledge_assessment: Dict[str, Any]) -> List[str]:
         """
-        Génère une intelligence réglementaire proactive.
+        Priorise les documents à analyser dans cette itération.
         """
-        logger.info(f"Génération intelligence réglementaire: {[f.value for f in frameworks]}")
-        
-        intelligence_reports = []
-        
-        for framework in frameworks:
-            # Analyse des évolutions réglementaires par LLM
-            regulatory_analysis = await self._analyze_regulatory_evolution_with_llm(
-                framework, geographic_scope, time_horizon
+        # Utiliser le DocumentFinder pour identifier les documents pertinents
+        try:
+            search_criteria = {
+                "query": query.query_text,
+                "frameworks": [f.value for f in iteration_ctx.frameworks_analyzed],
+                "focus_areas": knowledge_assessment.get("priority_gaps", []),
+                "exclude_analyzed": list(iteration_ctx.document_analysis_progress.keys())
+            }
+            
+            # Recherche de documents avec critères affinés
+            documents_found = await self.document_finder.find_relevant_documents(
+                search_criteria,
+                max_results=5,  # Limiter pour cette itération
+                prioritize_by="relevance_and_completeness"
             )
             
-            # Impact assessment sophistiqué
-            impact_assessment = await self._assess_regulatory_impact_with_llm(
-                regulatory_analysis, framework
-            )
+            return [doc["id"] for doc in documents_found.get("documents", [])]
             
-            # Recommandations de préparation
-            preparation_strategy = await self._generate_preparation_strategy_with_llm(
-                regulatory_analysis, impact_assessment, framework
-            )
-            
-            intelligence = RegulatoryIntelligence(
-                framework=framework,
-                recent_changes=regulatory_analysis.get("recent_changes", []),
-                upcoming_changes=regulatory_analysis.get("upcoming_changes", []),
-                impact_assessment=impact_assessment,
-                preparation_recommendations=preparation_strategy.get("recommendations", []),
-                monitoring_priorities=preparation_strategy.get("monitoring_priorities", []),
-                last_updated=datetime.now()
-            )
-            
-            intelligence_reports.append(intelligence)
-        
-        return intelligence_reports
+        except Exception as e:
+            logger.error(f"Erreur lors de la priorisation des documents: {str(e)}")
+            return []
 
-    async def optimize_compliance_strategy(
-        self,
-        current_state: Dict[str, Any],
-        target_frameworks: List[FrameworkType],
-        constraints: Dict[str, Any],
-        organization_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def _analyze_documents_iteratively(self, documents_to_analyze: List[str],
+                                           query: Query,
+                                           iteration_ctx: IterativeAnalysisContext) -> Dict[str, Any]:
         """
-        Optimise la stratégie de conformité avec approche holistique.
+        Analyse les documents de manière itérative et ciblée.
         """
-        logger.info(f"Optimisation stratégique conformité: {[f.value for f in target_frameworks]}")
+        analysis_results = {}
         
-        # 1. Analyse de l'état actuel enrichie par LLM
-        current_state_analysis = await self._analyze_current_compliance_state_with_llm(
-            current_state, target_frameworks, organization_profile
-        )
+        for doc_id in documents_to_analyze:
+            try:
+                # Analyser le document avec focus sur les gaps identifiés
+                doc_analysis = await self._analyze_single_document_with_context(
+                    doc_id, query, iteration_ctx
+                )
+                
+                analysis_results[doc_id] = doc_analysis
+                
+                # Mettre à jour le progrès
+                iteration_ctx.document_analysis_progress[doc_id] = {
+                    "iteration": iteration_ctx.current_iteration,
+                    "analysis_depth": doc_analysis.get("depth_achieved", 0.5),
+                    "insights_extracted": len(doc_analysis.get("insights", [])),
+                    "gaps_filled": doc_analysis.get("gaps_addressed", [])
+                }
+                
+            except Exception as e:
+                logger.error(f"Erreur lors de l'analyse du document {doc_id}: {str(e)}")
+                analysis_results[doc_id] = {"error": str(e), "insights": []}
         
-        # 2. Modélisation des scenarios d'optimisation
-        optimization_scenarios = await self._model_optimization_scenarios_with_llm(
-            current_state_analysis, target_frameworks, constraints, organization_profile
-        )
-        
-        # 3. Analyse coût-bénéfice sophistiquée
-        cost_benefit_analysis = await self._perform_cost_benefit_analysis_with_llm(
-            optimization_scenarios, organization_profile
-        )
-        
-        # 4. Recommandation stratégique finale
-        strategic_recommendation = await self._generate_strategic_recommendation_with_llm(
-            optimization_scenarios, cost_benefit_analysis, organization_profile
-        )
-        
-        return {
-            "current_state_analysis": current_state_analysis,
-            "optimization_scenarios": optimization_scenarios,
-            "cost_benefit_analysis": cost_benefit_analysis,
-            "recommended_strategy": strategic_recommendation,
-            "implementation_roadmap": await self._generate_implementation_roadmap_with_llm(
-                strategic_recommendation, constraints, organization_profile
+        return analysis_results
+
+    async def _analyze_single_document_with_context(self, doc_id: str,
+                                                   query: Query,
+                                                   iteration_ctx: IterativeAnalysisContext) -> Dict[str, Any]:
+        """
+        Analyse un document unique avec le contexte itératif et collecte détaillée des sources.
+        """
+        analysis_prompt = f"""
+Analyse ce document dans le contexte de l'analyse itérative de conformité.
+
+DOCUMENT ID: {doc_id}
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONTEXTE ACCUMULÉ:
+- Frameworks analysés: {[f.value for f in iteration_ctx.frameworks_analyzed]}
+- Gaps prioritaires: {iteration_ctx.context_gaps_identified}
+- Connaissances existantes: {list(iteration_ctx.knowledge_accumulator.keys())}
+
+FOCUS DE CETTE ANALYSE:
+- Combler les gaps identifiés
+- Approfondir les domaines peu couverts
+- Extraire des insights actionnables
+- Identifier de nouveaux documents pertinents
+
+Analyse le document et réponds au format JSON:
+{{
+    "document_metadata": {{
+        "title": "titre du document",
+        "type": "type de document",
+        "framework_relevance": ["ISO27001", "RGPD"],
+        "quality_score": 0.0-1.0,
+        "last_updated": "date si disponible"
+    }},
+    "insights_extracted": ["insight1", "insight2"],
+    "gaps_addressed": ["gap1", "gap2"],
+    "frameworks_covered": ["ISO27001", "RGPD"],
+    "confidence_level": 0.0-1.0,
+    "depth_achieved": 0.0-1.0,
+    "related_documents": ["doc1", "doc2"],
+    "actionable_recommendations": ["rec1", "rec2"],
+    "compliance_findings": {{
+        "controls_identified": ["control1", "control2"],
+        "risks_highlighted": ["risk1", "risk2"],
+        "gaps_found": ["gap1", "gap2"]
+    }},
+    "source_quality_assessment": {{
+        "reliability": 0.0-1.0,
+        "completeness": 0.0-1.0,
+        "currency": 0.0-1.0,
+        "relevance": 0.0-1.0
+    }}
+}}
+"""
+
+        try:
+            # Récupérer et analyser le document
+            document_content = await self.document_finder.get_document_content(doc_id)
+            
+            full_prompt = f"{analysis_prompt}\n\nCONTENU DU DOCUMENT:\n{document_content}"
+
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["compliance_expert"]},
+                    {"role": "user", "content": full_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
             )
+            
+            analysis_result = json.loads(response)
+            
+            # Enrichir avec des métadonnées de source pour traçabilité
+            analysis_result["source_metadata"] = {
+                "document_id": doc_id,
+                "analysis_timestamp": datetime.now().isoformat(),
+                "iteration": iteration_ctx.current_iteration,
+                "tools_used": ["document_finder", "entity_extractor", "llm_analysis"],
+                "analysis_method": "iterative_llm_analysis"
+            }
+            
+            return analysis_result
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse du document {doc_id}: {str(e)}")
+            return {
+                "document_metadata": {
+                    "title": f"Document {doc_id}",
+                    "type": "unknown",
+                    "framework_relevance": [],
+                    "quality_score": 0.0
+                },
+                "insights_extracted": [],
+                "gaps_addressed": [],
+                "frameworks_covered": [],
+                "confidence_level": 0.0,
+                "depth_achieved": 0.0,
+                "related_documents": [],
+                "actionable_recommendations": [],
+                "compliance_findings": {"controls_identified": [], "risks_highlighted": [], "gaps_found": []},
+                "source_quality_assessment": {"reliability": 0.0, "completeness": 0.0, "currency": 0.0, "relevance": 0.0},
+                "source_metadata": {
+                    "document_id": doc_id,
+                    "analysis_timestamp": datetime.now().isoformat(),
+                    "iteration": iteration_ctx.current_iteration,
+                    "error": str(e)
+                }
+            }
+
+    async def _integrate_new_knowledge(self, document_analysis_results: Dict[str, Any],
+                                     iteration_ctx: IterativeAnalysisContext,
+                                     analysis_intent: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Intègre les nouvelles connaissances dans le contexte itératif.
+        """
+        integrated_knowledge = {}
+        
+        for doc_id, analysis in document_analysis_results.items():
+            if "error" not in analysis:
+                # Ajouter les insights aux connaissances accumulées
+                insights_key = f"insights_iteration_{iteration_ctx.current_iteration}"
+                if insights_key not in iteration_ctx.knowledge_accumulator:
+                    iteration_ctx.knowledge_accumulator[insights_key] = []
+                
+                iteration_ctx.knowledge_accumulator[insights_key].extend(
+                    analysis.get("insights_extracted", [])
+                )
+                
+                # Mettre à jour les gaps comblés
+                gaps_addressed = analysis.get("gaps_addressed", [])
+                for gap in gaps_addressed:
+                    if gap in iteration_ctx.context_gaps_identified:
+                        iteration_ctx.context_gaps_identified.remove(gap)
+                
+                # Mettre à jour la profondeur par framework
+                for framework in analysis.get("frameworks_covered", []):
+                    current_depth = iteration_ctx.depth_achieved.get(framework, 0.0)
+                    new_depth = max(current_depth, analysis.get("depth_achieved", 0.0))
+                    iteration_ctx.depth_achieved[framework] = new_depth
+        
+        # Synthétiser les connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "gaps_remaining": len(iteration_ctx.context_gaps_identified),
+            "frameworks_depth": iteration_ctx.depth_achieved,
+            "documents_analyzed": len(iteration_ctx.document_analysis_progress)
         }
+        
+        return integrated_knowledge
 
-    # Méthodes privées sophistiquées avec LLM
+    async def _assess_analysis_completeness(self, query: Query,
+                                          iteration_ctx: IterativeAnalysisContext,
+                                          integrated_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Évalue la complétude de l'analyse et détermine si plus d'itérations sont nécessaires.
+        """
+        completeness_prompt = f"""
+Évalue la complétude de cette analyse de conformité itérative.
 
-    async def _analyze_query_intent_with_llm(self, query_text: str) -> Dict[str, Any]:
-        """Analyse sophistiquée de l'intention de la requête."""
+REQUÊTE ORIGINALE: "{query.query_text}"
+ITÉRATION ACTUELLE: {iteration_ctx.current_iteration}
+
+ÉTAT ACTUEL:
+- Total insights collectés: {integrated_knowledge.get("total_insights", 0)}
+- Gaps restants: {integrated_knowledge.get("gaps_remaining", 0)}
+- Documents analysés: {integrated_knowledge.get("documents_analyzed", 0)}
+- Profondeur par framework: {integrated_knowledge.get("frameworks_depth", {})}
+
+SEUILS CIBLES:
+- Confiance minimum: {self.iteration_thresholds["min_confidence"]}
+- Complétude cible: {self.iteration_thresholds["completeness_target"]}
+- Couverture documentaire: {self.iteration_thresholds["document_coverage_min"]}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+Évalue la complétude et réponds au format JSON:
+{{
+    "overall_completeness": 0.0-1.0,
+    "confidence_level": 0.0-1.0,
+    "analysis_quality": 0.0-1.0,
+    "requires_more_iterations": true/false,
+    "recommended_next_steps": ["step1", "step2"],
+    "areas_needing_deeper_analysis": ["area1", "area2"],
+    "sufficient_for_decision": true/false,
+    "iteration_value_assessment": "high/medium/low",
+    "stopping_criteria_met": {{
+        "min_confidence": true/false,
+        "target_completeness": true/false,
+        "document_coverage": true/false
+    }}
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["iterative_analyzer"]},
+                    {"role": "user", "content": completeness_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation de complétude: {str(e)}")
+            return {
+                "overall_completeness": 0.5,
+                "confidence_level": 0.5,
+                "analysis_quality": 0.5,
+                "requires_more_iterations": True,
+                "recommended_next_steps": ["retry_assessment"],
+                "areas_needing_deeper_analysis": ["error_occurred"],
+                "sufficient_for_decision": False,
+                "iteration_value_assessment": "low",
+                "stopping_criteria_met": {"min_confidence": False, "target_completeness": False, "document_coverage": False}
+            }
+
+    async def _perform_iterative_compliance_assessment(self, query: Query,
+                                                     analysis_intent: Dict[str, Any],
+                                                     iteration_ctx: IterativeAnalysisContext,
+                                                     completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """
+        Effectue une évaluation de conformité avec approche itérative et sources détaillées.
+        """
+        # Calculer les métriques de connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "gaps_remaining": len(iteration_ctx.context_gaps_identified),
+            "frameworks_depth": iteration_ctx.depth_achieved,
+            "documents_analyzed": len(iteration_ctx.document_analysis_progress)
+        }
+        
+        # Synthétiser toutes les connaissances accumulées
+        synthesis_prompt = f"""
+Synthétise une évaluation de conformité complète basée sur {iteration_ctx.current_iteration} itération(s) d'analyse.
+
+REQUÊTE: "{query.query_text}"
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+DOCUMENTS ANALYSÉS: {len(iteration_ctx.document_analysis_progress)}
+FRAMEWORKS COUVERTS: {[f.value for f in iteration_ctx.frameworks_analyzed]}
+PROFONDEUR ATTEINTE: {iteration_ctx.depth_achieved}
+
+ÉVALUATION DE COMPLÉTUDE:
+{json.dumps(completeness_assessment, indent=2, ensure_ascii=False)}
+
+Fournis une évaluation de conformité complète incluant:
+1. État actuel de conformité par framework
+2. Gaps identifiés et leur criticité
+3. Recommandations prioritaires
+4. Plan d'action structuré
+5. Évaluation de la confiance dans l'analyse
+6. Besoins d'itérations supplémentaires si applicable
+
+IMPORTANT: Indique clairement les sources d'information utilisées et leur fiabilité.
+
+Réponds en français avec un niveau d'expertise C-suite.
+"""
+
+        try:
+            synthesis = await self.llm_client.generate_response(
+            messages=[
+                {"role": "system", "content": self.system_prompts["compliance_expert"]},
+                    {"role": "user", "content": synthesis_prompt}
+            ],
+            model="gpt-4.1",
+            temperature=0.2
+        )
+        
+            # Compiler les sources détaillées avec métadonnées complètes
+            detailed_sources = self._compile_detailed_sources_with_metadata(iteration_ctx)
+            
+            # Construire la réponse avec métadonnées itératives
+            response = AgentResponse(
+                content=synthesis,
+                tools_used=["document_finder", "entity_extractor", "framework_parser", "llm_analysis"],
+                context_used=True,
+                sources=detailed_sources,
+                confidence=completeness_assessment.get("confidence_level", 0.8),
+                iteration_info={
+                    "total_iterations": iteration_ctx.current_iteration,
+                    "completeness_achieved": completeness_assessment.get("overall_completeness", 0.0),
+                    "documents_analyzed": len(iteration_ctx.document_analysis_progress),
+                    "frameworks_covered": len(iteration_ctx.frameworks_analyzed),
+                    "sources_detail_level": "comprehensive"
+                },
+                requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+                context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", []),
+                knowledge_gained=self._extract_key_insights(iteration_ctx),
+                metadata={
+                    "iteration_summary": {
+                        "knowledge_quality": integrated_knowledge.get("total_insights", 0),
+                        "gaps_resolved": len(iteration_ctx.context_gaps_identified),
+                        "depth_by_framework": iteration_ctx.depth_achieved,
+                        "analysis_progression": completeness_assessment,
+                        "source_transparency": "full_traceability_enabled"
+                    },
+                    "sources_metadata": {
+                        "total_sources": len(detailed_sources),
+                        "source_types": list(set(s.get("type", "unknown") for s in detailed_sources)),
+                        "reliability_scores": [s.get("reliability", 0.5) for s in detailed_sources if "reliability" in s]
+                    }
+                }
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la synthèse itérative: {str(e)}")
+            return AgentResponse(
+                content=f"Erreur lors de l'analyse itérative: {str(e)}",
+                confidence=0.3,
+                requires_iteration=True,
+                context_gaps=["error_in_synthesis"],
+                sources=[{
+                    "type": "error_log",
+                    "title": "Erreur d'analyse",
+                    "details": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }]
+            )
+
+    def _compile_detailed_sources_with_metadata(self, iteration_ctx: IterativeAnalysisContext) -> List[Dict[str, Any]]:
+        """Compile les sources avec métadonnées complètes pour transparence maximale."""
+        detailed_sources = []
+        
+        # Sources documentaires analysées
+        for doc_id, progress in iteration_ctx.document_analysis_progress.items():
+            source = {
+                "type": "document_analysis",
+                "id": doc_id,
+                "title": f"Document d'analyse GRC - {doc_id}",
+                "iteration": progress.get("iteration", 0),
+                "analysis_depth": progress.get("analysis_depth", 0.0),
+                "insights_count": progress.get("insights_extracted", 0),
+                "frameworks_addressed": progress.get("frameworks_covered", []),
+                "gaps_resolved": progress.get("gaps_filled", []),
+                "confidence_score": progress.get("confidence_level", 0.5),
+                "tools_used": ["document_finder", "entity_extractor", "framework_parser", "llm_analysis"],
+                "timestamp": datetime.now().isoformat(),
+                "reliability": progress.get("source_quality_assessment", {}).get("reliability", 0.7),
+                "details": f"Analyse de profondeur {progress.get('analysis_depth', 0.0):.1%} avec {progress.get('insights_extracted', 0)} insights extraits"
+            }
+            detailed_sources.append(source)
+        
+        # Sources de connaissances accumulées par itération
+        for knowledge_key, knowledge_items in iteration_ctx.knowledge_accumulator.items():
+            if knowledge_items:
+                source = {
+                    "type": "knowledge_accumulation",
+                    "id": knowledge_key,
+                    "title": f"Base de connaissances accumulées - {knowledge_key}",
+                    "content_count": len(knowledge_items),
+                    "sample_insights": knowledge_items[:2] if knowledge_items else [],
+                    "tools_used": ["llm_analysis", "knowledge_extraction", "iterative_synthesis"],
+                    "reliability": 0.8,  # Confiance élevée pour connaissances synthétisées
+                    "details": f"Accumulation itérative de {len(knowledge_items)} éléments de connaissance GRC"
+                }
+                detailed_sources.append(source)
+        
+        # Source méthodologique pour l'approche itérative
+        if iteration_ctx.current_iteration > 0:
+            source = {
+                "type": "methodology",
+                "id": "iterative_analysis_methodology",
+                "title": "Méthodologie d'analyse itérative GRC",
+                "iterations_performed": iteration_ctx.current_iteration,
+                "frameworks_analyzed": [f.value for f in iteration_ctx.frameworks_analyzed],
+                "depth_progression": iteration_ctx.depth_achieved,
+                "tools_used": ["orchestrator", "compliance_module", "iterative_analyzer"],
+                "reliability": 0.9,  # Haute confiance dans la méthodologie
+                "details": f"Analyse en {iteration_ctx.current_iteration} itérations avec progression de profondeur mesurée"
+            }
+            detailed_sources.append(source)
+        
+        return detailed_sources
+
+    def _compile_iteration_sources(self, iteration_ctx: IterativeAnalysisContext) -> List[Dict[str, Any]]:
+        """Compile toutes les sources utilisées à travers les itérations avec détails complets."""
+        sources = []
+        
+        for doc_id, progress in iteration_ctx.document_analysis_progress.items():
+            # Source détaillée avec métadonnées complètes
+            source = {
+                "type": "document",
+                "id": doc_id,
+                "title": f"Document d'analyse {doc_id}",
+                "iteration": progress.get("iteration", 0),
+                "analysis_depth": progress.get("analysis_depth", 0.0),
+                "insights_extracted": progress.get("insights_extracted", 0),
+                "gaps_addressed": progress.get("gaps_filled", []),
+                "confidence_level": progress.get("confidence_level", 0.5),
+                "frameworks_covered": progress.get("frameworks_covered", []),
+                "tools_used": ["document_finder", "entity_extractor", "framework_parser"],
+                "timestamp": datetime.now().isoformat(),
+                "details": f"Analyse itérative de profondeur {progress.get('analysis_depth', 0.0):.2f} - {progress.get('insights_extracted', 0)} insights extraits"
+            }
+            sources.append(source)
+        
+        # Ajouter les sources de connaissances accumulées
+        for knowledge_key, knowledge_items in iteration_ctx.knowledge_accumulator.items():
+            if knowledge_items:
+                source = {
+                    "type": "knowledge_base",
+                    "id": knowledge_key,
+                    "title": f"Base de connaissances - {knowledge_key}",
+                    "content_count": len(knowledge_items),
+                    "items": knowledge_items[:3],  # Premiers éléments pour aperçu
+                    "tools_used": ["llm_analysis", "knowledge_extraction"],
+                    "details": f"Accumulation de {len(knowledge_items)} éléments de connaissance"
+                }
+                sources.append(source)
+        
+        return sources
+
+    def _extract_key_insights(self, iteration_ctx: IterativeAnalysisContext) -> List[str]:
+        """Extrait les insights clés de toutes les itérations."""
+        key_insights = []
+        
+        for iteration_key, insights in iteration_ctx.knowledge_accumulator.items():
+            key_insights.extend(insights[:3])  # Top 3 insights par itération
+        
+        return key_insights
+
+    async def _analyze_query_intent_with_iterative_context(self, query_text: str,
+                                                         iteration_ctx: IterativeAnalysisContext,
+                                                         parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyse sophistiquée de l'intention de la requête avec contexte itératif."""
         
         intent_analysis_prompt = f"""
-Analyse cette demande de conformité et détermine l'intention avec ton expertise senior:
+Analyse cette demande de conformité avec ton expertise senior et en tenant compte des connaissances accumulées:
 
 DEMANDE: "{query_text}"
 
@@ -338,6 +922,27 @@ Détermine:
 6. Niveau de détail requis (stratégique, opérationnel, technique)
 
 Retourne une analyse JSON structurée avec ta compréhension experte.
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+DOCUMENTS DÉJÀ ANALYSÉS:
+{iteration_ctx.document_analysis_progress}
+
+FRAMEWORKS COUVERTS:
+{[f.value for f in iteration_ctx.frameworks_analyzed]}
+
+PROFONDEUR ATTEINTE PAR DOMAINE:
+{iteration_ctx.depth_achieved}
+
+Évalue:
+1. La pertinence des connaissances existantes
+2. Les domaines bien couverts vs. ceux manquants
+3. La qualité des sources consultées
+4. Les gaps de contexte restants
+5. La cohérence des informations accumulées
+
+Réponds en français avec un niveau d'expertise C-suite.
 """
 
         response = await self.llm_client.generate_response(
@@ -346,7 +951,7 @@ Retourne une analyse JSON structurée avec ta compréhension experte.
                 {"role": "user", "content": intent_analysis_prompt}
             ],
             model="gpt-4.1",
-            temperature=0.1
+            temperature=0.2
         )
         
         try:
@@ -365,331 +970,32 @@ Retourne une analyse JSON structurée avec ta compréhension experte.
                 "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés"
             }
 
-    async def _assess_framework_compliance_with_llm(
-        self,
-        framework: FrameworkType,
-        organization_profile: Dict[str, Any],
-        current_implementation: Dict[str, Any] = None
-    ) -> ComplianceAssessment:
-        """Évaluation sophistiquée de conformité par LLM."""
+    async def _process_standard_compliance_query(self, query: Query,
+                                                  analysis_intent: Dict[str, Any]) -> AgentResponse:
+        """
+        Effectue une analyse standard de conformité.
+        """
+        logger.info(f"Traitement requête standard de conformité: {query.query_text}")
         
-        # 1. Récupérer les documents pertinents
-        relevant_docs = await self.document_finder.search_documents(
-            f"conformité {framework.value} politique procédure contrôle",
-            limit=20
+        # Analyse sophistiquée de la demande par LLM
+        analysis_intent = await self._analyze_query_intent_with_iterative_context(
+            query.query_text, IterativeAnalysisContext(), query.parameters
         )
         
-        # 2. Extraction d'entités de conformité
-        compliance_entities = []
-        for doc in relevant_docs:
-            content = doc.get("content", "")
-            if content:
-                entities = await self.entity_extractor.extract_entities(
-                    content,
-                    entity_types=[EntityType.CONTROL, EntityType.REQUIREMENT],
-                    framework_context=framework.value
-                )
-                compliance_entities.extend(entities.get("control", []))
-                compliance_entities.extend(entities.get("requirement", []))
-        
-        # 3. Analyse gaps avec le framework parser
-        gaps = []
-        if current_implementation:
-            gaps = await self.framework_parser.analyze_compliance_gaps(
-                framework, current_implementation, organization_profile
-            )
-        
-        # 4. Évaluation experte par LLM
-        assessment_prompt = f"""
-Effectue une évaluation experte de conformité {framework.value} avec ton expertise senior:
+        if analysis_intent["type"] == "compliance_assessment":
+            return await self._perform_compliance_assessment(query, analysis_intent)
+        elif analysis_intent["type"] == "gap_analysis":
+            return await self._perform_gap_analysis(query, analysis_intent)
+        elif analysis_intent["type"] == "regulatory_intelligence":
+            return await self._provide_regulatory_intelligence(query, analysis_intent)
+        else:
+            return await self._general_compliance_analysis(query, analysis_intent)
 
-PROFIL ORGANISATION:
-{json.dumps(organization_profile, indent=2)}
-
-ENTITÉS CONFORMITÉ IDENTIFIÉES:
-{json.dumps(compliance_entities[:10], indent=2, default=str)}
-
-GAPS IDENTIFIÉS:
-{json.dumps([{"id": g.requirement_id, "severity": g.severity} for g in gaps], indent=2)}
-
-DOCUMENTS ANALYSÉS: {len(relevant_docs)}
-
-En tant qu'expert senior, évalue:
-
-1. SCORE GLOBAL DE CONFORMITÉ (0-100)
-   - Méthodologie de calcul
-   - Facteurs de pondération
-   - Niveau de confiance
-
-2. STATUT DE CONFORMITÉ
-   - Compliant/Non-compliant/Partiellement conforme
-   - Justification détaillée
-
-3. FINDINGS CLÉS
-   - Points forts de l'organisation
-   - Lacunes critiques identifiées
-   - Risques de non-conformité
-
-4. RECOMMANDATIONS STRATÉGIQUES
-   - Actions prioritaires (top 5)
-   - Approche d'implémentation
-   - Timeline suggérée
-
-5. INSIGHTS EXPERTS
-   - Maturité organisationnelle
-   - Benchmarking sectoriel
-   - Évolutions recommandées
-
-Retourne une évaluation JSON experte et nuancée.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["compliance_expert"]},
-                {"role": "user", "content": assessment_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.2
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            ai_analysis = json.loads(json_content)
-            
-            # Construire l'assessment
-            overall_score = float(ai_analysis.get("compliance_score", 50.0))
-            status_text = ai_analysis.get("compliance_status", "unknown").lower()
-            
-            # Mapper le statut
-            status_mapping = {
-                "compliant": ComplianceStatus.COMPLIANT,
-                "non_compliant": ComplianceStatus.NON_COMPLIANT,
-                "partially_compliant": ComplianceStatus.PARTIALLY_COMPLIANT,
-                "unknown": ComplianceStatus.UNKNOWN
-            }
-            status = status_mapping.get(status_text, ComplianceStatus.UNKNOWN)
-            
-            return ComplianceAssessment(
-                framework=framework,
-                overall_score=overall_score,
-                status=status,
-                assessed_requirements=len(compliance_entities),
-                compliant_requirements=int(len(compliance_entities) * (overall_score / 100)),
-                gap_count=len(gaps),
-                critical_gaps=len([g for g in gaps if g.severity in ["critical", "high"]]),
-                assessment_date=datetime.now(),
-                key_findings=ai_analysis.get("key_findings", []),
-                recommendations=ai_analysis.get("recommendations", []),
-                confidence_level=float(ai_analysis.get("confidence_level", 0.7)),
-                ai_insights=ai_analysis
-            )
-            
-        except Exception as e:
-            logger.error(f"Erreur évaluation conformité: {str(e)}")
-            logger.warning("Création d'assessment d'erreur - évaluation manuelle requise")
-            # Assessment d'erreur avec informations claires
-            return ComplianceAssessment(
-                framework=framework,
-                overall_score=0.0,
-                status=ComplianceStatus.UNKNOWN,
-                assessed_requirements=0,
-                compliant_requirements=0,
-                gap_count=len(gaps),
-                critical_gaps=0,
-                assessment_date=datetime.now(),
-                key_findings=[
-                    "⚠️ ERREUR: Évaluation automatique échouée",
-                    "Évaluation manuelle de conformité requise",
-                    "Données incomplètes ou corrompues"
-                ],
-                recommendations=[
-                    "Effectuer une évaluation de conformité manuelle",
-                    "Consulter un expert en conformité réglementaire",
-                    "Réviser la qualité des données d'entrée",
-                    "Utiliser des outils d'audit standards"
-                ],
-                confidence_level=0.0,
-                ai_insights={
-                    "error": True,
-                    "error_message": f"Échec de l'évaluation de conformité par LLM: {str(e)}",
-                    "fallback_message": "Assessment d'erreur généré - évaluation manuelle requise"
-                }
-            )
-
-    async def _analyze_regulatory_evolution_with_llm(
-        self,
-        framework: FrameworkType,
-        geographic_scope: List[str],
-        time_horizon: int
-    ) -> Dict[str, Any]:
-        """Analyse l'évolution réglementaire avec intelligence artificielle."""
-        
-        regulatory_prompt = f"""
-En tant qu'expert en veille réglementaire, analyse l'évolution du framework {framework.value}:
-
-SCOPE GÉOGRAPHIQUE: {geographic_scope}
-HORIZON TEMPOREL: {time_horizon} mois
-
-Analyse avec ton expertise:
-
-1. CHANGEMENTS RÉCENTS (6 derniers mois):
-   - Nouvelles exigences ou amendements
-   - Clarifications des autorités
-   - Jurisprudence significative
-   - Impact opérationnel
-
-2. ÉVOLUTIONS PRÉVUES ({time_horizon} prochains mois):
-   - Projets de réglementation
-   - Consultations publiques
-   - Timeline de mise en œuvre
-   - Préparation nécessaire
-
-3. TENDANCES RÉGLEMENTAIRES:
-   - Direction générale des évolutions
-   - Facteurs de changement
-   - Comparaison internationale
-   - Convergence/divergence
-
-4. IMPACT ORGANISATIONNEL:
-   - Secteurs les plus affectés
-   - Nouveaux obligations
-   - Coûts de conformité
-   - Opportunités stratégiques
-
-5. SIGNAUX FAIBLES:
-   - Évolutions émergentes
-   - Risques réglementaires
-   - Technologies impactantes
-   - Changements géopolitiques
-
-Retourne une analyse prospective experte et actionnable.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["regulatory_intelligence"]},
-                {"role": "user", "content": regulatory_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.3
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur analyse réglementaire: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de l'analyse réglementaire par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "L'analyse réglementaire automatique a échoué. Veille manuelle requise.",
-                "suggested_actions": [
-                    "Effectuer une veille réglementaire manuelle",
-                    "Consulter les autorités de régulation",
-                    "Utiliser des services de veille spécialisés",
-                    "Réviser les sources d'information et réessayer"
-                ]
-            }
-
-    async def _generate_strategic_recommendation_with_llm(
-        self,
-        scenarios: Dict[str, Any],
-        cost_benefit: Dict[str, Any],
-        organization_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Génère une recommandation stratégique sophistiquée."""
-        
-        strategy_prompt = f"""
-En tant que Chief Compliance Officer expert, recommande la stratégie optimale:
-
-SCENARIOS D'OPTIMISATION:
-{json.dumps(scenarios, indent=2, default=str)[:3000]}
-
-ANALYSE COÛT-BÉNÉFICE:
-{json.dumps(cost_benefit, indent=2, default=str)[:2000]}
-
-PROFIL ORGANISATION:
-{json.dumps(organization_profile, indent=2)[:1500]}
-
-Recommande avec ton expertise C-level:
-
-1. STRATÉGIE RECOMMANDÉE:
-   - Approche privilégiée et justification
-   - Priorisation des frameworks
-   - Séquencement optimal
-   - Allocation des ressources
-
-2. RATIONALE STRATÉGIQUE:
-   - Avantages compétitifs
-   - Mitigation des risques
-   - ROI et business case
-   - Alignement organisationnel
-
-3. FACTEURS CRITIQUES DE SUCCÈS:
-   - Conditions de réussite
-   - Risques d'échec
-   - Mesures de mitigation
-   - Indicateurs de performance
-
-4. COMMUNICATION STAKEHOLDERS:
-   - Messages clés par audience
-   - Stratégie de change management
-   - Gouvernance et reporting
-   - Engagement des métiers
-
-5. ADAPTABILITÉ:
-   - Flexibilité du plan
-   - Points de révision
-   - Scenarios de contingence
-   - Évolutivité
-
-Pense comme un executive et recommande une stratégie gagnante.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": strategy_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.2
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur recommandation stratégique: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de la génération de recommandations par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "La génération automatique de recommandations a échoué. Conseil stratégique manuel requis.",
-                "suggested_actions": [
-                    "Effectuer une analyse stratégique manuelle",
-                    "Consulter un expert en stratégie de conformité",
-                    "Utiliser des frameworks décisionnels standards",
-                    "Réviser les données d'entrée et réessayer"
-                ]
-            }
-
-    # Méthodes de traitement des requêtes
-
-    async def _perform_compliance_assessment(
-        self, 
-        query: Query, 
-        intent: Dict[str, Any]
-    ) -> AgentResponse:
+    async def _perform_compliance_assessment(self, query: Query,
+                                                  analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Effectue une évaluation de conformité."""
         
-        frameworks = [FrameworkType(f) for f in intent.get("frameworks", ["iso27001"])]
+        frameworks = [FrameworkType(f) for f in analysis_intent.get("frameworks", ["iso27001"])]
         org_profile = query.context.get("organization", {}) if query.context else {}
         
         assessments = await self.assess_multi_framework_compliance(
@@ -712,14 +1018,11 @@ Pense comme un executive et recommande une stratégie gagnante.
             }
         )
 
-    async def _perform_gap_analysis(
-        self,
-        query: Query,
-        intent: Dict[str, Any]
-    ) -> AgentResponse:
+    async def _perform_gap_analysis(self, query: Query,
+                                                  analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Effectue une analyse de gaps."""
         
-        framework = FrameworkType(intent.get("frameworks", ["iso27001"])[0])
+        framework = FrameworkType(analysis_intent.get("frameworks", ["iso27001"])[0])
         org_profile = query.context.get("organization", {}) if query.context else {}
         current_impl = query.context.get("current_implementation", {}) if query.context else {}
         
@@ -743,86 +1046,13 @@ Pense comme un executive et recommande une stratégie gagnante.
             }
         )
 
-    # Méthodes utilitaires
-
-    def _calculate_strategic_priority(
-        self,
-        assessment: ComplianceAssessment,
-        all_assessments: List[ComplianceAssessment]
-    ) -> str:
-        """Calcule la priorité stratégique d'un framework."""
-        
-        # Logique de priorisation basée sur score, gaps critiques, etc.
-        if assessment.critical_gaps > 3:
-            return "high"
-        elif assessment.overall_score < 50:
-            return "medium"
-        else:
-            return "low"
-
-    async def _synthesize_assessment_results_with_llm(
-        self,
-        assessments: List[ComplianceAssessment],
-        original_query: str
-    ) -> str:
-        """Synthétise les résultats d'évaluation."""
-        
-        # Simplification pour le démo
-        frameworks = [a.framework.value for a in assessments]
-        avg_score = sum(a.overall_score for a in assessments) / len(assessments)
-        total_gaps = sum(a.gap_count for a in assessments)
-        
-        return f"""
-Évaluation de conformité multi-frameworks terminée.
-
-**Frameworks évalués**: {', '.join(frameworks)}
-**Score moyen de conformité**: {avg_score:.1f}%
-**Gaps identifiés**: {total_gaps} au total
-
-**Synthèse**: L'organisation présente un niveau de conformité {'satisfaisant' if avg_score > 70 else 'nécessitant des améliorations'}.
-Les efforts doivent se concentrer sur les gaps critiques identifiés.
-
-**Prochaines étapes recommandées**:
-1. Prioriser la remédiation des gaps critiques
-2. Mettre en place un plan de conformité continue
-3. Renforcer la gouvernance des données
-"""
-
-    async def _analyze_gaps_with_llm(
-        self,
-        gaps: List[ComplianceGap],
-        framework: FrameworkType,
-        org_profile: Dict[str, Any]
-    ) -> str:
-        """Analyse sophistiquée des gaps."""
-        
-        critical_gaps = [g for g in gaps if g.severity == "critical"]
-        high_gaps = [g for g in gaps if g.severity == "high"]
-        
-        return f"""
-Analyse des gaps de conformité {framework.value}:
-
-**Gaps critiques**: {len(critical_gaps)}
-**Gaps élevés**: {len(high_gaps)}
-**Total gaps**: {len(gaps)}
-
-**Gaps critiques prioritaires**:
-{chr(10).join([f"- {g.description}" for g in critical_gaps[:5]])}
-
-**Recommandations**:
-1. Traiter immédiatement les gaps critiques
-2. Planifier la remédiation des gaps élevés
-3. Établir un processus de monitoring continu
-"""
-
-    # Méthodes de traitement des requêtes - Implémentations complètes
-
-    async def _provide_regulatory_intelligence(self, query: Query, intent: Dict[str, Any]) -> AgentResponse:
+    async def _provide_regulatory_intelligence(self, query: Query,
+                                                  analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Fournit une intelligence réglementaire proactive."""
         
-        frameworks = [FrameworkType(f) for f in intent.get("frameworks", ["rgpd"])]
-        geographic_scope = intent.get("scope", ["EU", "France"])
-        time_horizon = intent.get("horizon", 12)
+        frameworks = [FrameworkType(f) for f in analysis_intent.get("frameworks", ["rgpd"])]
+        geographic_scope = analysis_intent.get("scope", ["EU", "France"])
+        time_horizon = analysis_intent.get("horizon", 12)
         
         intelligence_reports = await self.generate_regulatory_intelligence(
             frameworks, geographic_scope, time_horizon
@@ -865,109 +1095,8 @@ Fournis une synthèse exécutive claire et actionnable.
             }
         )
 
-    async def _optimize_multi_framework_compliance(self, query: Query, intent: Dict[str, Any]) -> AgentResponse:
-        """Optimise la conformité multi-frameworks."""
-        
-        frameworks = [FrameworkType(f) for f in intent.get("frameworks", ["iso27001", "rgpd"])]
-        org_profile = query.context.get("organization", {}) if query.context else {}
-        current_state = query.context.get("current_implementation", {}) if query.context else {}
-        constraints = intent.get("constraints", {})
-        
-        optimization_strategy = await self.optimize_compliance_strategy(
-            current_state, frameworks, constraints, org_profile
-        )
-        
-        # Synthèse stratégique par LLM
-        synthesis_prompt = f"""
-Synthétise cette stratégie d'optimisation pour répondre à: "{query.query_text}"
-
-STRATÉGIE D'OPTIMISATION:
-{json.dumps(optimization_strategy.get("recommended_strategy", {}), indent=2, default=str)[:1500]}
-
-ANALYSE COÛT-BÉNÉFICE:
-{json.dumps(optimization_strategy.get("cost_benefit_analysis", {}), indent=2, default=str)[:1000]}
-
-Présente une synthèse exécutive avec recommandations concrètes.
-"""
-        
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": synthesis_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.2
-        )
-        
-        return AgentResponse(
-            content=response,
-            tools_used=["optimization_strategy"],
-            context_used=True,
-            sources=[],
-            metadata={
-                "frameworks": [f.value for f in frameworks],
-                "optimization_scenarios": len(optimization_strategy.get("optimization_scenarios", {})),
-                "strategy_type": optimization_strategy.get("recommended_strategy", {}).get("strategy", "balanced")
-            }
-        )
-
-    async def _generate_strategic_compliance_roadmap(self, query: Query, intent: Dict[str, Any]) -> AgentResponse:
-        """Génère une roadmap stratégique de conformité."""
-        
-        frameworks = [FrameworkType(f) for f in intent.get("frameworks", ["iso27001"])]
-        org_profile = query.context.get("organization", {}) if query.context else {}
-        current_state = query.context.get("current_implementation", {}) if query.context else {}
-        constraints = intent.get("constraints", {})
-        
-        # Analyse des gaps pour la roadmap
-        all_gaps = []
-        for framework in frameworks:
-            gaps = await self.framework_parser.analyze_compliance_gaps(
-                framework, current_state, org_profile
-            )
-            all_gaps.extend(gaps)
-        
-        # Génération de la roadmap
-        roadmap = await self.framework_parser.generate_implementation_roadmap(
-            frameworks[0], all_gaps, constraints
-        )
-        
-        # Synthèse de la roadmap par LLM
-        synthesis_prompt = f"""
-Présente cette roadmap stratégique pour répondre à: "{query.query_text}"
-
-ROADMAP GÉNÉRÉE:
-{json.dumps(roadmap, indent=2, default=str)[:2000]}
-
-GAPS IDENTIFIÉS: {len(all_gaps)}
-FRAMEWORKS: {[f.value for f in frameworks]}
-
-Fournis une présentation exécutive de la roadmap avec timeline et priorités.
-"""
-        
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": synthesis_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.2
-        )
-        
-        return AgentResponse(
-            content=response,
-            tools_used=["framework_parser", "gap_analysis"],
-            context_used=True,
-            sources=[],
-            metadata={
-                "frameworks": [f.value for f in frameworks],
-                "total_gaps": len(all_gaps),
-                "critical_gaps": len([g for g in all_gaps if g.severity == "critical"]),
-                "roadmap_phases": len(roadmap.get("phases", []))
-            }
-        )
-
-    async def _general_compliance_analysis(self, query: Query, intent: Dict[str, Any]) -> AgentResponse:
+    async def _general_compliance_analysis(self, query: Query,
+                                                  analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Effectue une analyse générale de conformité."""
         
         # Collecte d'informations contextuelles
@@ -1053,767 +1182,301 @@ Fournis une analyse experte complète et actionnable.
             }
         )
 
-    # Méthodes sophistiquées avec LLM - Implémentations complètes
-    
-    async def _analyze_framework_synergies_with_llm(
-        self, 
+    async def _analyze_gaps_with_llm(self, gaps: List[ComplianceGap],
+                                                  framework: FrameworkType,
+                                                  org_profile: Dict[str, Any]) -> str:
+        """Analyse sophistiquée des gaps."""
+        
+        critical_gaps = [g for g in gaps if g.severity == "critical"]
+        high_gaps = [g for g in gaps if g.severity == "high"]
+        
+        return f"""
+Analyse des gaps de conformité {framework.value}:
+
+**Gaps critiques**: {len(critical_gaps)}
+**Gaps élevés**: {len(high_gaps)}
+**Total gaps**: {len(gaps)}
+
+**Gaps critiques prioritaires**:
+{chr(10).join([f"- {g.description}" for g in critical_gaps[:5]])}
+
+**Recommandations**:
+1. Traiter immédiatement les gaps critiques
+2. Planifier la remédiation des gaps élevés
+3. Établir un processus de monitoring continu
+"""
+
+    async def _synthesize_assessment_results_with_llm(self,
         assessments: List[ComplianceAssessment], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Analyse les synergies entre frameworks avec IA."""
+                                                      original_query: str) -> str:
+        """Synthétise les résultats d'évaluation."""
         
-        synergy_prompt = f"""
-En tant qu'expert senior en conformité multi-frameworks, analyse les synergies entre ces évaluations:
+        # Simplification pour le démo
+        frameworks = [a.framework.value for a in assessments]
+        avg_score = sum(a.overall_score for a in assessments) / len(assessments)
+        total_gaps = sum(a.gap_count for a in assessments)
+        
+        return f"""
+Évaluation de conformité multi-frameworks terminée.
 
-ÉVALUATIONS DE CONFORMITÉ:
-{json.dumps([{
-    "framework": a.framework.value,
-    "score": a.overall_score,
-    "status": a.status.value,
-    "gaps": a.gap_count,
-    "findings": a.key_findings[:3]
-} for a in assessments], indent=2)}
+**Frameworks évalués**: {', '.join(frameworks)}
+**Score moyen de conformité**: {avg_score:.1f}%
+**Gaps identifiés**: {total_gaps} au total
 
-PROFIL ORGANISATIONNEL:
-{json.dumps(org_profile, indent=2)[:1000]}
+**Synthèse**: L'organisation présente un niveau de conformité {'satisfaisant' if avg_score > 70 else 'nécessitant des améliorations'}.
+Les efforts doivent se concentrer sur les gaps critiques identifiés.
 
-Analyse avec ton expertise les synergies entre frameworks:
-
-1. CONVERGENCES RÉGLEMENTAIRES:
-   - Exigences communes identifiées
-   - Contrôles transversaux applicables
-   - Processus mutualisables
-   - Documentations partagées
-
-2. COMPLÉMENTARITÉS STRATÉGIQUES:
-   - Couverture de risques complémentaires
-   - Renforcement mutuel des contrôles
-   - Optimisation des efforts
-   - Synergie organisationnelle
-
-3. CONFLITS ET TENSIONS:
-   - Exigences contradictoires
-   - Approches incompatibles
-   - Charges de travail redondantes
-   - Résolutions recommandées
-
-4. OPPORTUNITÉS D'OPTIMISATION:
-   - Programmes de conformité unifiés
-   - Gouvernance consolidée
-   - Processus intégrés
-   - ROI optimisé
-
-5. STRATÉGIE D'ALIGNEMENT:
-   - Priorisation des frameworks
-   - Séquencement optimal
-   - Points d'ancrage communs
-   - Facteurs critiques de succès
-
-Pour chaque framework, identifie ses synergies spécifiques avec les autres.
-Retourne une analyse JSON détaillée et stratégique.
+**Prochaines étapes recommandées**:
+1. Prioriser la remédiation des gaps critiques
+2. Mettre en place un plan de conformité continue
+3. Renforcer la gouvernance des données
 """
 
-        response = await self.llm_client.generate_response(
+    async def _synthesize_iterative_results_with_llm(self,
+                                                      analysis_results: Dict[str, Any],
+                                                      original_query: str) -> str:
+        """Synthétise les résultats d'analyse itérative."""
+        
+        # Simplification pour le démo
+        insights = [result.get("insights_extracted", []) for result in analysis_results.values()]
+        total_insights = sum(len(insights) for insights in insights)
+        
+        return f"""
+Évaluation itérative terminée.
+
+**Insights extraits**: {total_insights} au total
+
+**Synthèse**: L'analyse a révélé {total_insights} insights utiles pour répondre à la requête initiale.
+
+**Prochaines étapes recommandées**:
+1. Prioriser la mise en œuvre des insights les plus pertinents
+2. Planifier des itérations supplémentaires si nécessaire
+3. Renforcer la gouvernance des données et des processus
+"""
+
+    async def _perform_iterative_gap_analysis(self, query: Query,
+                                                  analysis_intent: Dict[str, Any],
+                                                  iteration_ctx: IterativeAnalysisContext,
+                                                  completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """
+        Effectue une analyse de gaps avec approche itérative.
+        """
+        # Calculer les métriques de connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "gaps_remaining": len(iteration_ctx.context_gaps_identified),
+            "frameworks_depth": iteration_ctx.depth_achieved,
+            "documents_analyzed": len(iteration_ctx.document_analysis_progress)
+        }
+        
+        # Synthétiser les résultats d'analyse itérative pour gap analysis
+        synthesis_prompt = f"""
+Synthétise une analyse de gaps de conformité complète basée sur {iteration_ctx.current_iteration} itération(s).
+
+REQUÊTE: "{query.query_text}"
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+MÉTRIQUES:
+- Total insights: {integrated_knowledge['total_insights']}
+- Gaps restants: {integrated_knowledge['gaps_remaining']}
+- Documents analysés: {integrated_knowledge['documents_analyzed']}
+
+Fournis une analyse de gaps structurée avec sources clairement identifiées.
+"""
+
+        try:
+            synthesis = await self.llm_client.generate_response(
             messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": synergy_prompt}
+                    {"role": "system", "content": self.system_prompts["compliance_expert"]},
+                    {"role": "user", "content": synthesis_prompt}
             ],
             model="gpt-4.1",
             temperature=0.2
         )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
         except Exception as e:
-            logger.error(f"Erreur analyse synergies: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de l'analyse des synergies par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "L'analyse automatique des synergies a échoué. Analyse manuelle requise.",
-                "suggested_actions": [
-                    "Effectuer une analyse de synergies manuelle",
-                    "Consulter un expert en stratégie multi-frameworks",
-                    "Utiliser des matrices de comparaison standards",
-                    "Réviser les données d'évaluation et réessayer"
-                ]
-            }
-
-    async def _generate_optimization_strategy_with_llm(
-        self, 
-        assessments: List[ComplianceAssessment], 
-        synergy_analysis: Dict[str, Any], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Génère une stratégie d'optimisation globale."""
+            synthesis = f"Analyse de gaps itérative - {integrated_knowledge['total_insights']} insights collectés sur {integrated_knowledge['documents_analyzed']} documents."
         
-        optimization_prompt = f"""
-En tant que Chief Compliance Officer expert, développe une stratégie d'optimisation:
-
-ÉVALUATIONS FRAMEWORKS:
-{json.dumps([{
-    "framework": a.framework.value,
-    "score": a.overall_score,
-    "critical_gaps": a.critical_gaps,
-    "recommendations": a.recommendations[:2]
-} for a in assessments], indent=2)}
-
-ANALYSE DES SYNERGIES:
-{json.dumps(synergy_analysis, indent=2, default=str)[:2000]}
-
-CONTEXTE ORGANISATIONNEL:
-{json.dumps(org_profile, indent=2)[:1000]}
-
-Développe une stratégie d'optimisation complète:
-
-1. STRATÉGIE GLOBALE:
-   - Vision unifiée de la conformité
-   - Objectifs stratégiques prioritaires
-   - Approche d'intégration des frameworks
-   - Proposition de valeur business
-
-2. PRIORISATION INTELLIGENTE:
-   - Frameworks à prioriser et pourquoi
-   - Séquencement optimal des efforts
-   - Critères de priorisation utilisés
-   - Timeline stratégique
-
-3. OPTIMISATION DES RESSOURCES:
-   - Mutualisation des efforts
-   - Économies d'échelle identifiées
-   - Allocation optimale du budget
-   - Compétences à développer
-
-4. GOUVERNANCE INTÉGRÉE:
-   - Structure de gouvernance unifiée
-   - Processus de décision consolidés
-   - Reporting et KPIs harmonisés
-   - Rôles et responsabilités clairs
-
-5. PLAN DE TRANSFORMATION:
-   - Phases de transformation
-   - Jalons critiques
-   - Facteurs de succès
-   - Gestion des résistances
-
-6. MESURE DU SUCCÈS:
-   - KPIs de performance globale
-   - Métriques d'efficacité
-   - ROI attendu par framework
-   - Indicateurs de maturité
-
-Pense comme un CCO stratégique et propose une optimisation ambitieuse mais réaliste.
-Retourne une stratégie JSON complète et actionnable.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": optimization_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.3
+        # Compiler les sources détaillées
+        detailed_sources = self._compile_detailed_sources_with_metadata(iteration_ctx)
+        
+        # Construire la réponse avec métadonnées itératives
+        response = AgentResponse(
+            content=synthesis,
+            tools_used=["document_finder", "entity_extractor", "framework_parser"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            iteration_info={
+                "total_iterations": iteration_ctx.current_iteration,
+                "completeness_achieved": completeness_assessment.get("overall_completeness", 0.0),
+                "documents_analyzed": len(iteration_ctx.document_analysis_progress),
+                "frameworks_covered": len(iteration_ctx.frameworks_analyzed)
+            },
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", []),
+            knowledge_gained=self._extract_key_insights(iteration_ctx),
+            metadata={
+                "iteration_summary": {
+                    "knowledge_quality": integrated_knowledge["total_insights"],
+                    "gaps_resolved": len(iteration_ctx.context_gaps_identified),
+                    "depth_by_framework": iteration_ctx.depth_achieved,
+                    "analysis_progression": completeness_assessment
+                }
+            }
         )
         
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur stratégie optimisation: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de la génération de stratégie par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "La génération automatique de stratégie a échoué. Stratégie manuelle requise.",
-                "suggested_actions": [
-                    "Développer une stratégie d'optimisation manuelle",
-                    "Consulter un Chief Compliance Officer expérimenté",
-                    "Utiliser des frameworks stratégiques standards",
-                    "Réviser les données d'entrée et réessayer"
-                ]
-            }
+        return response
 
-    async def _assess_regulatory_impact_with_llm(
-        self, 
-        regulatory_analysis: Dict[str, Any], 
-        framework: FrameworkType
-    ) -> Dict[str, Any]:
-        """Évalue l'impact des évolutions réglementaires."""
+    async def _provide_iterative_regulatory_intelligence(self, query: Query,
+                                                  analysis_intent: Dict[str, Any],
+                                                  iteration_ctx: IterativeAnalysisContext,
+                                                  completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """
+        Fournit une intelligence réglementaire proactive avec approche itérative.
+        """
+        # Calculer les métriques de connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "gaps_remaining": len(iteration_ctx.context_gaps_identified),
+            "frameworks_depth": iteration_ctx.depth_achieved,
+            "documents_analyzed": len(iteration_ctx.document_analysis_progress)
+        }
         
-        impact_prompt = f"""
-En tant qu'expert en impact réglementaire, évalue l'impact des évolutions {framework.value}:
+        # Synthétiser l'intelligence réglementaire
+        synthesis_prompt = f"""
+Synthétise une intelligence réglementaire complète basée sur {iteration_ctx.current_iteration} itération(s).
 
-ANALYSE RÉGLEMENTAIRE:
-{json.dumps(regulatory_analysis, indent=2, default=str)[:2500]}
+REQUÊTE: "{query.query_text}"
 
-FRAMEWORK: {framework.value}
+CONNAISSANCES RÉGLEMENTAIRES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
 
-Évalue avec ton expertise l'impact organisationnel:
+MÉTRIQUES:
+- Total insights: {integrated_knowledge['total_insights']}
+- Sources consultées: {integrated_knowledge['documents_analyzed']}
 
-1. IMPACT OPÉRATIONNEL:
-   - Processus à modifier ou créer
-   - Systèmes et technologies impactés
-   - Compétences nouvelles requises
-   - Charge de travail additionnelle
-
-2. IMPACT BUSINESS:
-   - Coûts de mise en conformité
-   - Risques de non-conformité
-   - Opportunités business créées
-   - Avantage concurrentiel potentiel
-
-3. IMPACT ORGANISATIONNEL:
-   - Changements structurels nécessaires
-   - Nouveaux rôles et responsabilités
-   - Formation et développement
-   - Gestion du changement
-
-4. IMPACT TEMPOREL:
-   - Urgence des adaptations
-   - Timeline de mise en œuvre
-   - Phases critiques
-   - Dependencies externes
-
-5. IMPACT SECTORIEL:
-   - Spécificités sectorielles
-   - Avantages/désavantages concurrentiels
-   - Benchmarking industrie
-   - Tendances du marché
-
-6. RISQUES ASSOCIÉS:
-   - Risques de non-adaptation
-   - Coût de l'inaction
-   - Pénalités potentielles
-   - Impact réputation
-
-7. OPPORTUNITÉS:
-   - Amélioration des processus
-   - Innovation forcée
-   - Différenciation marché
-   - Leadership sectoriel
-
-Fournis une évaluation d'impact complète et stratégique.
-Retourne une analyse JSON détaillée avec recommandations.
+Fournis une veille réglementaire avec sources identifiées et traçabilité.
 """
 
-        response = await self.llm_client.generate_response(
+        try:
+            synthesis = await self.llm_client.generate_response(
             messages=[
-                {"role": "system", "content": self.system_prompts["regulatory_intelligence"]},
-                {"role": "user", "content": impact_prompt}
+                    {"role": "system", "content": self.system_prompts["regulatory_intelligence"]},
+                    {"role": "user", "content": synthesis_prompt}
             ],
             model="gpt-4.1",
             temperature=0.2
         )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
         except Exception as e:
-            logger.error(f"Erreur évaluation impact réglementaire: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de l'évaluation d'impact réglementaire par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "L'évaluation automatique d'impact a échoué. Analyse manuelle requise.",
-                "suggested_actions": [
-                    "Effectuer une évaluation d'impact manuelle",
-                    "Consulter un expert en réglementation",
-                    "Utiliser des grilles d'impact standards",
-                    "Réviser les données réglementaires et réessayer"
-                ]
-            }
-
-    async def _generate_preparation_strategy_with_llm(
-        self, 
-        regulatory_analysis: Dict[str, Any], 
-        impact_assessment: Dict[str, Any], 
-        framework: FrameworkType
-    ) -> Dict[str, Any]:
-        """Génère une stratégie de préparation aux évolutions."""
+            synthesis = f"Intelligence réglementaire itérative - {integrated_knowledge['total_insights']} insights réglementaires collectés."
         
-        preparation_prompt = f"""
-En tant qu'expert en préparation réglementaire, élabore une stratégie proactive:
-
-ÉVOLUTIONS RÉGLEMENTAIRES:
-{json.dumps(regulatory_analysis, indent=2, default=str)[:1500]}
-
-ÉVALUATION D'IMPACT:
-{json.dumps(impact_assessment, indent=2, default=str)[:1500]}
-
-FRAMEWORK: {framework.value}
-
-Développe une stratégie de préparation complète:
-
-1. STRATÉGIE DE PRÉPARATION:
-   - Approche proactive recommandée
-   - Phases de préparation
-   - Actions immédiates prioritaires
-   - Plan de contingence
-
-2. RECOMMANDATIONS TACTIQUES:
-   - Actions à court terme (0-3 mois)
-   - Préparations moyen terme (3-12 mois)
-   - Stratégie long terme (12+ mois)
-   - Quick wins identifiées
-
-3. VEILLE STRATÉGIQUE:
-   - Sources de monitoring prioritaires
-   - Signaux faibles à surveiller
-   - Fréquence de révision
-   - Triggers d'action
-
-4. PRÉPARATION ORGANISATIONNELLE:
-   - Compétences à développer
-   - Processus à adapter
-   - Systèmes à modifier
-   - Gouvernance à ajuster
-
-5. GESTION DES PARTIES PRENANTES:
-   - Communication interne
-   - Engagement régulateurs
-   - Coordination industrie
-   - Influence normative
-
-6. MESURE ET AJUSTEMENT:
-   - Indicateurs de préparation
-   - Points de contrôle
-   - Mécanismes d'ajustement
-   - Validation de la stratégie
-
-Conçois une stratégie qui anticipe et prépare efficacement aux changements.
-Retourne un plan JSON stratégique et actionnable.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["regulatory_intelligence"]},
-                {"role": "user", "content": preparation_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.3
+        # Compiler les sources détaillées
+        detailed_sources = self._compile_detailed_sources_with_metadata(iteration_ctx)
+        
+        # Construire la réponse avec métadonnées itératives
+        response = AgentResponse(
+            content=synthesis,
+            tools_used=["regulatory_intelligence"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            iteration_info={
+                "total_iterations": iteration_ctx.current_iteration,
+                "completeness_achieved": completeness_assessment.get("overall_completeness", 0.0),
+                "documents_analyzed": len(iteration_ctx.document_analysis_progress),
+                "frameworks_covered": len(iteration_ctx.frameworks_analyzed)
+            },
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", []),
+            knowledge_gained=self._extract_key_insights(iteration_ctx),
+            metadata={
+                "iteration_summary": {
+                    "knowledge_quality": integrated_knowledge["total_insights"],
+                    "gaps_resolved": len(iteration_ctx.context_gaps_identified),
+                    "depth_by_framework": iteration_ctx.depth_achieved,
+                    "analysis_progression": completeness_assessment
+                }
+            }
         )
         
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            data = json.loads(json_content)
-            return {
-                "recommendations": data.get("tactical_recommendations", {}).get("actions", []),
-                "monitoring_priorities": data.get("strategic_monitoring", {}).get("priorities", []),
-                "preparation_strategy": data.get("preparation_strategy", {}),
-                "organizational_preparation": data.get("organizational_preparation", {}),
-                "stakeholder_management": data.get("stakeholder_management", {}),
-                "measurement": data.get("measurement", {})
-            }
-        except Exception as e:
-            logger.error(f"Erreur stratégie préparation: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de la génération de stratégie de préparation par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "La génération automatique de stratégie de préparation a échoué. Planification manuelle requise.",
-                "suggested_actions": [
-                    "Développer une stratégie de préparation manuelle",
-                    "Consulter un expert en préparation réglementaire",
-                    "Utiliser des frameworks de préparation standards",
-                    "Réviser les données d'analyse et réessayer"
-                ]
-            }
+        return response
 
-    async def _analyze_current_compliance_state_with_llm(
-        self, 
-        current_state: Dict[str, Any], 
-        frameworks: List[FrameworkType], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Analyse l'état actuel de conformité."""
+    async def _general_iterative_compliance_analysis(self, query: Query,
+                                                  analysis_intent: Dict[str, Any],
+                                                  iteration_ctx: IterativeAnalysisContext,
+                                                  completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """
+        Effectue une analyse générale de conformité avec approche itérative.
+        """
+        # Calculer les métriques de connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "gaps_remaining": len(iteration_ctx.context_gaps_identified),
+            "frameworks_depth": iteration_ctx.depth_achieved,
+            "documents_analyzed": len(iteration_ctx.document_analysis_progress)
+        }
         
-        state_analysis_prompt = f"""
-En tant qu'expert senior en audit de conformité, analyse l'état actuel:
+        # Synthétiser l'analyse générale
+        synthesis_prompt = f"""
+Synthétise une analyse générale de conformité basée sur {iteration_ctx.current_iteration} itération(s).
 
-ÉTAT ACTUEL DÉCLARÉ:
-{json.dumps(current_state, indent=2, default=str)[:2000]}
+REQUÊTE: "{query.query_text}"
 
-FRAMEWORKS CIBLES: {[f.value for f in frameworks]}
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
 
-PROFIL ORGANISATIONNEL:
-{json.dumps(org_profile, indent=2)[:1000]}
+MÉTRIQUES:
+- Total insights: {integrated_knowledge['total_insights']}
+- Documents analysés: {integrated_knowledge['documents_analyzed']}
+- Profondeur atteinte: {iteration_ctx.depth_achieved}
 
-Effectue une analyse experte de l'état de conformité:
-
-1. DIAGNOSTIC GLOBAL:
-   - Niveau de maturité général
-   - Points forts organisationnels
-   - Lacunes critiques identifiées
-   - Tendances observées
-
-2. ANALYSE PAR FRAMEWORK:
-   - État de conformité par framework
-   - Gaps spécifiques identifiés
-   - Niveau de risque associé
-   - Efforts requis pour la conformité
-
-3. CAPACITÉS ORGANISATIONNELLES:
-   - Maturité des processus
-   - Compétences disponibles
-   - Infrastructure de conformité
-   - Culture de conformité
-
-4. GOUVERNANCE ET PILOTAGE:
-   - Structure de gouvernance actuelle
-   - Processus de pilotage
-   - Reporting et monitoring
-   - Prise de décision
-
-5. RESSOURCES ET MOYENS:
-   - Budget alloué à la conformité
-   - Équipes dédiées
-   - Outils et technologies
-   - Support externe
-
-6. BENCHMARKING IMPLICITE:
-   - Positionnement vs meilleures pratiques
-   - Comparaison sectorielle
-   - Écarts identifiés
-   - Potentiel d'amélioration
-
-7. FACTEURS DE RISQUE:
-   - Risques de non-conformité
-   - Vulnérabilités identifiées
-   - Impact potentiel
-   - Urgence d'action
-
-Fournis un diagnostic expert complet et nuancé.
-Retourne une analyse JSON structurée et approfondie.
+Fournis une analyse complète avec traçabilité des sources.
 """
 
-        response = await self.llm_client.generate_response(
+        try:
+            synthesis = await self.llm_client.generate_response(
             messages=[
-                {"role": "system", "content": self.system_prompts["compliance_expert"]},
-                {"role": "user", "content": state_analysis_prompt}
+                    {"role": "system", "content": self.system_prompts["compliance_expert"]},
+                    {"role": "user", "content": synthesis_prompt}
             ],
             model="gpt-4.1",
             temperature=0.2
         )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
         except Exception as e:
-            logger.error(f"Erreur analyse état actuel: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de l'analyse de l'état actuel par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "L'analyse automatique de l'état actuel a échoué. Diagnostic manuel requis.",
-                "suggested_actions": [
-                    "Effectuer un diagnostic de conformité manuel",
-                    "Consulter un expert en audit de conformité",
-                    "Utiliser des grilles d'évaluation standards",
-                    "Réviser les données d'état actuel et réessayer"
-                ]
-            }
-
-    async def _model_optimization_scenarios_with_llm(
-        self, 
-        current_state: Dict[str, Any], 
-        frameworks: List[FrameworkType], 
-        constraints: Dict[str, Any], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Modélise des scénarios d'optimisation."""
+            synthesis = f"Analyse générale itérative - {integrated_knowledge['total_insights']} insights collectés via {integrated_knowledge['documents_analyzed']} sources."
         
-        scenarios_prompt = f"""
-En tant qu'expert en stratégie de conformité, modélise des scénarios d'optimisation:
-
-ÉTAT ACTUEL:
-{json.dumps(current_state, indent=2, default=str)[:1500]}
-
-FRAMEWORKS: {[f.value for f in frameworks]}
-
-CONTRAINTES:
-{json.dumps(constraints, indent=2)[:1000]}
-
-PROFIL ORGANISATION:
-{json.dumps(org_profile, indent=2)[:1000]}
-
-Modélise différents scénarios d'optimisation de la conformité:
-
-1. SCÉNARIO CONSERVATEUR:
-   - Approche prudente et progressive
-   - Minimisation des risques
-   - Timeline étendue
-   - Investissement minimal
-   - Bénéfices attendus
-
-2. SCÉNARIO ÉQUILIBRÉ:
-   - Approche pragmatique
-   - Balance risque/opportunité
-   - Timeline réaliste
-   - Investissement modéré
-   - ROI optimisé
-
-3. SCÉNARIO AMBITIEUX:
-   - Transformation accélérée
-   - Innovation et différenciation
-   - Timeline agressive
-   - Investissement significatif
-   - Avantage concurrentiel
-
-4. SCÉNARIO HYBRIDE:
-   - Approche différenciée par framework
-   - Priorisation intelligente
-   - Phasage optimisé
-   - Allocation flexible
-   - Adaptabilité maximale
-
-Pour chaque scénario, définis:
-- Stratégie d'implémentation
-- Ressources requises
-- Timeline et phases
-- Risques et mitigation
-- Bénéfices attendus
-- Probabilité de succès
-
-Pense comme un stratège et propose des scénarios réalistes et différenciés.
-Retourne une modélisation JSON complète avec recommandations.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": scenarios_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.4
+        # Compiler les sources détaillées
+        detailed_sources = self._compile_detailed_sources_with_metadata(iteration_ctx)
+        
+        # Construire la réponse avec métadonnées itératives
+        response = AgentResponse(
+            content=synthesis,
+            tools_used=["document_finder", "entity_extractor"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            iteration_info={
+                "total_iterations": iteration_ctx.current_iteration,
+                "completeness_achieved": completeness_assessment.get("overall_completeness", 0.0),
+                "documents_analyzed": len(iteration_ctx.document_analysis_progress),
+                "frameworks_covered": len(iteration_ctx.frameworks_analyzed)
+            },
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", []),
+            knowledge_gained=self._extract_key_insights(iteration_ctx),
+            metadata={
+                "iteration_summary": {
+                    "knowledge_quality": integrated_knowledge["total_insights"],
+                    "gaps_resolved": len(iteration_ctx.context_gaps_identified),
+                    "depth_by_framework": iteration_ctx.depth_achieved,
+                    "analysis_progression": completeness_assessment
+                }
+            }
         )
         
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur modélisation scénarios: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de la modélisation des scénarios par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "La modélisation automatique des scénarios a échoué. Analyse manuelle requise.",
-                "suggested_actions": [
-                    "Réviser les données d'entrée pour la modélisation",
-                    "Effectuer une modélisation de scénarios manuelle",
-                    "Consulter un expert en stratégie de conformité",
-                    "Utiliser des modèles de scénarios standards"
-                ]
-            }
-
-    async def _perform_cost_benefit_analysis_with_llm(
-        self, 
-        scenarios: Dict[str, Any], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Effectue une analyse coût-bénéfice sophistiquée."""
-        
-        cost_benefit_prompt = f"""
-En tant qu'expert en analyse financière de conformité, évalue les coûts-bénéfices:
-
-SCÉNARIOS D'OPTIMISATION:
-{json.dumps(scenarios, indent=2, default=str)[:2500]}
-
-PROFIL ORGANISATIONNEL:
-{json.dumps(org_profile, indent=2)[:1000]}
-
-Effectue une analyse coût-bénéfice experte et complète:
-
-1. ANALYSE DES COÛTS:
-   - Coûts d'implémentation par scénario
-   - Coûts opérationnels récurrents
-   - Coûts cachés et indirects
-   - Risques financiers
-
-2. ANALYSE DES BÉNÉFICES:
-   - Bénéfices directs quantifiables
-   - Économies réalisées
-   - Bénéfices indirects (réputation, etc.)
-   - Valeur ajoutée business
-
-3. CALCUL DU ROI:
-   - ROI financier par scénario
-   - Période de retour sur investissement
-   - Valeur actualisée nette
-   - Analyse de sensibilité
-
-4. ANALYSE COMPARATIVE:
-   - Comparaison entre scénarios
-   - Avantages et inconvénients
-   - Profil risque/rendement
-   - Recommandation finale
-
-5. FACTEURS CRITIQUES:
-   - Hypothèses clés
-   - Variables d'impact
-   - Seuils de rentabilité
-   - Scénarios de stress
-
-6. IMPACT BUSINESS:
-   - Amélioration de la performance
-   - Réduction des risques
-   - Avantage concurrentiel
-   - Création de valeur
-
-7. FINANCEMENT ET BUDGET:
-   - Besoins de financement
-   - Stratégie budgétaire
-   - Sources de financement
-   - Optimisation fiscale
-
-Pense comme un CFO expert et fournis une analyse financière rigoureuse.
-Retourne une analyse JSON détaillée avec recommandations business.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": cost_benefit_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.2
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur analyse coût-bénéfice: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de l'analyse coût-bénéfice par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "L'analyse coût-bénéfice automatique a échoué. Analyse financière manuelle requise.",
-                "suggested_actions": [
-                    "Effectuer une analyse coût-bénéfice manuelle",
-                    "Consulter un expert financier ou CFO",
-                    "Utiliser des modèles financiers standards",
-                    "Réviser les données des scénarios et réessayer"
-                ]
-            }
-
-    async def _generate_implementation_roadmap_with_llm(
-        self, 
-        strategy: Dict[str, Any], 
-        constraints: Dict[str, Any], 
-        org_profile: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Génère une roadmap d'implémentation détaillée."""
-        
-        roadmap_prompt = f"""
-En tant qu'expert en gestion de projet de conformité, crée une roadmap d'implémentation:
-
-STRATÉGIE RECOMMANDÉE:
-{json.dumps(strategy, indent=2, default=str)[:2000]}
-
-CONTRAINTES:
-{json.dumps(constraints, indent=2)[:1000]}
-
-PROFIL ORGANISATION:
-{json.dumps(org_profile, indent=2)[:1000]}
-
-Développe une roadmap d'implémentation complète et réaliste:
-
-1. STRUCTURE DE LA ROADMAP:
-   - Phases d'implémentation (court/moyen/long terme)
-   - Jalons critiques et validation
-   - Interdépendances entre phases
-   - Timeline globale
-
-2. PHASE 1 - FONDATIONS (0-6 mois):
-   - Objectifs et livrables
-   - Actions prioritaires
-   - Ressources mobilisées
-   - Risques et mitigation
-   - Critères de succès
-
-3. PHASE 2 - DÉPLOIEMENT (6-18 mois):
-   - Objectifs et livrables
-   - Actions de déploiement
-   - Ressources requises
-   - Challenges anticipés
-   - Mesures de performance
-
-4. PHASE 3 - OPTIMISATION (18+ mois):
-   - Objectifs et livrables
-   - Actions d'amélioration continue
-   - Évolution des ressources
-   - Innovation et leadership
-   - Pérennisation
-
-5. PLAN DE GESTION:
-   - Gouvernance du projet
-   - Gestion des risques
-   - Communication et reporting
-   - Gestion du changement
-   - Assurance qualité
-
-6. RESSOURCES ET BUDGET:
-   - Plan de ressources par phase
-   - Budget prévisionnel
-   - Allocation des compétences
-   - Support externe requis
-   - Optimisation des coûts
-
-7. MESURE ET PILOTAGE:
-   - KPIs par phase
-   - Reporting et dashboards
-   - Points de contrôle
-   - Mécanismes d'ajustement
-   - Validation des acquis
-
-Conçois une roadmap pragmatique, détaillée et orientée succès.
-Retourne un plan JSON structuré et actionnable.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["strategic_advisor"]},
-                {"role": "user", "content": roadmap_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.3
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur génération roadmap: {str(e)}")
-            return {
-                "error": True,
-                "error_message": f"Échec de la génération de roadmap par LLM: {str(e)}",
-                "error_type": "llm_parsing_error",
-                "fallback_message": "La génération automatique de roadmap a échoué. Planification manuelle requise.",
-                "suggested_actions": [
-                    "Créer une roadmap manuelle basée sur la stratégie",
-                    "Consulter un expert en gestion de projet",
-                    "Utiliser un outil de planification externe",
-                    "Réviser les données d'entrée et réessayer"
-                ]
-            }
-
+        return response
 
 # Factory function
 def get_compliance_analysis_module(llm_client: LLMClient = None):

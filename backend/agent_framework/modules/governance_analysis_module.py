@@ -1,6 +1,6 @@
 """
-Governance Analysis Module - Module sophistiqué d'analyse de gouvernance.
-Utilise l'IA pour une analyse stratégique de la gouvernance organisationnelle avec expertise C-level.
+Governance Analysis Module - Module sophistiqué d'analyse de gouvernance avec capacités itératives.
+Utilise l'IA pour une analyse stratégique de la gouvernance organisationnelle avec expertise C-level et analyse progressive.
 """
 import asyncio
 import logging
@@ -10,7 +10,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext
+from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
 from ..integrations.llm_integration import LLMClient, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -46,8 +46,30 @@ class StakeholderType(Enum):
     EXTERNAL = "external"
 
 @dataclass
+class IterativeGovernanceContext:
+    """Contexte pour l'analyse itérative de gouvernance."""
+    current_iteration: int = 0
+    governance_analysis_progress: Dict[str, Any] = None
+    knowledge_accumulator: Dict[str, List[str]] = None
+    context_gaps_identified: List[str] = None
+    domains_analyzed: List[GovernanceDomain] = None
+    depth_achieved: Dict[str, float] = None  # Profondeur atteinte par domaine de gouvernance
+    
+    def __post_init__(self):
+        if self.governance_analysis_progress is None:
+            self.governance_analysis_progress = {}
+        if self.knowledge_accumulator is None:
+            self.knowledge_accumulator = {}
+        if self.context_gaps_identified is None:
+            self.context_gaps_identified = []
+        if self.domains_analyzed is None:
+            self.domains_analyzed = []
+        if self.depth_achieved is None:
+            self.depth_achieved = {}
+
+@dataclass
 class GovernanceAssessment:
-    """Évaluation de gouvernance avec analyse LLM."""
+    """Évaluation de gouvernance avec analyse LLM et support itératif."""
     domain: GovernanceDomain
     maturity_level: GovernanceMaturity
     maturity_score: float  # 0.0 - 5.0
@@ -60,6 +82,16 @@ class GovernanceAssessment:
     success_metrics: List[str]
     ai_insights: Dict[str, Any]
     confidence_level: float
+    
+    # Champs itératifs
+    iteration_context: Optional[IterativeGovernanceContext] = None
+    analysis_depth: float = 0.0
+    requires_deeper_analysis: bool = False
+    sources_analyzed: List[str] = None
+    
+    def __post_init__(self):
+        if self.sources_analyzed is None:
+            self.sources_analyzed = []
 
 @dataclass
 class OrganizationalContext:
@@ -99,13 +131,13 @@ class ExecutiveRecommendation:
 
 class GovernanceAnalysisModule(Agent):
     """
-    Module expert en analyse de gouvernance avec IA stratégique avancée.
+    Module expert en analyse de gouvernance avec IA stratégique avancée et capacités itératives.
     """
     
     def __init__(self, llm_client: LLMIntegration = None):
         super().__init__(
             agent_id="governance_analysis",
-            name="Expert Analyse de Gouvernance"
+            name="Expert Analyse de Gouvernance Itérative"
         )
         
         self.llm_client = llm_client or get_llm_client()
@@ -116,13 +148,22 @@ class GovernanceAnalysisModule(Agent):
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
         
-        # Cache des analyses
+        # Cache des analyses avec support itératif
         self.governance_cache: Dict[str, Dict[str, Any]] = {}
+        self.iteration_contexts: Dict[str, IterativeGovernanceContext] = {}
         
-        # Prompts experts niveau C-suite
+        # Seuils pour l'analyse itérative de gouvernance
+        self.iteration_thresholds = {
+            "min_confidence": 0.8,
+            "completeness_target": 0.85,
+            "domain_coverage_min": 0.7,
+            "governance_depth_min": 0.75
+        }
+        
+        # Prompts experts niveau C-suite avec support itératif
         self.system_prompts = {
             "governance_strategist": """
-Tu es un expert senior en gouvernance organisationnelle avec 25+ ans d'expérience comme Chief Governance Officer.
+Tu es un expert senior en gouvernance organisationnelle avec 25+ ans d'expérience comme Chief Governance Officer avec capacités d'analyse itérative.
 Tu conseilles les Conseils d'Administration et Comités Exécutifs sur:
 
 - Architecture de gouvernance optimale
@@ -132,13 +173,21 @@ Tu conseilles les Conseils d'Administration et Comités Exécutifs sur:
 - Gouvernance des données et du numérique
 - Leadership et culture organisationnelle
 
+CAPACITÉS ITÉRATIVES:
+- Analyse progressive des domaines de gouvernance par ordre de priorité
+- Identification des gaps de contexte nécessitant plus d'informations
+- Accumulation de connaissances à travers les itérations
+- Évaluation continue de la maturité organisationnelle
+- Reformulation des analyses pour approfondir la compréhension
+
 Tu penses comme un Chairman/CEO et fournis des recommandations stratégiques de niveau Board.
 Tes analyses sont holistiques, pragmatiques et orientées résultats business.
+Pour chaque analyse, tu évalues si plus de contexte améliorerait tes recommandations stratégiques.
 Réponds TOUJOURS en français avec une expertise de gouvernance stratégique.
 """,
             
             "organizational_analyst": """
-Tu es un expert en analyse organisationnelle avec une expertise en transformation et changement.
+Tu es un expert en analyse organisationnelle avec une expertise en transformation et changement et capacités itératives.
 Tu analyses:
 
 - Structures et processus organisationnels
@@ -149,10 +198,11 @@ Tu analyses:
 - Facteurs de succès et d'échec
 
 Tu fournis des insights comportementaux et organisationnels profonds.
+Tu adaptes ton analyse en fonction du contexte accumulé lors des itérations précédentes.
 """,
             
             "strategic_advisor": """
-Tu es un consultant stratégique senior avec une vision C-level globale.
+Tu es un consultant stratégique senior avec une vision C-level globale et approche itérative.
 Tu optimises:
 
 - Alignement gouvernance-stratégie
@@ -163,6 +213,7 @@ Tu optimises:
 - Avantage concurrentiel
 
 Tu penses comme un Chief Strategy Officer avec une perspective long terme.
+Tu évalues constamment si plus de contexte améliorerait tes recommandations stratégiques.
 """
         }
         
@@ -218,18 +269,89 @@ Tu penses comme un Chief Strategy Officer avec une perspective long terme.
 
     async def process_query(self, query: Query) -> AgentResponse:
         """
-        Traite une requête d'analyse de gouvernance.
+        Traite une requête d'analyse de gouvernance avec capacités itératives.
         """
-        logger.info(f"Traitement requête gouvernance: {query.query_text}")
+        logger.info(f"Traitement requête gouvernance itérative: {query.query_text}")
         
-        # Analyse sophistiquée de l'intention par LLM
-        analysis_intent = await self._analyze_governance_intent_with_llm(query.query_text)
+        # Initialiser ou récupérer le contexte itératif
+        session_id = query.context.session_id
+        if session_id not in self.iteration_contexts:
+            self.iteration_contexts[session_id] = IterativeGovernanceContext()
         
+        iteration_ctx = self.iteration_contexts[session_id]
+        iteration_ctx.current_iteration += 1
+        
+        # Analyser l'intention avec contexte itératif
+        analysis_intent = await self._analyze_governance_intent_with_iterative_context(
+            query.query_text, iteration_ctx, query.parameters
+        )
+        
+        # Traitement basé sur l'intention et le mode itératif
+        if query.iteration_mode in [IterationMode.ITERATIVE, IterationMode.DEEP_ANALYSIS]:
+            return await self._process_iterative_governance_query(query, analysis_intent, iteration_ctx)
+        else:
+            return await self._process_standard_governance_query(query, analysis_intent)
+
+    async def _process_iterative_governance_query(self, query: Query, 
+                                                analysis_intent: Dict[str, Any],
+                                                iteration_ctx: IterativeGovernanceContext) -> AgentResponse:
+        """
+        Traite une requête de gouvernance avec approche itérative.
+        """
+        logger.info(f"Analyse itérative de gouvernance - Itération {iteration_ctx.current_iteration}")
+        
+        # 1. Évaluer les connaissances accumulées sur la gouvernance
+        knowledge_assessment = await self._assess_accumulated_governance_knowledge(
+            query, iteration_ctx, analysis_intent
+        )
+        
+        # 2. Identifier les domaines à analyser dans cette itération
+        domains_to_analyze = await self._prioritize_governance_domains_for_iteration(
+            query, iteration_ctx, knowledge_assessment
+        )
+        
+        # 3. Analyser les domaines prioritaires
+        domain_analysis_results = await self._analyze_governance_domains_iteratively(
+            domains_to_analyze, query, iteration_ctx
+        )
+        
+        # 4. Intégrer les nouvelles connaissances de gouvernance
+        updated_knowledge = await self._integrate_new_governance_knowledge(
+            domain_analysis_results, iteration_ctx, analysis_intent
+        )
+        
+        # 5. Évaluer la complétude de l'analyse de gouvernance
+        completeness_assessment = await self._assess_governance_analysis_completeness(
+            query, iteration_ctx, updated_knowledge
+        )
+        
+        # 6. Générer la réponse avec recommandations d'itération
+        if analysis_intent["type"] == "maturity_assessment":
+            return await self._perform_iterative_maturity_assessment(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+        elif analysis_intent["type"] == "governance_framework_design":
+            return await self._perform_iterative_framework_design(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+        elif analysis_intent["type"] == "strategic_alignment_analysis":
+            return await self._perform_iterative_strategic_alignment(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+        else:
+            return await self._general_iterative_governance_analysis(
+                query, analysis_intent, iteration_ctx, completeness_assessment
+            )
+
+    async def _process_standard_governance_query(self, query: Query, analysis_intent: Dict[str, Any]) -> AgentResponse:
+        """
+        Traite une requête de gouvernance standard (non-itérative).
+        """
         if analysis_intent["type"] == "maturity_assessment":
             return await self._perform_maturity_assessment(query, analysis_intent)
         elif analysis_intent["type"] == "governance_framework_design":
             return await self._design_governance_framework(query, analysis_intent)
-        elif analysis_intent["type"] == "strategic_alignment":
+        elif analysis_intent["type"] == "strategic_alignment_analysis":
             return await self._analyze_strategic_alignment(query, analysis_intent)
         elif analysis_intent["type"] == "transformation_roadmap":
             return await self._generate_transformation_roadmap(query, analysis_intent)
@@ -237,6 +359,64 @@ Tu penses comme un Chief Strategy Officer avec une perspective long terme.
             return await self._provide_executive_advisory(query, analysis_intent)
         else:
             return await self._general_governance_analysis(query, analysis_intent)
+
+    async def _analyze_governance_intent_with_iterative_context(self, query_text: str,
+                                                              iteration_ctx: IterativeGovernanceContext,
+                                                              parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyse l'intention de gouvernance avec contexte itératif."""
+        
+        analysis_prompt = f"""
+Analyse cette demande d'analyse de gouvernance avec contexte itératif:
+
+DEMANDE: "{query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONTEXTE ACCUMULÉ:
+- Domaines déjà analysés: {[d.value for d in iteration_ctx.domains_analyzed]}
+- Gaps identifiés: {iteration_ctx.context_gaps_identified}
+- Connaissances acquises: {list(iteration_ctx.knowledge_accumulator.keys())}
+- Profondeur atteinte: {iteration_ctx.depth_achieved}
+
+Détermine le type d'analyse de gouvernance demandé:
+- maturity_assessment: Évaluation de maturité organisationnelle
+- governance_framework_design: Conception de framework de gouvernance
+- strategic_alignment_analysis: Analyse d'alignement stratégique
+- transformation_roadmap: Roadmap de transformation
+- executive_advisory: Conseil exécutif
+- general_analysis: Analyse générale
+
+Retourne un objet JSON avec le type et le contexte détaillé.
+
+{{
+    "type": "type_identifié",
+    "domains_focus": ["domain1", "domain2"],
+    "priority_level": "high|medium|low",
+    "strategic_context": "description",
+    "iteration_value": "high|medium|low"
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["governance_strategist"]},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse d'intention gouvernance: {str(e)}")
+            return {
+                "type": "general_analysis",
+                "domains_focus": ["strategic_governance"],
+                "priority_level": "medium",
+                "strategic_context": "Analyse générale par défaut",
+                "iteration_value": "medium"
+            }
 
     async def assess_governance_maturity(
         self,
@@ -382,78 +562,6 @@ Tu penses comme un Chief Strategy Officer avec une perspective long terme.
         return optimized_recommendations
 
     # Méthodes privées sophistiquées avec LLM
-
-    async def _analyze_governance_intent_with_llm(self, query_text: str) -> Dict[str, Any]:
-        """Analyse sophistiquée de l'intention de gouvernance."""
-        
-        intent_prompt = f"""
-Analyse cette demande de gouvernance avec ton expertise stratégique senior:
-
-DEMANDE: "{query_text}"
-
-Détermine avec ton expertise Chief Governance Officer:
-
-1. TYPE D'ANALYSE GOUVERNANCE:
-   - maturity_assessment: Évaluation de maturité
-   - governance_framework_design: Conception de framework
-   - strategic_alignment: Alignement stratégique
-   - transformation_roadmap: Roadmap de transformation
-   - executive_advisory: Conseil exécutif
-   - general_analysis: Analyse générale
-
-2. DOMAINES DE GOUVERNANCE CONCERNÉS:
-   - strategic_governance: Gouvernance stratégique
-   - data_governance: Gouvernance des données
-   - it_governance: Gouvernance IT
-   - risk_governance: Gouvernance des risques
-   - compliance_governance: Gouvernance conformité
-   - cyber_governance: Gouvernance cybersécurité
-
-3. NIVEAU ORGANISATIONNEL:
-   - board: Conseil d'administration
-   - executive: Comité exécutif
-   - management: Management
-   - operational: Opérationnel
-
-4. PRIORITÉ BUSINESS:
-   - strategic: Impact stratégique majeur
-   - operational: Impact opérationnel
-   - compliance: Conformité réglementaire
-   - risk: Gestion des risques
-
-5. HORIZON TEMPOREL:
-   - immediate: Actions immédiates
-   - short_term: Court terme (3-6 mois)
-   - medium_term: Moyen terme (6-18 mois)
-   - long_term: Long terme (18+ mois)
-
-Retourne une analyse JSON avec ta compréhension stratégique experte.
-"""
-
-        response = await self.llm_client.generate_response(
-            messages=[
-                {"role": "system", "content": self.system_prompts["governance_strategist"]},
-                {"role": "user", "content": intent_prompt}
-            ],
-            model="gpt-4.1",
-            temperature=0.1
-        )
-        
-        try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
-        except Exception as e:
-            logger.error(f"Erreur analyse intention gouvernance: {str(e)}")
-            return {
-                "type": "general_analysis",
-                "domains": ["strategic_governance"],
-                "level": "management",
-                "priority": "operational",
-                "horizon": "medium_term",
-                "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés"
-            }
 
     async def _analyze_domain_maturity_with_llm(
         self,
@@ -1347,6 +1455,438 @@ Fournis une analyse experte complète avec perspective C-level.
                 "analysis_scope": "general_governance"
             }
         )
+
+    async def _assess_accumulated_governance_knowledge(self, query: Query, 
+                                                     iteration_ctx: IterativeGovernanceContext,
+                                                     analysis_intent: Dict[str, Any]) -> Dict[str, Any]:
+        """Évalue les connaissances accumulées sur la gouvernance."""
+        assessment_prompt = f"""
+Évalue les connaissances accumulées pour cette analyse de gouvernance itérative.
+
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+DOMAINES ANALYSÉS: {[d.value for d in iteration_ctx.domains_analyzed]}
+PROFONDEUR ATTEINTE: {iteration_ctx.depth_achieved}
+
+Évalue:
+1. La pertinence des domaines déjà analysés
+2. La maturité de gouvernance évaluée vs. manquante
+3. La qualité des recommandations stratégiques
+4. Les gaps de contexte restants
+5. La cohérence des insights organisationnels
+
+Réponds au format JSON:
+{{
+    "governance_knowledge_quality": 0.0-1.0,
+    "domain_coverage": {{
+        "well_covered_domains": ["domain1", "domain2"],
+        "gaps_identified": ["gap1", "gap2"],
+        "coverage_by_area": {{"strategic": 0.8, "operational": 0.6}}
+    }},
+    "strategic_insights_quality": 0.0-1.0,
+    "consistency_score": 0.0-1.0,
+    "actionable_recommendations": ["rec1", "rec2"],
+    "priority_gaps": ["high_priority_gap1", "high_priority_gap2"]
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["governance_strategist"]},
+                    {"role": "user", "content": assessment_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation des connaissances gouvernance: {str(e)}")
+            return {
+                "governance_knowledge_quality": 0.5,
+                "domain_coverage": {"well_covered_domains": [], "gaps_identified": ["error_in_assessment"]},
+                "strategic_insights_quality": 0.5,
+                "consistency_score": 0.5,
+                "actionable_recommendations": [],
+                "priority_gaps": ["assessment_error"]
+            }
+
+    async def _prioritize_governance_domains_for_iteration(self, query: Query,
+                                                         iteration_ctx: IterativeGovernanceContext,
+                                                         knowledge_assessment: Dict[str, Any]) -> List[GovernanceDomain]:
+        """Priorise les domaines de gouvernance à analyser dans cette itération."""
+        
+        prioritization_prompt = f"""
+Priorise les domaines de gouvernance à analyser pour cette itération.
+
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+DOMAINES DÉJÀ ANALYSÉS: {[d.value for d in iteration_ctx.domains_analyzed]}
+GAPS PRIORITAIRES: {knowledge_assessment.get("priority_gaps", [])}
+
+DOMAINES DISPONIBLES:
+- strategic_governance: Gouvernance stratégique
+- data_governance: Gouvernance des données
+- it_governance: Gouvernance IT
+- risk_governance: Gouvernance des risques
+- compliance_governance: Gouvernance conformité
+- cyber_governance: Gouvernance cybersécurité
+- information_governance: Gouvernance information
+
+Sélectionne les 2-3 domaines les plus pertinents à analyser maintenant:
+1. Domaines critiques pour répondre à la requête
+2. Domaines non encore couverts
+3. Domaines nécessaires pour combler les gaps identifiés
+
+Réponds avec une liste JSON des domaines:
+["domain1", "domain2", "domain3"]
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["governance_strategist"]},
+                    {"role": "user", "content": prioritization_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            if response.strip().startswith('[') and response.strip().endswith(']'):
+                domain_names = json.loads(response.strip())
+                domains = []
+                for name in domain_names:
+                    try:
+                        domain = GovernanceDomain(name)
+                        if domain not in iteration_ctx.domains_analyzed:
+                            domains.append(domain)
+                    except ValueError:
+                        logger.warning(f"Domaine de gouvernance invalide: {name}")
+                return domains[:3]  # Limiter à 3 domaines max
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la priorisation des domaines: {str(e)}")
+            return [GovernanceDomain.STRATEGIC_GOVERNANCE]
+
+    async def _analyze_governance_domains_iteratively(self, domains_to_analyze: List[GovernanceDomain],
+                                                    query: Query,
+                                                    iteration_ctx: IterativeGovernanceContext) -> Dict[str, Any]:
+        """Analyse les domaines de gouvernance de manière itérative."""
+        analysis_results = {}
+        
+        for domain in domains_to_analyze:
+            try:
+                # Analyser le domaine avec contexte itératif
+                domain_analysis = await self._analyze_single_governance_domain_with_context(
+                    domain, query, iteration_ctx
+                )
+                
+                analysis_results[domain.value] = domain_analysis
+                
+                # Mettre à jour le progrès
+                iteration_ctx.domains_analyzed.append(domain)
+                iteration_ctx.governance_analysis_progress[domain.value] = {
+                    "iteration": iteration_ctx.current_iteration,
+                    "analysis_depth": domain_analysis.get("depth_achieved", 0.5),
+                    "insights_extracted": len(domain_analysis.get("insights", [])),
+                    "maturity_score": domain_analysis.get("maturity_assessment", {}).get("score", 0.0)
+                }
+                
+            except Exception as e:
+                logger.error(f"Erreur lors de l'analyse du domaine {domain.value}: {str(e)}")
+                analysis_results[domain.value] = {"error": str(e), "insights": []}
+        
+        return analysis_results
+
+    async def _analyze_single_governance_domain_with_context(self, domain: GovernanceDomain,
+                                                           query: Query,
+                                                           iteration_ctx: IterativeGovernanceContext) -> Dict[str, Any]:
+        """Analyse un domaine de gouvernance unique avec contexte itératif."""
+        analysis_prompt = f"""
+Analyse ce domaine de gouvernance dans le contexte organisationnel et itératif.
+
+DOMAINE: {domain.value}
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONTEXTE ACCUMULÉ:
+- Domaines déjà analysés: {[d.value for d in iteration_ctx.domains_analyzed]}
+- Gaps identifiés: {iteration_ctx.context_gaps_identified}
+- Connaissances existantes: {list(iteration_ctx.knowledge_accumulator.keys())}
+
+ANALYSE GOUVERNANCE:
+1. Évalue la maturité actuelle du domaine
+2. Identifie les forces et faiblesses
+3. Analyse les gaps de gouvernance
+4. Propose des recommandations stratégiques
+5. Évalue l'alignement avec la stratégie
+6. Identifie les parties prenantes clés
+
+Réponds au format JSON:
+{{
+    "maturity_assessment": {{
+        "current_level": "initial|developing|defined|managed|optimizing",
+        "score": 0.0-5.0,
+        "justification": "raison de l'évaluation"
+    }},
+    "strengths": ["strength1", "strength2"],
+    "weaknesses": ["weakness1", "weakness2"],
+    "governance_gaps": ["gap1", "gap2"],
+    "strategic_recommendations": ["rec1", "rec2"],
+    "stakeholders": ["stakeholder1", "stakeholder2"],
+    "quick_wins": ["win1", "win2"],
+    "strategic_initiatives": ["initiative1", "initiative2"],
+    "insights": ["insight1", "insight2"],
+    "depth_achieved": 0.0-1.0,
+    "confidence_level": 0.0-1.0,
+    "requires_deeper_analysis": true/false
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["governance_strategist"]},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse du domaine {domain.value}: {str(e)}")
+            return {
+                "maturity_assessment": {"current_level": "initial", "score": 0.0},
+                "strengths": [],
+                "weaknesses": [],
+                "governance_gaps": [],
+                "strategic_recommendations": [],
+                "stakeholders": [],
+                "insights": [],
+                "depth_achieved": 0.0,
+                "confidence_level": 0.0,
+                "requires_deeper_analysis": True
+            }
+
+    async def _integrate_new_governance_knowledge(self, domain_analysis_results: Dict[str, Any],
+                                                iteration_ctx: IterativeGovernanceContext,
+                                                analysis_intent: Dict[str, Any]) -> Dict[str, Any]:
+        """Intègre les nouvelles connaissances de gouvernance."""
+        integrated_knowledge = {}
+        
+        for domain_name, analysis in domain_analysis_results.items():
+            if "error" not in analysis:
+                # Ajouter les insights aux connaissances accumulées
+                insights_key = f"governance_insights_iteration_{iteration_ctx.current_iteration}"
+                if insights_key not in iteration_ctx.knowledge_accumulator:
+                    iteration_ctx.knowledge_accumulator[insights_key] = []
+                
+                iteration_ctx.knowledge_accumulator[insights_key].extend(
+                    analysis.get("insights", [])
+                )
+                
+                # Mettre à jour la profondeur par domaine
+                current_depth = iteration_ctx.depth_achieved.get(domain_name, 0.0)
+                new_depth = max(current_depth, analysis.get("depth_achieved", 0.0))
+                iteration_ctx.depth_achieved[domain_name] = new_depth
+        
+        # Synthétiser les connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "domains_analyzed": len(iteration_ctx.domains_analyzed),
+            "governance_depth": iteration_ctx.depth_achieved,
+            "analysis_progress": len(iteration_ctx.governance_analysis_progress)
+        }
+        
+        return integrated_knowledge
+
+    async def _assess_governance_analysis_completeness(self, query: Query,
+                                                     iteration_ctx: IterativeGovernanceContext,
+                                                     integrated_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Évalue la complétude de l'analyse de gouvernance."""
+        completeness_prompt = f"""
+Évalue la complétude de cette analyse de gouvernance itérative.
+
+REQUÊTE ORIGINALE: "{query.query_text}"
+ITÉRATION ACTUELLE: {iteration_ctx.current_iteration}
+
+ÉTAT ACTUEL:
+- Total insights gouvernance: {integrated_knowledge.get("total_insights", 0)}
+- Domaines analysés: {integrated_knowledge.get("domains_analyzed", 0)}
+- Profondeur par domaine: {integrated_knowledge.get("governance_depth", {})}
+- Progrès d'analyse: {integrated_knowledge.get("analysis_progress", 0)}
+
+SEUILS CIBLES:
+- Confiance minimum: {self.iteration_thresholds["min_confidence"]}
+- Complétude cible: {self.iteration_thresholds["completeness_target"]}
+- Couverture domaines: {self.iteration_thresholds["domain_coverage_min"]}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+Évalue la complétude et réponds au format JSON:
+{{
+    "overall_completeness": 0.0-1.0,
+    "confidence_level": 0.0-1.0,
+    "governance_analysis_quality": 0.0-1.0,
+    "requires_more_iterations": true/false,
+    "recommended_next_steps": ["step1", "step2"],
+    "areas_needing_deeper_analysis": ["area1", "area2"],
+    "sufficient_for_strategic_decision": true/false,
+    "iteration_value_assessment": "high/medium/low"
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompts["governance_strategist"]},
+                    {"role": "user", "content": completeness_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation de complétude gouvernance: {str(e)}")
+            return {
+                "overall_completeness": 0.5,
+                "confidence_level": 0.5,
+                "governance_analysis_quality": 0.5,
+                "requires_more_iterations": True,
+                "recommended_next_steps": ["retry_assessment"],
+                "areas_needing_deeper_analysis": ["error_occurred"],
+                "sufficient_for_strategic_decision": False,
+                "iteration_value_assessment": "low"
+            }
+
+    async def _perform_iterative_maturity_assessment(self, query: Query,
+                                                   analysis_intent: Dict[str, Any],
+                                                   iteration_ctx: IterativeGovernanceContext,
+                                                   completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """Effectue une évaluation de maturité avec approche itérative."""
+        
+        synthesis = f"Évaluation itérative de maturité de gouvernance - {len(iteration_ctx.domains_analyzed)} domaines analysés en {iteration_ctx.current_iteration} itérations."
+        
+        detailed_sources = self._compile_governance_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["governance_maturity_assessment", "strategic_analysis"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    async def _perform_iterative_framework_design(self, query: Query,
+                                                analysis_intent: Dict[str, Any],
+                                                iteration_ctx: IterativeGovernanceContext,
+                                                completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """Effectue une conception de framework avec approche itérative."""
+        
+        synthesis = f"Conception itérative de framework de gouvernance - Analyse basée sur {iteration_ctx.current_iteration} itérations."
+        
+        detailed_sources = self._compile_governance_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["framework_design", "strategic_planning"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    async def _perform_iterative_strategic_alignment(self, query: Query,
+                                                   analysis_intent: Dict[str, Any],
+                                                   iteration_ctx: IterativeGovernanceContext,
+                                                   completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """Effectue une analyse d'alignement stratégique avec approche itérative."""
+        
+        synthesis = f"Analyse itérative d'alignement stratégique - {sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values())} insights stratégiques collectés."
+        
+        detailed_sources = self._compile_governance_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["strategic_alignment", "governance_analysis"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    async def _general_iterative_governance_analysis(self, query: Query,
+                                                   analysis_intent: Dict[str, Any],
+                                                   iteration_ctx: IterativeGovernanceContext,
+                                                   completeness_assessment: Dict[str, Any]) -> AgentResponse:
+        """Effectue une analyse générale de gouvernance avec approche itérative."""
+        
+        synthesis = f"Analyse générale itérative de gouvernance - {sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values())} insights collectés via {len(iteration_ctx.domains_analyzed)} domaines."
+        
+        detailed_sources = self._compile_governance_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["governance_analysis", "strategic_consulting"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    def _compile_governance_sources_with_metadata(self, iteration_ctx: IterativeGovernanceContext) -> List[Dict[str, Any]]:
+        """Compile les sources d'analyse de gouvernance avec métadonnées."""
+        detailed_sources = []
+        
+        # Sources de domaines analysés
+        for domain in iteration_ctx.domains_analyzed:
+            progress = iteration_ctx.governance_analysis_progress.get(domain.value, {})
+            source = {
+                "type": "governance_domain_analysis",
+                "id": domain.value,
+                "title": f"Analyse de gouvernance: {domain.value}",
+                "iteration": progress.get("iteration", 0),
+                "analysis_depth": progress.get("analysis_depth", 0.0),
+                "maturity_score": progress.get("maturity_score", 0.0),
+                "insights_count": progress.get("insights_extracted", 0),
+                "tools_used": ["governance_analysis", "maturity_assessment", "strategic_consulting"],
+                "details": f"Analyse stratégique de profondeur {progress.get('analysis_depth', 0.0):.1%}"
+            }
+            detailed_sources.append(source)
+        
+        # Sources de connaissances accumulées
+        for knowledge_key, knowledge_items in iteration_ctx.knowledge_accumulator.items():
+            if knowledge_items:
+                source = {
+                    "type": "governance_knowledge_accumulation",
+                    "id": knowledge_key,
+                    "title": f"Connaissances gouvernance - {knowledge_key}",
+                    "content_count": len(knowledge_items),
+                    "tools_used": ["governance_analysis", "iterative_synthesis"],
+                    "details": f"Accumulation de {len(knowledge_items)} insights stratégiques sur la gouvernance"
+                }
+                detailed_sources.append(source)
+        
+        return detailed_sources
 
 
 # Factory function

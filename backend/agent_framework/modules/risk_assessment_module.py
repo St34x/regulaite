@@ -1,6 +1,6 @@
 """
-Risk Assessment Module - Module d'analyse des risques selon EBIOS/MEHARI.
-Utilise les outils universels pour une évaluation complète des risques.
+Risk Assessment Module - Module d'analyse des risques selon EBIOS/MEHARI avec capacités itératives.
+Utilise les outils universels pour une évaluation complète des risques avec analyse progressive.
 Intégré avec la configuration organisationnelle RegulAIte.
 """
 import asyncio
@@ -11,7 +11,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext
+from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
 from ..integrations.llm_integration import LLMIntegration, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -37,8 +37,30 @@ class RiskTreatmentStrategy(Enum):
     AVOID = "avoid"
 
 @dataclass
+class IterativeRiskContext:
+    """Contexte pour l'analyse itérative des risques."""
+    current_iteration: int = 0
+    risk_analysis_progress: Dict[str, Any] = None
+    knowledge_accumulator: Dict[str, List[str]] = None
+    context_gaps_identified: List[str] = None
+    scenarios_analyzed: List[str] = None
+    depth_achieved: Dict[str, float] = None  # Profondeur atteinte par domaine de risque
+    
+    def __post_init__(self):
+        if self.risk_analysis_progress is None:
+            self.risk_analysis_progress = {}
+        if self.knowledge_accumulator is None:
+            self.knowledge_accumulator = {}
+        if self.context_gaps_identified is None:
+            self.context_gaps_identified = []
+        if self.scenarios_analyzed is None:
+            self.scenarios_analyzed = []
+        if self.depth_achieved is None:
+            self.depth_achieved = {}
+
+@dataclass
 class RiskScenario:
-    """Scénario de risque EBIOS."""
+    """Scénario de risque EBIOS avec support itératif."""
     id: str
     name: str
     description: str
@@ -54,6 +76,12 @@ class RiskScenario:
     treatment_strategy: RiskTreatmentStrategy
     action_plan: List[str]
     
+    # Champs itératifs
+    iteration_context: Optional[IterativeRiskContext] = None
+    analysis_depth: float = 0.0
+    confidence_score: float = 0.0
+    requires_deeper_analysis: bool = False
+    
     def __post_init__(self):
         if self.existing_controls is None:
             self.existing_controls = []
@@ -62,7 +90,7 @@ class RiskScenario:
 
 @dataclass
 class RiskAssessmentReport:
-    """Rapport d'évaluation des risques."""
+    """Rapport d'évaluation des risques avec support itératif."""
     assessment_id: str
     organization_id: str
     methodology: RiskAssessmentMethodology
@@ -75,6 +103,15 @@ class RiskAssessmentReport:
     executive_summary: str
     detailed_analysis: Dict[str, Any]
     organizational_context: Dict[str, Any]
+    
+    # Champs itératifs
+    iteration_summary: Optional[Dict[str, Any]] = None
+    sources_analyzed: List[Dict[str, Any]] = None
+    analysis_completeness: float = 0.0
+    
+    def __post_init__(self):
+        if self.sources_analyzed is None:
+            self.sources_analyzed = []
 
 class RiskAssessmentModule(Agent):
     """
@@ -84,7 +121,7 @@ class RiskAssessmentModule(Agent):
     def __init__(self, llm_client: LLMIntegration = None):
         super().__init__(
             agent_id="risk_assessment",
-            name="Expert Évaluation des Risques"
+            name="Expert Évaluation des Risques Itératif"
         )
         
         self.llm_client = llm_client or get_llm_client()
@@ -95,6 +132,9 @@ class RiskAssessmentModule(Agent):
         self.entity_extractor = EntityExtractor()
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
+        
+        # Cache itératif
+        self.iteration_contexts: Dict[str, IterativeRiskContext] = {}
         
         # Matrice de risques EBIOS
         self.risk_matrix = {
@@ -128,9 +168,17 @@ class RiskAssessmentModule(Agent):
             (5, 4): "very_high", (5, 5): "very_high"
         }
         
-        # Prompts spécialisés
+        # Seuils pour l'analyse itérative des risques
+        self.iteration_thresholds = {
+            "min_confidence": 0.8,
+            "completeness_target": 0.85,
+            "scenario_coverage_min": 0.7,
+            "risk_depth_min": 0.75
+        }
+        
+        # Prompts spécialisés avec support itératif
         self.system_prompt = """
-Tu es un expert en évaluation des risques cybersécurité selon les méthodologies EBIOS RM et MEHARI.
+Tu es un expert en évaluation des risques cybersécurité selon les méthodologies EBIOS RM et MEHARI avec capacités d'analyse itérative.
 Tu maîtrises parfaitement :
 - L'identification et la qualification des actifs
 - L'analyse des sources de menaces et des modes opératoires
@@ -139,22 +187,102 @@ Tu maîtrises parfaitement :
 - Les mesures de sécurité et leur efficacité
 - L'adaptation aux contextes organisationnels spécifiques
 
+CAPACITÉS ITÉRATIVES:
+- Analyse progressive des scenarios de risque par ordre de priorité
+- Identification des gaps de contexte nécessitant plus d'informations
+- Accumulation de connaissances à travers les itérations
+- Reformulation des requêtes pour approfondir l'analyse des risques
+- Évaluation continue de la complétude de l'évaluation
+
 Tu tiens compte du contexte organisationnel (secteur, taille, maturité) pour personnaliser tes analyses.
+Pour chaque analyse, tu évalues si plus de contexte améliorerait la précision de l'évaluation des risques.
 Réponds TOUJOURS en français avec une approche méthodique et structurée.
 """
 
     async def process_query(self, query: Query) -> AgentResponse:
         """
-        Traite une requête d'évaluation des risques avec contexte organisationnel.
+        Traite une requête d'évaluation des risques avec capacités itératives.
         """
-        logger.info(f"Traitement requête risques: {query.query_text}")
+        logger.info(f"Traitement requête risques itérative: {query.query_text}")
+        
+        # Initialiser ou récupérer le contexte itératif
+        session_id = query.context.session_id
+        if session_id not in self.iteration_contexts:
+            self.iteration_contexts[session_id] = IterativeRiskContext()
+        
+        iteration_ctx = self.iteration_contexts[session_id]
+        iteration_ctx.current_iteration += 1
         
         # Extraire l'ID d'organisation du contexte
         org_id = self._extract_organization_id(query)
         
-        # Analyser le type de demande
-        analysis_type = await self._analyze_request_type(query.query_text)
+        # Analyser le type de demande avec contexte itératif
+        analysis_type = await self._analyze_request_type_with_iterative_context(
+            query.query_text, iteration_ctx, query.parameters
+        )
         
+        # Traitement basé sur l'intention et le mode itératif
+        if query.iteration_mode in [IterationMode.ITERATIVE, IterationMode.DEEP_ANALYSIS]:
+            return await self._process_iterative_risk_query(query, analysis_type, iteration_ctx, org_id)
+        else:
+            return await self._process_standard_risk_query(query, analysis_type, org_id)
+
+    async def _process_iterative_risk_query(self, query: Query, 
+                                          analysis_type: str,
+                                          iteration_ctx: IterativeRiskContext,
+                                          org_id: str) -> AgentResponse:
+        """
+        Traite une requête de risques avec approche itérative.
+        """
+        logger.info(f"Analyse itérative des risques - Itération {iteration_ctx.current_iteration}")
+        
+        # 1. Évaluer les connaissances accumulées sur les risques
+        knowledge_assessment = await self._assess_accumulated_risk_knowledge(
+            query, iteration_ctx, analysis_type, org_id
+        )
+        
+        # 2. Identifier les scenarios à analyser dans cette itération
+        scenarios_to_analyze = await self._prioritize_risk_scenarios_for_iteration(
+            query, iteration_ctx, knowledge_assessment, org_id
+        )
+        
+        # 3. Analyser les scenarios prioritaires
+        scenario_analysis_results = await self._analyze_risk_scenarios_iteratively(
+            scenarios_to_analyze, query, iteration_ctx, org_id
+        )
+        
+        # 4. Intégrer les nouvelles connaissances sur les risques
+        updated_knowledge = await self._integrate_new_risk_knowledge(
+            scenario_analysis_results, iteration_ctx, analysis_type
+        )
+        
+        # 5. Évaluer la complétude de l'évaluation des risques
+        completeness_assessment = await self._assess_risk_analysis_completeness(
+            query, iteration_ctx, updated_knowledge
+        )
+        
+        # 6. Générer la réponse avec recommandations d'itération
+        if analysis_type == "full_assessment":
+            return await self._perform_iterative_full_risk_assessment(
+                query, analysis_type, iteration_ctx, completeness_assessment, org_id
+            )
+        elif analysis_type == "scenario_analysis":
+            return await self._perform_iterative_scenario_analysis(
+                query, analysis_type, iteration_ctx, completeness_assessment, org_id
+            )
+        elif analysis_type == "control_evaluation":
+            return await self._perform_iterative_control_evaluation(
+                query, analysis_type, iteration_ctx, completeness_assessment, org_id
+            )
+        else:
+            return await self._general_iterative_risk_analysis(
+                query, analysis_type, iteration_ctx, completeness_assessment, org_id
+            )
+
+    async def _process_standard_risk_query(self, query: Query, analysis_type: str, org_id: str) -> AgentResponse:
+        """
+        Traite une requête de risques standard (non-itérative).
+        """
         if analysis_type == "full_assessment":
             return await self._perform_full_risk_assessment(query, org_id)
         elif analysis_type == "scenario_analysis":
@@ -165,6 +293,56 @@ Réponds TOUJOURS en français avec une approche méthodique et structurée.
             return await self._analyze_risk_trends(query, org_id)
         else:
             return await self._general_risk_analysis(query, org_id)
+
+    async def _analyze_request_type_with_iterative_context(self, query_text: str,
+                                                         iteration_ctx: IterativeRiskContext,
+                                                         parameters: Dict[str, Any]) -> str:
+        """Analyse le type de demande d'évaluation des risques avec contexte itératif."""
+        
+        analysis_prompt = f"""
+Analyse cette demande d'évaluation des risques avec contexte itératif:
+
+DEMANDE: "{query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONTEXTE ACCUMULÉ:
+- Scenarios déjà analysés: {iteration_ctx.scenarios_analyzed}
+- Gaps identifiés: {iteration_ctx.context_gaps_identified}
+- Connaissances acquises: {list(iteration_ctx.knowledge_accumulator.keys())}
+- Profondeur atteinte: {iteration_ctx.depth_achieved}
+
+Détermine le type d'analyse de risques demandé:
+- full_assessment: Évaluation complète des risques
+- scenario_analysis: Analyse de scenarios spécifiques
+- control_evaluation: Évaluation de l'efficacité des contrôles
+- trend_analysis: Analyse des tendances de risques
+- general_analysis: Analyse générale
+
+Retourne uniquement le type d'analyse identifié.
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            analysis_type = response.strip().lower()
+            
+            # Valider le type d'analyse
+            valid_types = ["full_assessment", "scenario_analysis", "control_evaluation", "trend_analysis", "general_analysis"]
+            if analysis_type in valid_types:
+                return analysis_type
+            else:
+                return "general_analysis"
+                
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse du type de requête: {str(e)}")
+            return "general_analysis"
 
     async def perform_ebios_assessment(
         self,
@@ -518,6 +696,540 @@ Retourne un JSON structuré avec le scénario adapté.
     # Resto des méthodes existantes avec mise à jour pour le contexte organisationnel...
     # [Les autres méthodes restent largement similaires mais avec intégration du contexte org]
 
+    async def _assess_accumulated_risk_knowledge(self, query: Query, 
+                                               iteration_ctx: IterativeRiskContext,
+                                               analysis_type: str, org_id: str) -> Dict[str, Any]:
+        """Évalue les connaissances accumulées sur les risques."""
+        assessment_prompt = f"""
+Évalue les connaissances accumulées pour cette analyse de risques itérative.
+
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+TYPE D'ANALYSE: {analysis_type}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+SCENARIOS ANALYSÉS: {iteration_ctx.scenarios_analyzed}
+PROFONDEUR ATTEINTE: {iteration_ctx.depth_achieved}
+
+Évalue:
+1. La pertinence des scenarios déjà analysés
+2. Les domaines de risque bien couverts vs. manquants
+3. La qualité des évaluations de vraisemblance/impact
+4. Les gaps de contexte restants
+5. La cohérence des mesures de sécurité identifiées
+
+Réponds au format JSON:
+{{
+    "risk_knowledge_quality": 0.0-1.0,
+    "scenario_coverage": {{
+        "well_covered_risks": ["risk1", "risk2"],
+        "gaps_identified": ["gap1", "gap2"],
+        "coverage_by_domain": {{"cyber": 0.8, "operational": 0.6}}
+    }},
+    "assessment_reliability": 0.0-1.0,
+    "consistency_score": 0.0-1.0,
+    "actionable_insights": ["insight1", "insight2"],
+    "priority_gaps": ["high_priority_gap1", "high_priority_gap2"]
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": assessment_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation des connaissances risques: {str(e)}")
+            return {
+                "risk_knowledge_quality": 0.5,
+                "scenario_coverage": {"well_covered_risks": [], "gaps_identified": ["error_in_assessment"]},
+                "assessment_reliability": 0.5,
+                "consistency_score": 0.5,
+                "actionable_insights": [],
+                "priority_gaps": ["assessment_error"]
+            }
+
+    async def _prioritize_risk_scenarios_for_iteration(self, query: Query,
+                                                     iteration_ctx: IterativeRiskContext,
+                                                     knowledge_assessment: Dict[str, Any],
+                                                     org_id: str) -> List[str]:
+        """Priorise les scenarios de risque à analyser dans cette itération."""
+        try:
+            # Identifier les scenarios pertinents pour l'organisation
+            org_context = self._get_organizational_context(org_id)
+            
+            prioritization_criteria = {
+                "query": query.query_text,
+                "organization_context": org_context,
+                "focus_areas": knowledge_assessment.get("priority_gaps", []),
+                "exclude_analyzed": iteration_ctx.scenarios_analyzed
+            }
+            
+            # Recherche de scenarios à analyser
+            scenarios_found = await self._identify_priority_risk_scenarios(
+                prioritization_criteria,
+                max_scenarios=3,  # Limiter pour cette itération
+                org_id=org_id
+            )
+            
+            return scenarios_found
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la priorisation des scenarios: {str(e)}")
+            return []
+
+    async def _identify_priority_risk_scenarios(self, criteria: Dict[str, Any], 
+                                              max_scenarios: int, org_id: str) -> List[str]:
+        """Identifie les scenarios de risque prioritaires à analyser."""
+        org_context = self._get_organizational_context(org_id)
+        
+        scenario_identification_prompt = f"""
+Identifie les scenarios de risque prioritaires à analyser pour cette organisation.
+
+CRITÈRES DE RECHERCHE:
+{json.dumps(criteria, indent=2, ensure_ascii=False)}
+
+CONTEXTE ORGANISATIONNEL:
+{json.dumps(org_context, indent=2, ensure_ascii=False)}
+
+MÉTHODOLOGIE: Utilise EBIOS RM pour identifier les scenarios les plus pertinents.
+
+Identifie les {max_scenarios} scenarios de risque les plus critiques à analyser:
+1. Menaces les plus probables pour ce secteur
+2. Vulnérabilités typiques de ce type d'organisation
+3. Actifs les plus sensibles à protéger
+4. Scenarios non couverts précédemment
+
+Réponds avec une liste de scenarios au format:
+["scenario_1_description", "scenario_2_description", "scenario_3_description"]
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": scenario_identification_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            if response.strip().startswith('[') and response.strip().endswith(']'):
+                scenarios = json.loads(response.strip())
+                return scenarios[:max_scenarios]
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'identification des scenarios: {str(e)}")
+            return [f"Scenario générique {i+1}" for i in range(max_scenarios)]
+
+    async def _analyze_risk_scenarios_iteratively(self, scenarios_to_analyze: List[str],
+                                                 query: Query,
+                                                 iteration_ctx: IterativeRiskContext,
+                                                 org_id: str) -> Dict[str, Any]:
+        """Analyse les scenarios de risque de manière itérative."""
+        analysis_results = {}
+        org_context = self._get_organizational_context(org_id)
+        
+        for scenario_desc in scenarios_to_analyze:
+            try:
+                # Analyser le scenario avec contexte organisationnel
+                scenario_analysis = await self._analyze_single_risk_scenario_with_context(
+                    scenario_desc, query, iteration_ctx, org_context
+                )
+                
+                analysis_results[scenario_desc] = scenario_analysis
+                
+                # Mettre à jour le progrès
+                iteration_ctx.scenarios_analyzed.append(scenario_desc)
+                iteration_ctx.risk_analysis_progress[scenario_desc] = {
+                    "iteration": iteration_ctx.current_iteration,
+                    "analysis_depth": scenario_analysis.get("depth_achieved", 0.5),
+                    "insights_extracted": len(scenario_analysis.get("insights", [])),
+                    "risk_level": scenario_analysis.get("risk_level", "unknown")
+                }
+                
+            except Exception as e:
+                logger.error(f"Erreur lors de l'analyse du scenario {scenario_desc}: {str(e)}")
+                analysis_results[scenario_desc] = {"error": str(e), "insights": []}
+        
+        return analysis_results
+
+    async def _analyze_single_risk_scenario_with_context(self, scenario_desc: str,
+                                                        query: Query,
+                                                        iteration_ctx: IterativeRiskContext,
+                                                        org_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyse un scenario de risque unique avec contexte organisationnel."""
+        analysis_prompt = f"""
+Analyse ce scenario de risque dans le contexte organisationnel et itératif.
+
+SCENARIO: {scenario_desc}
+REQUÊTE: "{query.query_text}"
+ITÉRATION: {iteration_ctx.current_iteration}
+
+CONTEXTE ORGANISATIONNEL:
+{json.dumps(org_context, indent=2, ensure_ascii=False)}
+
+CONTEXTE ACCUMULÉ:
+- Scenarios déjà analysés: {iteration_ctx.scenarios_analyzed}
+- Gaps identifiés: {iteration_ctx.context_gaps_identified}
+- Connaissances existantes: {list(iteration_ctx.knowledge_accumulator.keys())}
+
+MÉTHODOLOGIE EBIOS RM:
+1. Identifie les actifs concernés
+2. Analyse les sources de menaces
+3. Évalue la vraisemblance
+4. Évalue l'impact potentiel
+5. Calcule le niveau de risque
+6. Identifie les mesures de sécurité existantes
+7. Propose des mesures complémentaires
+
+Réponds au format JSON:
+{{
+    "scenario_analysis": {{
+        "assets_affected": ["asset1", "asset2"],
+        "threat_sources": ["source1", "source2"],
+        "attack_paths": ["path1", "path2"],
+        "likelihood_assessment": {{
+            "level": "low|medium|high|very_high",
+            "justification": "raison de l'évaluation"
+        }},
+        "impact_assessment": {{
+            "level": "low|medium|high|very_high",
+            "affected_domains": ["confidentiality", "integrity", "availability"],
+            "business_impact": "description"
+        }},
+        "risk_level": "low|medium|high|critical",
+        "existing_controls": ["control1", "control2"],
+        "control_gaps": ["gap1", "gap2"],
+        "recommended_measures": ["measure1", "measure2"]
+    }},
+    "insights": ["insight1", "insight2"],
+    "depth_achieved": 0.0-1.0,
+    "confidence_level": 0.0-1.0,
+    "requires_deeper_analysis": true/false
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse du scenario {scenario_desc}: {str(e)}")
+            return {
+                "scenario_analysis": {"risk_level": "unknown"},
+                "insights": [],
+                "depth_achieved": 0.0,
+                "confidence_level": 0.0,
+                "requires_deeper_analysis": True
+            }
+
+    async def _integrate_new_risk_knowledge(self, scenario_analysis_results: Dict[str, Any],
+                                          iteration_ctx: IterativeRiskContext,
+                                          analysis_type: str) -> Dict[str, Any]:
+        """Intègre les nouvelles connaissances sur les risques."""
+        integrated_knowledge = {}
+        
+        for scenario_desc, analysis in scenario_analysis_results.items():
+            if "error" not in analysis:
+                # Ajouter les insights aux connaissances accumulées
+                insights_key = f"risk_insights_iteration_{iteration_ctx.current_iteration}"
+                if insights_key not in iteration_ctx.knowledge_accumulator:
+                    iteration_ctx.knowledge_accumulator[insights_key] = []
+                
+                iteration_ctx.knowledge_accumulator[insights_key].extend(
+                    analysis.get("insights", [])
+                )
+                
+                # Mettre à jour la profondeur par domaine de risque
+                scenario_analysis = analysis.get("scenario_analysis", {})
+                risk_level = scenario_analysis.get("risk_level", "unknown")
+                if risk_level != "unknown":
+                    current_depth = iteration_ctx.depth_achieved.get(risk_level, 0.0)
+                    new_depth = max(current_depth, analysis.get("depth_achieved", 0.0))
+                    iteration_ctx.depth_achieved[risk_level] = new_depth
+        
+        # Synthétiser les connaissances intégrées
+        integrated_knowledge = {
+            "total_insights": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+            "scenarios_analyzed": len(iteration_ctx.scenarios_analyzed),
+            "risk_depth": iteration_ctx.depth_achieved,
+            "analysis_progress": len(iteration_ctx.risk_analysis_progress)
+        }
+        
+        return integrated_knowledge
+
+    async def _assess_risk_analysis_completeness(self, query: Query,
+                                               iteration_ctx: IterativeRiskContext,
+                                               integrated_knowledge: Dict[str, Any]) -> Dict[str, Any]:
+        """Évalue la complétude de l'évaluation des risques."""
+        completeness_prompt = f"""
+Évalue la complétude de cette évaluation des risques itérative.
+
+REQUÊTE ORIGINALE: "{query.query_text}"
+ITÉRATION ACTUELLE: {iteration_ctx.current_iteration}
+
+ÉTAT ACTUEL:
+- Total insights risques: {integrated_knowledge.get("total_insights", 0)}
+- Scenarios analysés: {integrated_knowledge.get("scenarios_analyzed", 0)}
+- Profondeur par niveau de risque: {integrated_knowledge.get("risk_depth", {})}
+- Progrès d'analyse: {integrated_knowledge.get("analysis_progress", 0)}
+
+SEUILS CIBLES:
+- Confiance minimum: {self.iteration_thresholds["min_confidence"]}
+- Complétude cible: {self.iteration_thresholds["completeness_target"]}
+- Couverture scenarios: {self.iteration_thresholds["scenario_coverage_min"]}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+Évalue la complétude et réponds au format JSON:
+{{
+    "overall_completeness": 0.0-1.0,
+    "confidence_level": 0.0-1.0,
+    "risk_analysis_quality": 0.0-1.0,
+    "requires_more_iterations": true/false,
+    "recommended_next_steps": ["step1", "step2"],
+    "areas_needing_deeper_analysis": ["area1", "area2"],
+    "sufficient_for_decision": true/false,
+    "iteration_value_assessment": "high/medium/low"
+}}
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": completeness_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.1
+            )
+            
+            return json.loads(response)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation de complétude risques: {str(e)}")
+            return {
+                "overall_completeness": 0.5,
+                "confidence_level": 0.5,
+                "risk_analysis_quality": 0.5,
+                "requires_more_iterations": True,
+                "recommended_next_steps": ["retry_assessment"],
+                "areas_needing_deeper_analysis": ["error_occurred"],
+                "sufficient_for_decision": False,
+                "iteration_value_assessment": "low"
+            }
+
+    async def _perform_iterative_full_risk_assessment(self, query: Query,
+                                                    analysis_type: str,
+                                                    iteration_ctx: IterativeRiskContext,
+                                                    completeness_assessment: Dict[str, Any],
+                                                    org_id: str) -> AgentResponse:
+        """Effectue une évaluation complète des risques avec approche itérative."""
+        
+        # Synthétiser toutes les connaissances accumulées
+        synthesis_prompt = f"""
+Synthétise une évaluation complète des risques basée sur {iteration_ctx.current_iteration} itération(s).
+
+REQUÊTE: "{query.query_text}"
+
+SCENARIOS ANALYSÉS: {iteration_ctx.scenarios_analyzed}
+
+CONNAISSANCES ACCUMULÉES:
+{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
+
+PROFONDEUR ATTEINTE: {iteration_ctx.depth_achieved}
+
+ÉVALUATION DE COMPLÉTUDE:
+{json.dumps(completeness_assessment, indent=2, ensure_ascii=False)}
+
+Fournis une évaluation EBIOS RM complète incluant:
+1. Cartographie des risques identifiés
+2. Analyse de vraisemblance et d'impact
+3. Évaluation des mesures de sécurité existantes
+4. Recommandations de traitement des risques
+5. Plan d'action priorisé
+6. Besoins d'itérations supplémentaires si applicable
+
+Réponds en français avec une expertise EBIOS RM/MEHARI.
+"""
+
+        try:
+            synthesis = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": synthesis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            # Compiler les sources détaillées
+            detailed_sources = self._compile_risk_sources_with_metadata(iteration_ctx)
+            
+            response = AgentResponse(
+                content=synthesis,
+                tools_used=["risk_analysis", "ebios_methodology", "organizational_context"],
+                context_used=True,
+                sources=detailed_sources,
+                confidence=completeness_assessment.get("confidence_level", 0.8),
+                iteration_info={
+                    "total_iterations": iteration_ctx.current_iteration,
+                    "completeness_achieved": completeness_assessment.get("overall_completeness", 0.0),
+                    "scenarios_analyzed": len(iteration_ctx.scenarios_analyzed),
+                    "risk_domains_covered": len(iteration_ctx.depth_achieved)
+                },
+                requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+                context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", []),
+                knowledge_gained=self._extract_risk_insights(iteration_ctx),
+                metadata={
+                    "risk_analysis_summary": {
+                        "scenarios_count": len(iteration_ctx.scenarios_analyzed),
+                        "insights_total": sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values()),
+                        "depth_progression": iteration_ctx.depth_achieved,
+                        "analysis_progression": completeness_assessment
+                    }
+                }
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la synthèse itérative des risques: {str(e)}")
+            return AgentResponse(
+                content=f"Erreur lors de l'analyse itérative des risques: {str(e)}",
+                confidence=0.3,
+                requires_iteration=True,
+                context_gaps=["error_in_synthesis"]
+            )
+
+    async def _perform_iterative_scenario_analysis(self, query: Query,
+                                                 analysis_type: str,
+                                                 iteration_ctx: IterativeRiskContext,
+                                                 completeness_assessment: Dict[str, Any],
+                                                 org_id: str) -> AgentResponse:
+        """Effectue une analyse de scenarios avec approche itérative."""
+        
+        # Méthode similaire mais focalisée sur les scenarios
+        synthesis = f"Analyse itérative de scenarios de risques - {len(iteration_ctx.scenarios_analyzed)} scenarios analysés en {iteration_ctx.current_iteration} itérations."
+        
+        detailed_sources = self._compile_risk_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["scenario_analysis", "ebios_methodology"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    async def _perform_iterative_control_evaluation(self, query: Query,
+                                                  analysis_type: str,
+                                                  iteration_ctx: IterativeRiskContext,
+                                                  completeness_assessment: Dict[str, Any],
+                                                  org_id: str) -> AgentResponse:
+        """Effectue une évaluation des contrôles avec approche itérative."""
+        
+        synthesis = f"Évaluation itérative des contrôles de sécurité - Analyse basée sur {iteration_ctx.current_iteration} itérations."
+        
+        detailed_sources = self._compile_risk_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["control_evaluation", "effectiveness_assessment"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    async def _general_iterative_risk_analysis(self, query: Query,
+                                             analysis_type: str,
+                                             iteration_ctx: IterativeRiskContext,
+                                             completeness_assessment: Dict[str, Any],
+                                             org_id: str) -> AgentResponse:
+        """Effectue une analyse générale des risques avec approche itérative."""
+        
+        synthesis = f"Analyse générale itérative des risques - {sum(len(insights) for insights in iteration_ctx.knowledge_accumulator.values())} insights collectés."
+        
+        detailed_sources = self._compile_risk_sources_with_metadata(iteration_ctx)
+        
+        return AgentResponse(
+            content=synthesis,
+            tools_used=["risk_analysis", "organizational_context"],
+            context_used=True,
+            sources=detailed_sources,
+            confidence=completeness_assessment.get("confidence_level", 0.8),
+            requires_iteration=completeness_assessment.get("requires_more_iterations", False),
+            context_gaps=completeness_assessment.get("areas_needing_deeper_analysis", [])
+        )
+
+    def _compile_risk_sources_with_metadata(self, iteration_ctx: IterativeRiskContext) -> List[Dict[str, Any]]:
+        """Compile les sources d'analyse des risques avec métadonnées."""
+        detailed_sources = []
+        
+        # Sources de scenarios analysés
+        for scenario in iteration_ctx.scenarios_analyzed:
+            progress = iteration_ctx.risk_analysis_progress.get(scenario, {})
+            source = {
+                "type": "risk_scenario_analysis",
+                "id": scenario,
+                "title": f"Scenario de risque: {scenario[:50]}...",
+                "iteration": progress.get("iteration", 0),
+                "analysis_depth": progress.get("analysis_depth", 0.0),
+                "risk_level": progress.get("risk_level", "unknown"),
+                "insights_count": progress.get("insights_extracted", 0),
+                "tools_used": ["ebios_methodology", "risk_assessment", "organizational_context"],
+                "details": f"Analyse EBIOS RM de profondeur {progress.get('analysis_depth', 0.0):.1%}"
+            }
+            detailed_sources.append(source)
+        
+        # Sources de connaissances accumulées
+        for knowledge_key, knowledge_items in iteration_ctx.knowledge_accumulator.items():
+            if knowledge_items:
+                source = {
+                    "type": "risk_knowledge_accumulation",
+                    "id": knowledge_key,
+                    "title": f"Connaissances risques - {knowledge_key}",
+                    "content_count": len(knowledge_items),
+                    "tools_used": ["risk_analysis", "iterative_synthesis"],
+                    "details": f"Accumulation de {len(knowledge_items)} insights sur les risques"
+                }
+                detailed_sources.append(source)
+        
+        return detailed_sources
+
+    def _extract_risk_insights(self, iteration_ctx: IterativeRiskContext) -> List[str]:
+        """Extrait les insights clés sur les risques de toutes les itérations."""
+        key_insights = []
+        
+        for iteration_key, insights in iteration_ctx.knowledge_accumulator.items():
+            key_insights.extend(insights[:2])  # Top 2 insights par itération
+        
+        return key_insights
 
 # Factory function
 def get_risk_assessment_module(llm_client: LLMIntegration = None):
