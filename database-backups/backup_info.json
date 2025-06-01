@@ -1,11 +1,11 @@
 {
-    "backup_date": "2025-05-29T10:51:49Z",
+    "backup_date": "2025-06-01T14:07:40Z",
     "mariadb_backup": "mariadb_backup.sql",
     "qdrant_backup": "qdrant_backup.tar.gz",
     "created_by": "st34x",
-    "git_commit": "e5fc44d0ca80dd7bcf1b6580a60f9b34d3225800",
+    "git_commit": "a12f8b60b19107edd60fc542d8efbfb05db72605",
     "backup_size_mb": {
         "mariadb": "4",
-        "qdrant": "12"
+        "qdrant": "57"
     }
 }
