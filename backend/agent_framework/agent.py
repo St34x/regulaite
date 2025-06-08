@@ -87,7 +87,7 @@ class AgentResponse(BaseModel):
     content: str
     tools_used: List[str] = Field(default_factory=list)
     context_used: bool = False
-    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    sources: List[Any] = Field(default_factory=list)
     confidence: float = 1.0
     thinking: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -98,6 +98,23 @@ class AgentResponse(BaseModel):
     context_gaps: List[str] = Field(default_factory=list)
     requires_iteration: bool = Field(default=False)
     suggested_reformulation: Optional[str] = None
+    
+    @model_validator(mode='after')
+    def clean_sources(self):
+        """Filter out None values from sources and convert invalid types."""
+        if self.sources:
+            cleaned_sources = []
+            for source in self.sources:
+                if source is not None:
+                    if isinstance(source, dict):
+                        cleaned_sources.append(source)
+                    elif isinstance(source, str):
+                        cleaned_sources.append(source)
+                    else:
+                        # Convert other types to string
+                        cleaned_sources.append(str(source))
+            self.sources = cleaned_sources
+        return self
     
 class IterativeCapability:
     """Mixin class to add iterative capabilities to agents."""
@@ -357,3 +374,56 @@ class Agent(IterativeCapability):
                         knowledge.append(str(value))
         
         return knowledge 
+    
+    def format_document_as_source(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert a document object to a properly formatted source dictionary.
+        
+        Args:
+            doc: Document dictionary with various possible fields
+            
+        Returns:
+            Properly formatted source dictionary
+        """
+        return {
+            "doc_id": doc.get('id') or doc.get('doc_id') or doc.get('_id', 'unknown'),
+            "title": (doc.get('title') or 
+                     doc.get('filename') or 
+                     doc.get('original_filename') or 
+                     doc.get('name') or 
+                     f"Document {doc.get('id', 'unknown')}"),
+            "filename": doc.get('filename') or doc.get('original_filename'),
+            "original_filename": doc.get('original_filename'),
+            "page_number": doc.get('page_number', 1),
+            "score": doc.get('score') or doc.get('relevance_score'),
+            "relevance_score": doc.get('relevance_score') or doc.get('score'),
+            "match_percentage": doc.get('match_percentage'),
+            "retrieval_method": doc.get('retrieval_method', 'SEMANTIC'),
+            "content": doc.get('content') or doc.get('chunk_text') or doc.get('text'),
+            "chunk_text": doc.get('chunk_text') or doc.get('content') or doc.get('text'),
+            "chunk_id": doc.get('chunk_id'),
+            "chunk_index": doc.get('chunk_index'),
+            "node_id": doc.get('node_id'),
+            "file_type": doc.get('file_type'),
+            "category": doc.get('category'),
+            "language": doc.get('language'),
+            "author": doc.get('author'),
+            "created_at": doc.get('created_at'),
+            "size": doc.get('size'),
+            "page_count": doc.get('page_count'),
+            "matched_via": doc.get('matched_via'),
+            "text_content_type": doc.get('text_content_type'),
+            "is_question": doc.get('is_question')
+        }
+    
+    def format_documents_as_sources(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert a list of document objects to properly formatted source dictionaries.
+        
+        Args:
+            docs: List of document dictionaries
+            
+        Returns:
+            List of properly formatted source dictionaries
+        """
+        return [self.format_document_as_source(doc) for doc in docs]

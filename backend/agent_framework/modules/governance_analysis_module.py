@@ -134,7 +134,7 @@ class GovernanceAnalysisModule(Agent):
     Module expert en analyse de gouvernance avec IA stratégique avancée et capacités itératives.
     """
     
-    def __init__(self, llm_client: LLMIntegration = None):
+    def __init__(self, llm_client = None, rag_system=None):
         super().__init__(
             agent_id="governance_analysis",
             name="Expert Analyse de Gouvernance Itérative"
@@ -143,7 +143,7 @@ class GovernanceAnalysisModule(Agent):
         self.llm_client = llm_client or get_llm_client()
         
         # Initialiser les outils
-        self.document_finder = DocumentFinder()
+        self.document_finder = DocumentFinder(rag_system=rag_system)
         self.entity_extractor = EntityExtractor()
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
@@ -274,7 +274,7 @@ Tu évalues constamment si plus de contexte améliorerait tes recommandations st
         logger.info(f"Traitement requête gouvernance itérative: {query.query_text}")
         
         # Initialiser ou récupérer le contexte itératif
-        session_id = query.context.session_id
+        session_id = query.context.session_id if query.context else "default"
         if session_id not in self.iteration_contexts:
             self.iteration_contexts[session_id] = IterativeGovernanceContext()
         
@@ -406,7 +406,20 @@ Retourne un objet JSON avec le type et le contexte détaillé.
                 temperature=0.1
             )
             
-            return json.loads(response)
+            # Try to extract JSON from response
+            if response and response.strip():
+                # Look for JSON content between braces
+                start = response.find('{')
+                end = response.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_content = response[start:end]
+                    return json.loads(json_content)
+                else:
+                    # Try to parse the whole response
+                    return json.loads(response.strip())
+            else:
+                logger.warning("Empty response from LLM")
+                raise ValueError("Empty LLM response")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse d'intention gouvernance: {str(e)}")
@@ -896,8 +909,8 @@ Retourne une recommandation JSON actionable et business-focused.
         
         # Contexte organisationnel (simplifié pour démo)
         org_context = OrganizationalContext(
-            sector=query.context.get("sector", "technology") if query.context else "technology",
-            size=query.context.get("size", "medium") if query.context else "medium",
+            sector=query.context.metadata.get("sector", "technology") if query.context else "technology",
+            size=query.context.metadata.get("size", "medium") if query.context else "medium",
             complexity="moderate",
             regulatory_environment="moderate",
             transformation_stage="evolving",
@@ -1120,7 +1133,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS GOUVERNANCE: {len(governance_entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert Chief Governance Officer, analyse:
 
@@ -1164,7 +1177,7 @@ Fournis une analyse stratégique complète avec recommandations C-level.
             content=response,
             tools_used=["document_finder", "entity_extractor"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "governance_entities": len(governance_entities),
@@ -1177,7 +1190,7 @@ Fournis une analyse stratégique complète avec recommandations C-level.
         
         # Paramètres de l'intention
         target_domains = [GovernanceDomain(d) for d in intent.get("domains", ["strategic_governance"])]
-        org_profile = query.context.get("organization", {}) if query.context else {}
+        org_profile = query.context.metadata.get("organization", {}) if query.context else {}
         
         # Contexte organisationnel
         org_context = OrganizationalContext(
@@ -1282,10 +1295,20 @@ Présente une roadmap stratégique et actionnable.
         )
         
         # Analyse temporelle des tendances
+        from datetime import datetime, timedelta
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=365)  # 12 months
+        
+        # Create dummy entities from documents for trend analysis
+        doc_entities = [{"id": f"doc_{i}", "name": doc.get("title", f"Document {i}")} 
+                       for i, doc in enumerate(relevant_docs[:3])]
+        
+        # Note: Using COMPLIANCE_SCORE as GOVERNANCE metric type may not exist
         trends = await self.temporal_analyzer.analyze_trends(
-            [doc.get("content", "") for doc in relevant_docs[:3]],
-            MetricType.GOVERNANCE,
-            time_window_months=12
+            entities=doc_entities,
+            metric_types=[MetricType.COMPLIANCE_SCORE],  # Using available metric type
+            time_range=(start_time, end_time),
+            include_forecasts=False
         )
         
         # Conseil exécutif par LLM
@@ -1299,7 +1322,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 TENDANCES IDENTIFIÉES: {len(trends.data_points) if trends else 0}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant que Chairman/CEO advisor avec 25+ ans d'expérience, fournis:
 
@@ -1350,7 +1373,7 @@ Fournis des conseils actionables et orientés résultats business.
             content=response,
             tools_used=["document_finder", "temporal_analyzer"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "advisory_level": target_level,
                 "priority": priority,
@@ -1385,7 +1408,7 @@ Fournis des conseils actionables et orientés résultats business.
         # Analyse croisée
         cross_refs = await self.cross_reference_tool.analyze_relationships(
             [doc.get("content", "") for doc in relevant_docs[:3]],
-            relation_types=[RelationType.CONTROLS_RISK, RelationType.SUPPORTS]
+            relation_types=[RelationType.CONTROLS, RelationType.SUPPORTS]
         )
         
         # Analyse générale par LLM
@@ -1397,7 +1420,7 @@ ENTITÉS GOUVERNANCE: {len(governance_entities)}
 RELATIONS IDENTIFIÉES: {len(cross_refs.relationships)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert Chief Governance Officer, analyse:
 
@@ -1447,7 +1470,7 @@ Fournis une analyse experte complète avec perspective C-level.
             content=response,
             tools_used=["document_finder", "entity_extractor", "cross_reference_tool"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "governance_entities": len(governance_entities),
@@ -1504,7 +1527,17 @@ Réponds au format JSON:
                 temperature=0.1
             )
             
-            return json.loads(response)
+            # Try to extract JSON from response
+            if response and response.strip():
+                start = response.find('{')
+                end = response.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_content = response[start:end]
+                    return json.loads(json_content)
+                else:
+                    return json.loads(response.strip())
+            else:
+                raise ValueError("Empty LLM response")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'évaluation des connaissances gouvernance: {str(e)}")
@@ -1662,7 +1695,17 @@ Réponds au format JSON:
                 temperature=0.2
             )
             
-            return json.loads(response)
+            # Try to extract JSON from response
+            if response and response.strip():
+                start = response.find('{')
+                end = response.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_content = response[start:end]
+                    return json.loads(json_content)
+                else:
+                    return json.loads(response.strip())
+            else:
+                raise ValueError("Empty LLM response")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse du domaine {domain.value}: {str(e)}")
@@ -1758,7 +1801,17 @@ CONNAISSANCES ACCUMULÉES:
                 temperature=0.1
             )
             
-            return json.loads(response)
+            # Try to extract JSON from response
+            if response and response.strip():
+                start = response.find('{')
+                end = response.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_content = response[start:end]
+                    return json.loads(json_content)
+                else:
+                    return json.loads(response.strip())
+            else:
+                raise ValueError("Empty LLM response")
             
         except Exception as e:
             logger.error(f"Erreur lors de l'évaluation de complétude gouvernance: {str(e)}")
@@ -1890,6 +1943,6 @@ CONNAISSANCES ACCUMULÉES:
 
 
 # Factory function
-def get_governance_analysis_module(llm_client: LLMIntegration = None):
+def get_governance_analysis_module(llm_client = None):
     """Factory function pour obtenir une instance du module d'analyse de gouvernance."""
     return GovernanceAnalysisModule(llm_client=llm_client) 

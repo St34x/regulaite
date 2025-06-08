@@ -341,15 +341,13 @@ Extrais les éléments suivants au format JSON:
     async def _semantic_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
         """Recherche sémantique via le système RAG."""
         try:
-            if hasattr(self.rag_system, 'search'):
-                results = await self.rag_system.search(
-                    query=query,
-                    limit=limit,
-                    include_metadata=True
+            if hasattr(self.rag_system, 'retrieve'):
+                results = await asyncio.get_event_loop().run_in_executor(
+                    None, self.rag_system.retrieve, query, limit
                 )
                 return results
             else:
-                logger.warning("Méthode search non disponible dans le système RAG")
+                logger.warning("Méthode retrieve non disponible dans le système RAG")
                 return []
         except Exception as e:
             logger.error(f"Erreur recherche sémantique: {str(e)}")

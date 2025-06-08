@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import qdrant_client
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Distance
+from qdrant_client.models import PointStruct, VectorParams, Distance, OptimizersConfigDiff
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -38,7 +38,7 @@ class HyPERagSystem:
     
     def __init__(
         self,
-        collection_name: str = "regulaite_docs",
+        collection_name: str = "regulaite_documents",
         metadata_collection_name: str = "regulaite_metadata",
         qdrant_url: str = "http://regulaite-qdrant:6333",
         embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -224,15 +224,20 @@ class HyPERagSystem:
                             # Delete the existing collection
                             self.qdrant_client.delete_collection(collection_name)
                             
-                            # Create a new collection with the correct dimension
+                            # Create a new collection with the correct dimension and optimized indexing
                             self.qdrant_client.create_collection(
                                 collection_name=collection_name,
                                 vectors_config=VectorParams(
                                     size=self.embedding_dim,
                                     distance=Distance.COSINE
+                                ),
+                                optimizers_config=OptimizersConfigDiff(
+                                    indexing_threshold=1000,  # Index vectors after 1000 points instead of 20000
+                                    max_indexing_threads=4,
+                                    flush_interval_sec=5
                                 )
                             )
-                            logger.info(f"Collection {collection_name} recreated with dimension {self.embedding_dim}")
+                            logger.info(f"Collection {collection_name} recreated with dimension {self.embedding_dim} and optimized indexing")
                     except Exception as e:
                         logger.error(f"Error checking vector dimensions for {collection_name}: {str(e)}")
                         # If we can't check dimensions, recreate the collection to be safe
@@ -241,28 +246,38 @@ class HyPERagSystem:
                         # Delete the existing collection
                         self.qdrant_client.delete_collection(collection_name)
                         
-                        # Create a new collection with the correct dimension
+                        # Create a new collection with the correct dimension and optimized indexing
                         self.qdrant_client.create_collection(
                             collection_name=collection_name,
                             vectors_config=VectorParams(
                                 size=self.embedding_dim,
                                 distance=Distance.COSINE
+                            ),
+                            optimizers_config=OptimizersConfigDiff(
+                                indexing_threshold=1000,  # Index vectors after 1000 points instead of 20000
+                                max_indexing_threads=4,
+                                flush_interval_sec=5
                             )
                         )
-                        logger.info(f"Collection {collection_name} recreated with dimension {self.embedding_dim}")
+                        logger.info(f"Collection {collection_name} recreated with dimension {self.embedding_dim} and optimized indexing")
                 else:
                     logger.info(f"Creating collection {collection_name}")
                     
-                    # Create collection with proper schema
+                    # Create collection with proper schema and optimized indexing
                     self.qdrant_client.create_collection(
                         collection_name=collection_name,
                         vectors_config=VectorParams(
                             size=self.embedding_dim,
                             distance=Distance.COSINE
+                        ),
+                        optimizers_config=OptimizersConfigDiff(
+                            indexing_threshold=1000,  # Index vectors after 1000 points instead of 20000
+                            max_indexing_threads=4,
+                            flush_interval_sec=5
                         )
                     )
                     
-                    logger.info(f"Collection {collection_name} created successfully")
+                    logger.info(f"Collection {collection_name} created successfully with optimized indexing")
                 
             return True
         except Exception as e:
@@ -959,6 +974,9 @@ class HyPERagSystem:
             # Sort by score (descending) and limit to requested top_k
             documents = sorted(documents, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
             
+            # Enrich documents with metadata from the metadata collection
+            documents = self._enrich_documents_with_metadata(documents)
+            
             logger.info(f"Retrieved {len(documents)} unique document chunks from vector search (questions helped improve retrieval)")
             
             # Log some stats about how chunks were found
@@ -980,6 +998,107 @@ class HyPERagSystem:
             logger.error(f"Retrieval traceback: {traceback.format_exc()}")
             raise
     
+    def _enrich_documents_with_metadata(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Enrich retrieved documents with metadata from the metadata collection.
+        
+        Args:
+            documents: List of document chunks retrieved from the main collection
+            
+        Returns:
+            List of documents enriched with metadata (filename, title, etc.)
+        """
+        if not documents:
+            return documents
+            
+        try:
+            # Get unique document IDs from the retrieved documents
+            doc_ids = list(set(doc.get("doc_id") for doc in documents if doc.get("doc_id")))
+            
+            if not doc_ids:
+                logger.warning("No document IDs found in retrieved documents")
+                return documents
+            
+            logger.debug(f"Enriching documents with metadata for doc_ids: {doc_ids}")
+            
+            # Fetch metadata for all document IDs in one query
+            metadata_map = {}
+            
+            for doc_id in doc_ids:
+                try:
+                    # Search for document metadata using proper Qdrant filter
+                    metadata_results = self.qdrant_client.scroll(
+                        collection_name=self.metadata_collection_name,
+                        scroll_filter=qdrant_client.models.Filter(
+                            must=[
+                                qdrant_client.models.FieldCondition(
+                                    key="doc_id",
+                                    match=qdrant_client.models.MatchValue(value=doc_id)
+                                )
+                            ]
+                        ),
+                        limit=1,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    
+                    if metadata_results and len(metadata_results[0]) > 0:
+                        metadata_payload = metadata_results[0][0].payload
+                        metadata_map[doc_id] = metadata_payload
+                        logger.debug(f"Found metadata for doc_id {doc_id}: title={metadata_payload.get('title', 'N/A')}")
+                    else:
+                        logger.debug(f"No metadata found for doc_id {doc_id}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error fetching metadata for doc_id {doc_id}: {str(e)}")
+                    continue
+            
+            # Enrich each document with its metadata
+            enriched_documents = []
+            for doc in documents:
+                doc_id = doc.get("doc_id")
+                if doc_id in metadata_map:
+                    doc_metadata = metadata_map[doc_id]
+                    
+                    # Add essential metadata fields for frontend display
+                    doc["title"] = doc_metadata.get("title", f"Document {doc_id[:8]}")
+                    doc["filename"] = doc_metadata.get("name", doc_metadata.get("original_filename", f"Document {doc_id[:8]}"))
+                    doc["original_filename"] = doc_metadata.get("original_filename", "")
+                    doc["file_type"] = doc_metadata.get("file_type", "")
+                    doc["category"] = doc_metadata.get("category", "Uncategorized")
+                    doc["language"] = doc_metadata.get("language", "en")
+                    doc["author"] = doc_metadata.get("author", "")
+                    doc["created_at"] = doc_metadata.get("created_at", "")
+                    doc["size"] = doc_metadata.get("size", 0)
+                    doc["page_count"] = doc_metadata.get("page_count", 0)
+                    
+                    logger.debug(f"Enriched document {doc_id} with filename: {doc['filename']}")
+                else:
+                    logger.debug(f"No metadata found for doc_id {doc_id}, using defaults")
+                    # Provide default values to avoid "unknown" display
+                    doc["title"] = f"Document {doc_id[:8]}" if doc_id else "Unknown Document"
+                    doc["filename"] = f"Document {doc_id[:8]}" if doc_id else "Unknown Document"
+                    doc["original_filename"] = ""
+                    doc["file_type"] = ""
+                    doc["category"] = "Uncategorized"
+                    doc["language"] = "en"
+                    doc["author"] = ""
+                    doc["created_at"] = ""
+                    doc["size"] = 0
+                    doc["page_count"] = 0
+                
+                enriched_documents.append(doc)
+            
+            logger.info(f"Successfully enriched {len(enriched_documents)} documents with metadata")
+            return enriched_documents
+            
+        except Exception as e:
+            logger.error(f"Error enriching documents with metadata: {str(e)}")
+            import traceback
+            logger.error(f"Metadata enrichment traceback: {traceback.format_exc()}")
+            # Return original documents if enrichment fails
+            return documents
+
     def _convert_filters_to_qdrant(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert API filters to Qdrant filter format

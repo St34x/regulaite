@@ -16,7 +16,7 @@ from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
     EntityType, MetricType, RelationType
 )
-from ..tools.framework_parser import FrameworkParser, FrameworkType, ComplianceGap
+from ..tools.framework_parser import FrameworkParser, FrameworkType, ComplianceGap, safe_framework_type_conversion
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ class ComplianceAnalysisModule(Agent):
     Module expert en analyse de conformité avec IA avancée et capacités itératives.
     """
     
-    def __init__(self, llm_client: LLMClient = None):
+    def __init__(self, llm_client: LLMClient = None, rag_system=None):
         super().__init__(
             agent_id="compliance_analysis",
             name="Expert Analyse de Conformité Itérative"
@@ -146,7 +146,7 @@ class ComplianceAnalysisModule(Agent):
         self.llm_client = llm_client or get_llm_client()
         
         # Initialiser les outils
-        self.document_finder = DocumentFinder()
+        self.document_finder = DocumentFinder(rag_system=rag_system)
         self.entity_extractor = EntityExtractor()
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
@@ -272,7 +272,7 @@ Tu évalues constamment si plus de contexte améliorerait tes recommandations.
         logger.info(f"Traitement requête conformité itérative: {query.query_text}")
         
         # Initialiser ou récupérer le contexte itératif
-        session_id = query.context.session_id
+        session_id = query.context.session_id if query.context else "default"
         if session_id not in self.iteration_contexts:
             self.iteration_contexts[session_id] = IterativeAnalysisContext()
         
@@ -425,13 +425,12 @@ Réponds au format JSON:
             }
             
             # Recherche de documents avec critères affinés
-            documents_found = await self.document_finder.find_relevant_documents(
-                search_criteria,
-                max_results=5,  # Limiter pour cette itération
-                prioritize_by="relevance_and_completeness"
+            documents_found = await self.document_finder.search_documents(
+                query=query.query_text,
+                limit=5  # Limiter pour cette itération
             )
             
-            return [doc["id"] for doc in documents_found.get("documents", [])]
+            return [doc.get("doc_id", "") for doc in documents_found]
             
         except Exception as e:
             logger.error(f"Erreur lors de la priorisation des documents: {str(e)}")
@@ -902,48 +901,32 @@ Réponds en français avec un niveau d'expertise C-suite.
         """Analyse sophistiquée de l'intention de la requête avec contexte itératif."""
         
         intent_analysis_prompt = f"""
-Analyse cette demande de conformité avec ton expertise senior et en tenant compte des connaissances accumulées:
+Analyse cette demande de conformité et retourne UNIQUEMENT un objet JSON avec ta compréhension experte.
 
 DEMANDE: "{query_text}"
 
-Détermine:
-1. Type d'analyse demandé:
-   - compliance_assessment: Évaluation du niveau de conformité
-   - gap_analysis: Analyse des écarts de conformité
-   - regulatory_intelligence: Veille et évolution réglementaire
-   - multi_framework_optimization: Optimisation multi-frameworks
-   - strategic_roadmap: Roadmap stratégique de conformité
-   - general_analysis: Analyse générale
+IMPORTANT: Réponds UNIQUEMENT avec l'objet JSON, sans texte d'explication avant ou après.
 
-2. Frameworks concernés (ISO27001, RGPD, DORA, NIST, SOX, PCI-DSS)
-3. Scope géographique (EU, France, autres)
-4. Urgence/priorité (critique, haute, normale, faible)
-5. Contexte organisationnel implicite
-6. Niveau de détail requis (stratégique, opérationnel, technique)
+JSON Format attendu:
+{{
+  "type": "compliance_assessment|gap_analysis|regulatory_intelligence|multi_framework_optimization|strategic_roadmap|general_analysis",
+  "frameworks": ["iso27001", "rgpd", "dora", "nist", "sox", "pci-dss"],
+  "priority": "critique|haute|normale|faible",
+  "scope": ["EU", "France"],
+  "detail_level": "strategique|operationnel|technique",
+  "context_assessment": {{
+    "knowledge_completeness": 0.0-1.0,
+    "coverage_gaps": ["gap1", "gap2"],
+    "priority_domains": ["domain1", "domain2"]
+  }}
+}}
 
-Retourne une analyse JSON structurée avec ta compréhension experte.
+CONTEXTE ACCUMULÉ:
+- Connaissances: {len(iteration_ctx.knowledge_accumulator)} domaines
+- Documents analysés: {len(iteration_ctx.document_analysis_progress)}
+- Frameworks couverts: {[f.value for f in iteration_ctx.frameworks_analyzed]}
 
-CONNAISSANCES ACCUMULÉES:
-{json.dumps(iteration_ctx.knowledge_accumulator, indent=2, ensure_ascii=False)}
-
-DOCUMENTS DÉJÀ ANALYSÉS:
-{iteration_ctx.document_analysis_progress}
-
-FRAMEWORKS COUVERTS:
-{[f.value for f in iteration_ctx.frameworks_analyzed]}
-
-PROFONDEUR ATTEINTE PAR DOMAINE:
-{iteration_ctx.depth_achieved}
-
-Évalue:
-1. La pertinence des connaissances existantes
-2. Les domaines bien couverts vs. ceux manquants
-3. La qualité des sources consultées
-4. Les gaps de contexte restants
-5. La cohérence des informations accumulées
-
-Réponds en français avec un niveau d'expertise C-suite.
-"""
+Réponds UNIQUEMENT avec le JSON valide:"""
 
         response = await self.llm_client.generate_response(
             messages=[
@@ -955,20 +938,72 @@ Réponds en français avec un niveau d'expertise C-suite.
         )
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
+            # Try to extract JSON from response
+            if response and response.strip():
+                # Clean the response - remove any markdown formatting
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+                
+                # Find JSON boundaries
+                json_start = cleaned_response.find("{")
+                json_end = cleaned_response.rfind("}") + 1
+                
+                if json_start >= 0 and json_end > json_start:
+                    json_content = cleaned_response[json_start:json_end]
+                    logger.debug(f"Attempting to parse JSON: {json_content[:200]}...")
+                    
+                    parsed_result = json.loads(json_content)
+                    
+                    # Validate structure and required fields
+                    if isinstance(parsed_result, dict) and "type" in parsed_result:
+                        # Ensure all required fields have defaults
+                        parsed_result.setdefault("frameworks", ["iso27001", "rgpd"])
+                        parsed_result.setdefault("priority", "normale")
+                        parsed_result.setdefault("scope", ["EU"])
+                        parsed_result.setdefault("detail_level", "operationnel")
+                        
+                        logger.info(f"Successfully parsed query intent: type={parsed_result['type']}, frameworks={parsed_result['frameworks']}")
+                        return parsed_result
+                    else:
+                        raise ValueError(f"Invalid JSON structure: missing 'type' field or not a dict")
+                else:
+                    # Try to parse the entire response as JSON
+                    logger.debug(f"No JSON boundaries found, trying to parse entire response: {cleaned_response[:100]}...")
+                    parsed_result = json.loads(cleaned_response)
+                    if isinstance(parsed_result, dict) and "type" in parsed_result:
+                        parsed_result.setdefault("frameworks", ["iso27001", "rgpd"])
+                        parsed_result.setdefault("priority", "normale")
+                        parsed_result.setdefault("scope", ["EU"])
+                        logger.info(f"Successfully parsed full response as JSON: type={parsed_result['type']}")
+                        return parsed_result
+                    else:
+                        raise ValueError("No valid JSON structure found in response")
+            else:
+                raise ValueError("Empty LLM response")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {str(e)}")
+            logger.debug(f"Failed to parse response: {response[:500] if response else 'None'}")
         except Exception as e:
             logger.error(f"Erreur analyse intention: {str(e)}")
-            logger.warning("Utilisation de paramètres d'analyse par défaut")
-            return {
-                "type": "general_analysis",
-                "frameworks": ["iso27001", "rgpd"],
-                "priority": "normal",
-                "scope": "EU",
-                "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés"
-            }
+            logger.debug(f"Response causing error: {response[:300] if response else 'None'}")
+            
+        # Fallback to default parameters with improved error reporting
+        logger.warning("Utilisation de paramètres d'analyse par défaut")
+        logger.info("Using default analysis parameters due to LLM intent analysis failure")
+        
+        return {
+            "type": "general_analysis",
+            "frameworks": ["iso27001", "rgpd"],
+            "priority": "normale",
+            "scope": ["EU"],
+            "detail_level": "operationnel",
+            "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés",
+            "fallback_reason": "JSON parsing failed or invalid structure"
+        }
 
     async def _process_standard_compliance_query(self, query: Query,
                                                   analysis_intent: Dict[str, Any]) -> AgentResponse:
@@ -995,8 +1030,8 @@ Réponds en français avec un niveau d'expertise C-suite.
                                                   analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Effectue une évaluation de conformité."""
         
-        frameworks = [FrameworkType(f) for f in analysis_intent.get("frameworks", ["iso27001"])]
-        org_profile = query.context.get("organization", {}) if query.context else {}
+        frameworks = [safe_framework_type_conversion(f) for f in analysis_intent.get("frameworks", ["iso27001"])]
+        org_profile = query.context.metadata.get("organization", {}) if query.context else {}
         
         assessments = await self.assess_multi_framework_compliance(
             frameworks, org_profile
@@ -1022,9 +1057,9 @@ Réponds en français avec un niveau d'expertise C-suite.
                                                   analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Effectue une analyse de gaps."""
         
-        framework = FrameworkType(analysis_intent.get("frameworks", ["iso27001"])[0])
-        org_profile = query.context.get("organization", {}) if query.context else {}
-        current_impl = query.context.get("current_implementation", {}) if query.context else {}
+        framework = safe_framework_type_conversion(analysis_intent.get("frameworks", ["iso27001"])[0])
+        org_profile = query.context.metadata.get("organization", {}) if query.context else {}
+        current_impl = query.context.metadata.get("current_implementation", {}) if query.context else {}
         
         gaps = await self.framework_parser.analyze_compliance_gaps(
             framework, current_impl, org_profile
@@ -1050,7 +1085,7 @@ Réponds en français avec un niveau d'expertise C-suite.
                                                   analysis_intent: Dict[str, Any]) -> AgentResponse:
         """Fournit une intelligence réglementaire proactive."""
         
-        frameworks = [FrameworkType(f) for f in analysis_intent.get("frameworks", ["rgpd"])]
+        frameworks = [safe_framework_type_conversion(f) for f in analysis_intent.get("frameworks", ["rgpd"])]
         geographic_scope = analysis_intent.get("scope", ["EU", "France"])
         time_horizon = analysis_intent.get("horizon", 12)
         
@@ -1127,7 +1162,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS IDENTIFIÉES: {len(compliance_entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 ENTITÉS CLÉS:
 {json.dumps(compliance_entities[:10], indent=2, default=str)[:1500]}
@@ -1174,7 +1209,7 @@ Fournis une analyse experte complète et actionnable.
             content=response,
             tools_used=["document_finder", "entity_extractor"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "entities_extracted": len(compliance_entities),
@@ -1477,6 +1512,273 @@ Fournis une analyse complète avec traçabilité des sources.
         )
         
         return response
+
+    async def assess_multi_framework_compliance(
+        self,
+        frameworks: List[FrameworkType],
+        org_profile: Dict[str, Any]
+    ) -> List[ComplianceAssessment]:
+        """
+        Effectue une évaluation de conformité multi-frameworks.
+        """
+        logger.info(f"Evaluating compliance for frameworks: {[f.value for f in frameworks]}")
+        
+        assessments = []
+        
+        for framework in frameworks:
+            try:
+                # Rechercher des documents pertinents pour ce framework
+                relevant_docs = await self.document_finder.search_documents(
+                    f"conformité {framework.value} compliance",
+                    limit=10
+                )
+                
+                # Extraire des entités de conformité
+                compliance_entities = []
+                for doc in relevant_docs[:3]:
+                    content = doc.get("content", "")
+                    if content:
+                        entities = await self.entity_extractor.extract_entities(
+                            content,
+                            entity_types=[EntityType.CONTROL, EntityType.REQUIREMENT],
+                            framework_context=framework.value
+                        )
+                        compliance_entities.extend(entities.get("control", []))
+                        compliance_entities.extend(entities.get("requirement", []))
+                
+                # Calculer le score de conformité basé sur les entités trouvées
+                total_requirements = len(compliance_entities) or 1
+                compliant_requirements = len([e for e in compliance_entities if e.get("status") == "compliant"])
+                compliance_score = (compliant_requirements / total_requirements) * 100
+                
+                # Identifier les gaps critiques
+                critical_gaps = len([e for e in compliance_entities if e.get("severity") == "critical"])
+                
+                # Déterminer le statut global
+                if compliance_score >= 90:
+                    status = ComplianceStatus.COMPLIANT
+                elif compliance_score >= 70:
+                    status = ComplianceStatus.PARTIALLY_COMPLIANT
+                else:
+                    status = ComplianceStatus.NON_COMPLIANT
+                
+                # Générer des insights AI
+                insights_prompt = f"""
+Analyse la conformité {framework.value} basée sur:
+- {len(relevant_docs)} documents analysés
+- {len(compliance_entities)} entités de conformité identifiées
+- Score calculé: {compliance_score:.1f}%
+
+Fournis des insights stratégiques sur:
+1. Points forts de la conformité
+2. Lacunes critiques identifiées
+3. Recommandations prioritaires
+4. Niveau de confiance de l'évaluation
+"""
+                
+                try:
+                    ai_insights_response = await self.llm_client.generate_response(
+                        messages=[
+                            {"role": "system", "content": self.system_prompts["compliance_expert"]},
+                            {"role": "user", "content": insights_prompt}
+                        ],
+                        model="gpt-4.1",
+                        temperature=0.2
+                    )
+                    
+                    ai_insights = {
+                        "analysis": ai_insights_response,
+                        "confidence": min(0.9, len(relevant_docs) * 0.1),
+                        "entities_analyzed": len(compliance_entities),
+                        "documents_consulted": len(relevant_docs)
+                    }
+                except Exception as e:
+                    ai_insights = {
+                        "analysis": f"Évaluation basée sur {len(compliance_entities)} entités de conformité",
+                        "confidence": 0.5,
+                        "error": str(e)
+                    }
+                
+                # Créer l'évaluation de conformité
+                assessment = ComplianceAssessment(
+                    framework=framework,
+                    overall_score=compliance_score,
+                    status=status,
+                    assessed_requirements=total_requirements,
+                    compliant_requirements=compliant_requirements,
+                    gap_count=total_requirements - compliant_requirements,
+                    critical_gaps=critical_gaps,
+                    assessment_date=datetime.now(),
+                    key_findings=[
+                        f"Score de conformité: {compliance_score:.1f}%",
+                        f"Entités analysées: {len(compliance_entities)}",
+                        f"Documents consultés: {len(relevant_docs)}"
+                    ],
+                    recommendations=[
+                        "Analyser les gaps identifiés",
+                        "Mettre à jour la documentation",
+                        "Renforcer les contrôles manquants"
+                    ],
+                    confidence_level=ai_insights["confidence"],
+                    ai_insights=ai_insights
+                )
+                
+                assessments.append(assessment)
+                logger.info(f"Assessment completed for {framework.value}: {compliance_score:.1f}%")
+                
+            except Exception as e:
+                logger.error(f"Error assessing {framework.value}: {str(e)}")
+                # Créer une évaluation par défaut en cas d'erreur
+                assessment = ComplianceAssessment(
+                    framework=framework,
+                    overall_score=0.0,
+                    status=ComplianceStatus.UNKNOWN,
+                    assessed_requirements=0,
+                    compliant_requirements=0,
+                    gap_count=0,
+                    critical_gaps=0,
+                    assessment_date=datetime.now(),
+                    key_findings=[f"Erreur d'évaluation: {str(e)}"],
+                    recommendations=["Réessayer l'évaluation avec plus de contexte"],
+                    confidence_level=0.0,
+                    ai_insights={"error": str(e)}
+                )
+                assessments.append(assessment)
+        
+        return assessments
+
+    async def generate_regulatory_intelligence(
+        self,
+        frameworks: List[FrameworkType],
+        geographic_scope: List[str],
+        time_horizon: int = 12
+    ) -> List[RegulatoryIntelligence]:
+        """
+        Génère une intelligence réglementaire pour les frameworks spécifiés.
+        """
+        logger.info(f"Generating regulatory intelligence for frameworks: {[f.value for f in frameworks]}")
+        
+        intelligence_reports = []
+        
+        for framework in frameworks:
+            try:
+                # Rechercher des documents sur les évolutions réglementaires
+                relevant_docs = await self.document_finder.search_documents(
+                    f"évolution réglementation {framework.value} nouveauté changement",
+                    limit=5
+                )
+                
+                # Générer l'intelligence réglementaire via LLM
+                intelligence_prompt = f"""
+Génère une intelligence réglementaire pour {framework.value}:
+
+PÉRIMÈTRE:
+- Frameworks: {framework.value}
+- Scope géographique: {', '.join(geographic_scope)}
+- Horizon temporel: {time_horizon} mois
+
+SOURCES ANALYSÉES: {len(relevant_docs)} documents
+
+En tant qu'expert en veille réglementaire, analyse:
+
+1. ÉVOLUTIONS RÉCENTES (6 derniers mois):
+   - Nouvelles réglementations
+   - Amendements significatifs
+   - Décisions d'autorités
+
+2. CHANGEMENTS À VENIR (12 prochains mois):
+   - Projets de réglementation
+   - Dates d'entrée en vigueur
+   - Périodes de transition
+
+3. IMPACT ORGANISATIONNEL:
+   - Évaluation de l'impact
+   - Zones d'attention prioritaires
+   - Risques de non-conformité
+
+4. RECOMMANDATIONS STRATÉGIQUES:
+   - Actions de préparation
+   - Veille continue recommandée
+   - Points de monitoring
+
+Fournis une analyse structurée et prospective.
+"""
+                
+                try:
+                    intelligence_response = await self.llm_client.generate_response(
+                        messages=[
+                            {"role": "system", "content": self.system_prompts["regulatory_intelligence"]},
+                            {"role": "user", "content": intelligence_prompt}
+                        ],
+                        model="gpt-4.1",
+                        temperature=0.2
+                    )
+                except Exception as e:
+                    intelligence_response = f"Intelligence réglementaire pour {framework.value} - analyse basée sur {len(relevant_docs)} sources documentaires."
+                
+                # Créer le rapport d'intelligence
+                intelligence = RegulatoryIntelligence(
+                    framework=framework,
+                    recent_changes=[
+                        {
+                            "type": "analysis",
+                            "description": f"Analyse basée sur {len(relevant_docs)} documents",
+                            "date": datetime.now().isoformat(),
+                            "impact": "medium"
+                        }
+                    ],
+                    upcoming_changes=[
+                        {
+                            "type": "monitoring",
+                            "description": f"Surveillance continue de {framework.value}",
+                            "timeline": f"{time_horizon} mois",
+                            "priority": "high"
+                        }
+                    ],
+                    impact_assessment={
+                        "overall_impact": "medium",
+                        "confidence": min(0.8, len(relevant_docs) * 0.15),
+                        "analysis": intelligence_response
+                    },
+                    preparation_recommendations=[
+                        f"Surveiller les évolutions de {framework.value}",
+                        "Maintenir la documentation à jour",
+                        "Préparer les adaptations nécessaires"
+                    ],
+                    monitoring_priorities=[
+                        f"Évolutions {framework.value}",
+                        "Jurisprudence applicable",
+                        "Guidance des autorités"
+                    ],
+                    last_updated=datetime.now(),
+                    analysis_depth="standard",
+                    sources_consulted=[doc.get("title", "Document") for doc in relevant_docs[:3]],
+                    confidence_by_area={
+                        "recent_changes": 0.7,
+                        "upcoming_changes": 0.6,
+                        "impact_assessment": 0.8
+                    }
+                )
+                
+                intelligence_reports.append(intelligence)
+                logger.info(f"Intelligence report generated for {framework.value}")
+                
+            except Exception as e:
+                logger.error(f"Error generating intelligence for {framework.value}: {str(e)}")
+                # Créer un rapport par défaut en cas d'erreur
+                intelligence = RegulatoryIntelligence(
+                    framework=framework,
+                    recent_changes=[],
+                    upcoming_changes=[],
+                    impact_assessment={"error": str(e)},
+                    preparation_recommendations=["Réessayer la génération d'intelligence"],
+                    monitoring_priorities=[f"Surveillance {framework.value}"],
+                    last_updated=datetime.now(),
+                    analysis_depth="error"
+                )
+                intelligence_reports.append(intelligence)
+        
+        return intelligence_reports
 
 # Factory function
 def get_compliance_analysis_module(llm_client: LLMClient = None):

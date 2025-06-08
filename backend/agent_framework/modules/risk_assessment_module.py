@@ -18,6 +18,7 @@ from ..tools import (
     EntityType, MetricType, RelationType
 )
 from .organization_config import get_organization_config_manager, OrganizationConfigManager
+from ..agent_logger import AgentLogger, ActivityType, ActivityStatus, LogLevel
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class RiskAssessmentModule(Agent):
     Module spécialisé d'évaluation des risques avec intégration organisationnelle.
     """
     
-    def __init__(self, llm_client: LLMIntegration = None):
+    def __init__(self, llm_client = None, agent_logger: AgentLogger = None, rag_system=None):
         super().__init__(
             agent_id="risk_assessment",
             name="Expert Évaluation des Risques Itératif"
@@ -126,9 +127,10 @@ class RiskAssessmentModule(Agent):
         
         self.llm_client = llm_client or get_llm_client()
         self.org_config: OrganizationConfigManager = get_organization_config_manager()
+        self.agent_logger = agent_logger  # For detailed logging
         
         # Initialiser les outils universels
-        self.document_finder = DocumentFinder()
+        self.document_finder = DocumentFinder(rag_system=rag_system)
         self.entity_extractor = EntityExtractor()
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
@@ -199,33 +201,205 @@ Pour chaque analyse, tu évalues si plus de contexte améliorerait la précision
 Réponds TOUJOURS en français avec une approche méthodique et structurée.
 """
 
+    async def _log_tool_execution(self, tool_name: str, tool_params: Dict[str, Any], 
+                                 result: Any, execution_time_ms: float = None, 
+                                 error: str = None) -> None:
+        """Helper method to log tool executions."""
+        if self.agent_logger:
+            import time
+            start_time = time.time()
+            
+            status = ActivityStatus.COMPLETED if error is None else ActivityStatus.FAILED
+            await self.agent_logger.log_tool_execution(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                tool_id=tool_name,
+                tool_params=tool_params,
+                result=result,
+                status=status,
+                execution_time_ms=execution_time_ms or ((time.time() - start_time) * 1000),
+                error=error
+            )
+
     async def process_query(self, query: Query) -> AgentResponse:
         """
         Traite une requête d'évaluation des risques avec capacités itératives.
         """
+        import time
+        process_start = time.time()
+        
         logger.info(f"Traitement requête risques itérative: {query.query_text}")
         
+        # Log query processing start
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.STARTED,
+                level=LogLevel.INFO,
+                message="Starting risk assessment query processing",
+                details={
+                    "query": query.query_text,
+                    "parameters": query.parameters,
+                    "context": query.context.metadata if query.context else {},
+                    "step": "risk_query_start"
+                }
+            )
+        
         # Initialiser ou récupérer le contexte itératif
-        session_id = query.context.session_id
+        session_id = query.context.session_id if query.context else "default"
         if session_id not in self.iteration_contexts:
             self.iteration_contexts[session_id] = IterativeRiskContext()
         
         iteration_ctx = self.iteration_contexts[session_id]
         iteration_ctx.current_iteration += 1
         
+        # Log iteration context
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.ITERATION,
+                status=ActivityStatus.IN_PROGRESS,
+                level=LogLevel.INFO,
+                message=f"Initialized iteration context - iteration {iteration_ctx.current_iteration}",
+                details={
+                    "iteration_number": iteration_ctx.current_iteration,
+                    "scenarios_analyzed": iteration_ctx.scenarios_analyzed,
+                    "context_gaps": iteration_ctx.context_gaps_identified,
+                    "knowledge_areas": list(iteration_ctx.knowledge_accumulator.keys()),
+                    "step": "iteration_context_initialized"
+                }
+            )
+        
         # Extraire l'ID d'organisation du contexte
         org_id = self._extract_organization_id(query)
         
+        # Log organization identification
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.IN_PROGRESS,
+                level=LogLevel.INFO,
+                message="Identified organization context",
+                details={
+                    "organization_id": org_id,
+                    "extraction_source": "query context metadata",
+                    "step": "organization_identified"
+                }
+            )
+        
         # Analyser le type de demande avec contexte itératif
+        analysis_start = time.time()
         analysis_type = await self._analyze_request_type_with_iterative_context(
             query.query_text, iteration_ctx, query.parameters
         )
+        analysis_time = (time.time() - analysis_start) * 1000
+        
+        # Log analysis type determination
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.COMPLETED,
+                level=LogLevel.INFO,
+                message="Determined risk analysis type",
+                details={
+                    "analysis_type": analysis_type,
+                    "available_types": ["full_assessment", "scenario_analysis", "control_evaluation", "trend_analysis", "general_analysis"],
+                    "step": "analysis_type_determined"
+                },
+                execution_time_ms=analysis_time
+            )
         
         # Traitement basé sur l'intention et le mode itératif
-        if query.iteration_mode in [IterationMode.ITERATIVE, IterationMode.DEEP_ANALYSIS]:
-            return await self._process_iterative_risk_query(query, analysis_type, iteration_ctx, org_id)
-        else:
-            return await self._process_standard_risk_query(query, analysis_type, org_id)
+        processing_start = time.time()
+        try:
+            if query.iteration_mode in [IterationMode.ITERATIVE, IterationMode.DEEP_ANALYSIS]:
+                # Log iterative processing
+                if self.agent_logger:
+                    await self.agent_logger.log_activity(
+                        agent_id=self.agent_id,
+                        agent_name=self.name,
+                        activity_type=ActivityType.DECISION_MAKING,
+                        status=ActivityStatus.IN_PROGRESS,
+                        level=LogLevel.INFO,
+                        message="Selected iterative risk processing approach",
+                        details={
+                            "iteration_mode": str(query.iteration_mode),
+                            "analysis_type": analysis_type,
+                            "step": "iterative_approach_selected"
+                        }
+                    )
+                result = await self._process_iterative_risk_query(query, analysis_type, iteration_ctx, org_id)
+            else:
+                # Log standard processing
+                if self.agent_logger:
+                    await self.agent_logger.log_activity(
+                        agent_id=self.agent_id,
+                        agent_name=self.name,
+                        activity_type=ActivityType.DECISION_MAKING,
+                        status=ActivityStatus.IN_PROGRESS,
+                        level=LogLevel.INFO,
+                        message="Selected standard risk processing approach",
+                        details={
+                            "analysis_type": analysis_type,
+                            "step": "standard_approach_selected"
+                        }
+                    )
+                result = await self._process_standard_risk_query(query, analysis_type, org_id)
+            
+            processing_time = (time.time() - processing_start) * 1000
+            total_time = (time.time() - process_start) * 1000
+            
+            # Log successful completion
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.SYNTHESIS,
+                    status=ActivityStatus.COMPLETED,
+                    level=LogLevel.INFO,
+                    message="Completed risk assessment query processing",
+                    details={
+                        "result_length": len(result.content),
+                        "tools_used": result.tools_used,
+                        "sources_count": len(result.sources),
+                        "confidence": result.confidence,
+                        "total_processing_time_ms": total_time,
+                        "step": "risk_query_completed"
+                    },
+                    execution_time_ms=processing_time
+                )
+            
+            return result
+            
+        except Exception as e:
+            processing_time = (time.time() - processing_start) * 1000
+            
+            # Log error
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.ERROR_HANDLING,
+                    status=ActivityStatus.FAILED,
+                    level=LogLevel.ERROR,
+                    message="Risk assessment query processing failed",
+                    details={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "analysis_type": analysis_type,
+                        "step": "risk_query_error"
+                    },
+                    execution_time_ms=processing_time
+                )
+            
+            raise
 
     async def _process_iterative_risk_query(self, query: Query, 
                                           analysis_type: str,
@@ -284,15 +458,193 @@ Réponds TOUJOURS en français avec une approche méthodique et structurée.
         Traite une requête de risques standard (non-itérative).
         """
         if analysis_type == "full_assessment":
-            return await self._perform_full_risk_assessment(query, org_id)
+            # Create a basic iterative context for full assessment
+            iteration_ctx = IterativeRiskContext()
+            return await self._perform_iterative_full_risk_assessment(query, analysis_type, iteration_ctx, {}, org_id)
         elif analysis_type == "scenario_analysis":
-            return await self._analyze_risk_scenarios(query, org_id)
+            # Create a basic iterative context for scenario analysis
+            iteration_ctx = IterativeRiskContext()
+            return await self._perform_iterative_scenario_analysis(query, analysis_type, iteration_ctx, {}, org_id)
         elif analysis_type == "control_evaluation":
             return await self._evaluate_controls_effectiveness(query, org_id)
         elif analysis_type == "trend_analysis":
             return await self._analyze_risk_trends(query, org_id)
         else:
             return await self._general_risk_analysis(query, org_id)
+    
+    async def _general_risk_analysis(self, query: Query, org_id: str) -> AgentResponse:
+        """
+        Effectue une analyse générale des risques.
+        """
+        # Create a basic iterative context for general analysis
+        iteration_ctx = IterativeRiskContext()
+        
+        # Perform general iterative risk analysis
+        return await self._general_iterative_risk_analysis(
+            query, "general_analysis", iteration_ctx, {}, org_id
+        )
+
+    async def _evaluate_controls_effectiveness(self, query: Query, org_id: str) -> AgentResponse:
+        """
+        Évalue l'efficacité des contrôles de sécurité.
+        """
+        logger.info(f"Évaluation efficacité contrôles pour organisation: {org_id}")
+        
+        # Rechercher les documents pertinents sur les contrôles
+        relevant_docs = await self.document_finder.search_documents(
+            query=f"contrôles sécurité efficacité évaluation {query.query_text}",
+            limit=10
+        )
+        
+        # Extraire les entités de contrôles
+        control_entities = []
+        for doc in relevant_docs[:10]:
+            try:
+                entities = await self.entity_extractor.extract_controls(
+                    doc.get("content", ""), 
+                    framework="ISO27001"
+                )
+                control_entities.extend(entities)
+            except Exception as e:
+                logger.warning(f"Erreur extraction contrôles: {str(e)}")
+        
+        # Analyser l'efficacité des contrôles avec LLM
+        controls_analysis_prompt = f"""
+Analyse l'efficacité des contrôles de sécurité pour: "{query.query_text}"
+
+CONTRÔLES IDENTIFIÉS: {len(control_entities)}
+DOCUMENTS ANALYSÉS: {len(relevant_docs)}
+
+En tant qu'expert en analyse de risques, évalue:
+
+1. EFFICACITÉ DES CONTRÔLES EXISTANTS:
+   - Contrôles préventifs (efficacité, couverture)
+   - Contrôles détectifs (réactivité, précision)
+   - Contrôles correctifs (rapidité, efficacité)
+
+2. ÉVALUATION DE LA PERFORMANCE:
+   - Indicateurs de performance des contrôles
+   - Taux de détection et faux positifs
+   - Temps de réaction et de correction
+
+3. ANALYSE DES GAPS:
+   - Contrôles manquants ou insuffisants
+   - Zones non couvertes par les contrôles
+   - Risques résiduels non traités
+
+4. RECOMMANDATIONS D'AMÉLIORATION:
+   - Optimisation des contrôles existants
+   - Nouveaux contrôles recommandés
+   - Plan de renforcement prioritaire
+
+Fournis une analyse détaillée avec recommandations concrètes.
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": controls_analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            return AgentResponse(
+                content=response,
+                tools_used=["document_finder", "entity_extractor"],
+                context_used=True,
+                sources=self.format_documents_as_sources(relevant_docs[:5]),
+                metadata={
+                    "documents_analyzed": len(relevant_docs),
+                    "controls_evaluated": len(control_entities),
+                    "analysis_type": "control_effectiveness"
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'évaluation des contrôles: {str(e)}")
+            return AgentResponse(
+                content=f"Erreur lors de l'évaluation de l'efficacité des contrôles: {str(e)}",
+                tools_used=["document_finder", "entity_extractor"],
+                context_used=False,
+                sources=[],
+                metadata={"error": str(e)}
+            )
+
+    async def _analyze_risk_trends(self, query: Query, org_id: str) -> AgentResponse:
+        """
+        Analyse les tendances des risques dans le temps.
+        """
+        logger.info(f"Analyse tendances risques pour organisation: {org_id}")
+        
+        # Rechercher les documents historiques sur les risques
+        relevant_docs = await self.document_finder.search_documents(
+            query=f"risques tendances évolution historique {query.query_text}",
+            limit=10
+        )
+        
+        # Analyser les tendances avec LLM
+        trends_analysis_prompt = f"""
+Analyse les tendances des risques pour: "{query.query_text}"
+
+DOCUMENTS ANALYSÉS: {len(relevant_docs)}
+
+En tant qu'expert en analyse de risques, analyse:
+
+1. ÉVOLUTION HISTORIQUE DES RISQUES:
+   - Nouveaux risques émergents
+   - Risques en augmentation/diminution
+   - Tendances sectorielles observées
+
+2. ANALYSE TEMPORELLE:
+   - Patterns cycliques ou saisonniers
+   - Corrélations avec événements externes
+   - Vitesse d'évolution des menaces
+
+3. FACTEURS D'INFLUENCE:
+   - Changements technologiques
+   - Évolutions réglementaires
+   - Transformations organisationnelles
+
+4. PRÉDICTIONS ET RECOMMANDATIONS:
+   - Risques à surveiller
+   - Mesures préventives recommandées
+   - Stratégies d'adaptation
+
+Fournis une analyse des tendances avec projections et recommandations.
+"""
+
+        try:
+            response = await self.llm_client.generate_response(
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": trends_analysis_prompt}
+                ],
+                model="gpt-4.1",
+                temperature=0.2
+            )
+            
+            return AgentResponse(
+                content=response,
+                tools_used=["document_finder", "temporal_analyzer"],
+                context_used=True,
+                sources=self.format_documents_as_sources(relevant_docs[:5]),
+                metadata={
+                    "documents_analyzed": len(relevant_docs),
+                    "analysis_type": "risk_trends"
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de l'analyse des tendances: {str(e)}")
+            return AgentResponse(
+                content=f"Erreur lors de l'analyse des tendances de risques: {str(e)}",
+                tools_used=["document_finder", "temporal_analyzer"],
+                context_used=False,
+                sources=[],
+                metadata={"error": str(e)}
+            )
 
     async def _analyze_request_type_with_iterative_context(self, query_text: str,
                                                          iteration_ctx: IterativeRiskContext,
@@ -321,7 +673,27 @@ Détermine le type d'analyse de risques demandé:
 Retourne uniquement le type d'analyse identifié.
 """
 
+        # Log LLM prompt being sent
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.IN_PROGRESS,
+                level=LogLevel.INFO,
+                message="Sending analysis type determination prompt to LLM",
+                details={
+                    "llm_prompt": analysis_prompt,
+                    "system_prompt": self.system_prompt,
+                    "model": "gpt-4.1",
+                    "temperature": 0.1,
+                    "step": "analysis_type_llm_prompt"
+                }
+            )
+
         try:
+            import time
+            llm_start = time.time()
             response = await self.llm_client.generate_response(
                 messages=[
                     {"role": "system", "content": self.system_prompt},
@@ -330,18 +702,74 @@ Retourne uniquement le type d'analyse identifié.
                 model="gpt-4.1",
                 temperature=0.1
             )
+            llm_time = (time.time() - llm_start) * 1000
+            
+            # Log LLM response received
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.QUERY_ANALYSIS,
+                    status=ActivityStatus.IN_PROGRESS,
+                    level=LogLevel.INFO,
+                    message="Received LLM response for analysis type determination",
+                    details={
+                        "llm_response": response,
+                        "response_length": len(response),
+                        "step": "analysis_type_llm_response"
+                    },
+                    execution_time_ms=llm_time
+                )
             
             analysis_type = response.strip().lower()
             
             # Valider le type d'analyse
             valid_types = ["full_assessment", "scenario_analysis", "control_evaluation", "trend_analysis", "general_analysis"]
             if analysis_type in valid_types:
-                return analysis_type
+                validated_type = analysis_type
             else:
-                return "general_analysis"
+                validated_type = "general_analysis"
+            
+            # Log validation result
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.QUERY_ANALYSIS,
+                    status=ActivityStatus.COMPLETED,
+                    level=LogLevel.INFO,
+                    message="Validated analysis type",
+                    details={
+                        "raw_response": analysis_type,
+                        "validated_type": validated_type,
+                        "valid_types": valid_types,
+                        "was_valid": validated_type == analysis_type,
+                        "step": "analysis_type_validated"
+                    }
+                )
+            
+            return validated_type
                 
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse du type de requête: {str(e)}")
+            
+            # Log error
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.ERROR_HANDLING,
+                    status=ActivityStatus.FAILED,
+                    level=LogLevel.ERROR,
+                    message="Failed to determine analysis type",
+                    details={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "fallback_type": "general_analysis",
+                        "step": "analysis_type_error"
+                    }
+                )
+            
             return "general_analysis"
 
     async def perform_ebios_assessment(
@@ -423,8 +851,8 @@ Retourne uniquement le type d'analyse identifié.
 
     def _extract_organization_id(self, query: Query) -> Optional[str]:
         """Extrait l'ID d'organisation du contexte de la requête."""
-        if query.context:
-            return query.context.get("organization_id") or query.context.get("org_id")
+        if query.context and query.context.metadata:
+            return query.context.metadata.get("organization_id") or query.context.metadata.get("org_id")
         return None
     
     def _get_organizational_context(self, org_id: str) -> Dict[str, Any]:
@@ -1232,6 +1660,6 @@ Réponds en français avec une expertise EBIOS RM/MEHARI.
         return key_insights
 
 # Factory function
-def get_risk_assessment_module(llm_client: LLMIntegration = None):
+def get_risk_assessment_module(llm_client = None):
     """Factory function pour obtenir une instance du module d'évaluation des risques."""
     return RiskAssessmentModule(llm_client=llm_client) 

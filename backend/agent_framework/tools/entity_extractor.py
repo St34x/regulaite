@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 
 from ..integrations.llm_integration import get_llm_client
+from ..tool_registry import tool
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,9 @@ FRAMEWORK CONTEXTE: {framework or 'Général'}
 TEXTE:
 {content[:4000]}
 
-Retourne un JSON avec une liste de contrôles:
+IMPÉRATIF: Retourne UNIQUEMENT un objet JSON valide, sans texte explicatif.
+
+Format JSON requis:
 {{
     "controls": [
         {{
@@ -289,35 +292,86 @@ Retourne un JSON avec une liste de contrôles:
                 temperature=0.1
             )
             
-            # Extract JSON from response
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
+            # Enhanced JSON extraction with better error handling
+            if not response or not response.strip():
+                logger.warning("Empty response from LLM for control extraction")
+                return []
+            
+            # Log the raw response for debugging
+            logger.debug(f"LLM response for control extraction: {response[:200]}...")
+            
+            # Try to extract JSON with multiple strategies
+            json_content = None
+            
+            # Strategy 1: Direct JSON parsing if response looks like pure JSON
+            if response.strip().startswith('{') and response.strip().endswith('}'):
+                json_content = response.strip()
+            else:
+                # Strategy 2: Find JSON within the response
+                json_start = response.find("{")
+                json_end = response.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_content = response[json_start:json_end]
+            
+            if not json_content:
+                logger.warning("No valid JSON structure found in LLM response for control extraction")
+                return []
             
             data = json.loads(json_content)
             
-            controls = []
-            for ctrl_data in data.get("controls", []):
-                control = Control(
-                    id=ctrl_data.get("id", ""),
-                    name=ctrl_data.get("name", ""),
-                    description=ctrl_data.get("description", ""),
-                    control_type=ControlType(ctrl_data.get("control_type", "administrative")),
-                    framework=ctrl_data.get("framework"),
-                    effectiveness=ctrl_data.get("effectiveness"),
-                    implementation_status=ctrl_data.get("implementation_status"),
-                    owner=ctrl_data.get("owner"),
-                    frequency=ctrl_data.get("frequency"),
-                    evidence_required=ctrl_data.get("evidence_required", []),
-                    related_risks=ctrl_data.get("related_risks", [])
-                )
-                controls.append(control)
+            if not isinstance(data, dict):
+                logger.warning("LLM response is not a dictionary for control extraction")
+                return []
             
-            logger.info(f"Extracted {len(controls)} controls")
+            controls = []
+            controls_data = data.get("controls", [])
+            
+            if not isinstance(controls_data, list):
+                logger.warning("Controls data is not a list in LLM response")
+                return []
+            
+            for ctrl_data in controls_data:
+                if not isinstance(ctrl_data, dict):
+                    logger.warning(f"Skipping invalid control data: {ctrl_data}")
+                    continue
+                    
+                try:
+                    control_type_str = ctrl_data.get("control_type", "administrative")
+                    # Validate control type
+                    try:
+                        control_type = ControlType(control_type_str)
+                    except ValueError:
+                        logger.warning(f"Invalid control type: {control_type_str}, using administrative")
+                        control_type = ControlType.ADMINISTRATIVE
+                    
+                    control = Control(
+                        id=ctrl_data.get("id", f"ctrl_{len(controls)+1}"),
+                        name=ctrl_data.get("name", "Contrôle sans nom"),
+                        description=ctrl_data.get("description", "Description non disponible"),
+                        control_type=control_type,
+                        framework=ctrl_data.get("framework"),
+                        effectiveness=ctrl_data.get("effectiveness"),
+                        implementation_status=ctrl_data.get("implementation_status"),
+                        owner=ctrl_data.get("owner"),
+                        frequency=ctrl_data.get("frequency"),
+                        evidence_required=ctrl_data.get("evidence_required", []),
+                        related_risks=ctrl_data.get("related_risks", [])
+                    )
+                    controls.append(control)
+                except Exception as ctrl_error:
+                    logger.warning(f"Error creating control object: {str(ctrl_error)}")
+                    continue
+            
+            logger.info(f"Successfully extracted {len(controls)} controls")
             return controls
             
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in control extraction: {str(e)}")
+            logger.debug(f"Problematic JSON content: {json_content[:200] if 'json_content' in locals() else 'N/A'}")
+            return []
         except Exception as e:
             logger.error(f"Erreur extraction contrôles: {str(e)}")
+            logger.debug(f"LLM response that caused error: {response[:200] if 'response' in locals() else 'N/A'}")
             return []
 
     async def extract_risks(self, content: str) -> List[Risk]:
@@ -332,7 +386,9 @@ Extrait tous les risques du texte suivant.
 TEXTE:
 {content[:4000]}
 
-Retourne un JSON avec une liste de risques:
+IMPÉRATIF: Retourne UNIQUEMENT un objet JSON valide, sans texte explicatif.
+
+Format JSON requis:
 {{
     "risks": [
         {{
@@ -360,35 +416,89 @@ Retourne un JSON avec une liste de risques:
                 temperature=0.1
             )
             
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
+            # Enhanced JSON extraction with better error handling
+            if not response or not response.strip():
+                logger.warning("Empty response from LLM for risk extraction")
+                return []
+            
+            # Log the raw response for debugging
+            logger.debug(f"LLM response for risk extraction: {response[:200]}...")
+            
+            # Try to extract JSON with multiple strategies
+            json_content = None
+            
+            # Strategy 1: Direct JSON parsing if response looks like pure JSON
+            if response.strip().startswith('{') and response.strip().endswith('}'):
+                json_content = response.strip()
+            else:
+                # Strategy 2: Find JSON within the response
+                json_start = response.find("{")
+                json_end = response.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_content = response[json_start:json_end]
+            
+            if not json_content:
+                logger.warning("No valid JSON structure found in LLM response for risk extraction")
+                return []
             
             data = json.loads(json_content)
             
-            risks = []
-            for risk_data in data.get("risks", []):
-                risk = Risk(
-                    id=risk_data.get("id", ""),
-                    name=risk_data.get("name", ""),
-                    description=risk_data.get("description", ""),
-                    category=risk_data.get("category"),
-                    likelihood=RiskLevel(risk_data.get("likelihood", "medium")) if risk_data.get("likelihood") else None,
-                    impact=RiskLevel(risk_data.get("impact", "medium")) if risk_data.get("impact") else None,
-                    overall_risk=RiskLevel(risk_data.get("overall_risk", "medium")) if risk_data.get("overall_risk") else None,
-                    owner=risk_data.get("owner"),
-                    status=risk_data.get("status"),
-                    treatment_strategy=risk_data.get("treatment_strategy"),
-                    controls=risk_data.get("controls", []),
-                    affected_assets=risk_data.get("affected_assets", [])
-                )
-                risks.append(risk)
+            if not isinstance(data, dict):
+                logger.warning("LLM response is not a dictionary for risk extraction")
+                return []
             
-            logger.info(f"Extracted {len(risks)} risks")
+            risks = []
+            risks_data = data.get("risks", [])
+            
+            if not isinstance(risks_data, list):
+                logger.warning("Risks data is not a list in LLM response")
+                return []
+            
+            for risk_data in risks_data:
+                if not isinstance(risk_data, dict):
+                    logger.warning(f"Skipping invalid risk data: {risk_data}")
+                    continue
+                    
+                try:
+                    # Safely parse risk levels with validation
+                    def safe_risk_level(value, default="medium"):
+                        if not value:
+                            return None
+                        try:
+                            return RiskLevel(value)
+                        except ValueError:
+                            logger.warning(f"Invalid risk level: {value}, using {default}")
+                            return RiskLevel(default)
+                    
+                    risk = Risk(
+                        id=risk_data.get("id", f"risk_{len(risks)+1}"),
+                        name=risk_data.get("name", "Risque sans nom"),
+                        description=risk_data.get("description", "Description non disponible"),
+                        category=risk_data.get("category"),
+                        likelihood=safe_risk_level(risk_data.get("likelihood")),
+                        impact=safe_risk_level(risk_data.get("impact")),
+                        overall_risk=safe_risk_level(risk_data.get("overall_risk")),
+                        owner=risk_data.get("owner"),
+                        status=risk_data.get("status"),
+                        treatment_strategy=risk_data.get("treatment_strategy"),
+                        controls=risk_data.get("controls", []),
+                        affected_assets=risk_data.get("affected_assets", [])
+                    )
+                    risks.append(risk)
+                except Exception as risk_error:
+                    logger.warning(f"Error creating risk object: {str(risk_error)}")
+                    continue
+            
+            logger.info(f"Successfully extracted {len(risks)} risks")
             return risks
             
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in risk extraction: {str(e)}")
+            logger.debug(f"Problematic JSON content: {json_content[:200] if 'json_content' in locals() else 'N/A'}")
+            return []
         except Exception as e:
             logger.error(f"Erreur extraction risques: {str(e)}")
+            logger.debug(f"LLM response that caused error: {response[:200] if 'response' in locals() else 'N/A'}")
             return []
 
     def _extract_by_patterns(
@@ -519,8 +629,16 @@ Retourne un JSON structuré avec les entités trouvées.
 
 
 # Tool function for agent integration
+@tool(
+    id="entity_extractor",
+    name="Entity Extractor", 
+    description="Extract GRC entities (controls, risks, findings, requirements, assets) from content or query text",
+    tags=["entity", "extraction", "grc", "compliance"],
+    requires_context=False
+)
 async def entity_extractor_tool(
-    content: str,
+    content: str = None,
+    query: str = None,
     entity_types: List[str] = None,
     framework: str = None,
     **kwargs
@@ -528,6 +646,15 @@ async def entity_extractor_tool(
     """
     Outil d'extraction d'entités pour les agents.
     """
+    # Handle both content and query parameters for compatibility
+    text_to_analyze = content or query
+    if not text_to_analyze:
+        return {
+            "success": False,
+            "error": "No content or query provided for entity extraction",
+            "results": {}
+        }
+    
     extractor = EntityExtractor()
     
     if entity_types:
@@ -537,7 +664,7 @@ async def entity_extractor_tool(
     
     try:
         results = await extractor.extract_entities(
-            content=content,
+            content=text_to_analyze,
             entity_types=types,
             framework_context=framework
         )

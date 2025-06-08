@@ -174,6 +174,26 @@ model_loading_status = {
     "language_errors": {}  # Will track per-language errors
 }
 
+async def get_global_orchestrator():
+    """Get the global agent orchestrator instance, initializing if needed."""
+    return await ensure_agent_system_ready()
+
+def get_global_orchestrator_sync():
+    """Get the global agent orchestrator instance synchronously (may return None if not ready)."""
+    global agent_orchestrator
+    if agent_orchestrator is None or agent_orchestrator == "preparing":
+        return None
+    return agent_orchestrator
+
+def is_agent_system_ready():
+    """Check if the agent system is ready."""
+    global agent_orchestrator
+    if agent_orchestrator is None or agent_orchestrator == "preparing":
+        return False
+    if not hasattr(agent_orchestrator, 'specialized_agents'):
+        return False
+    return len(agent_orchestrator.specialized_agents) > 0
+
 @app.on_event("startup")
 def startup_event():
     """
@@ -330,18 +350,48 @@ def init_agent_system():
         # Initialize RAG integration with our systems
         initialize_rag_integration(rag_system=rag_system, rag_query_engine=rag_query_engine)
         
-        # Initialize the complete agent system
-        async def _init_agents():
-            global agent_orchestrator
-            agent_orchestrator = await initialize_complete_agent_system(rag_system=rag_system)
-            logger.info("Agent system initialized successfully")
+        # For now, mark agent system as preparing and defer actual initialization
+        # This avoids event loop conflicts during FastAPI startup
+        logger.info("Agent system preparation completed. Actual initialization will happen on first use.")
+        agent_orchestrator = "preparing"  # Special marker to indicate preparation
         
-        # Run the async initialization
-        asyncio.create_task(_init_agents())
+    except Exception as e:
+        logger.error(f"Error preparing agent system: {str(e)}")
+        import traceback
+        logger.error(f"Stacktrace: {traceback.format_exc()}")
+        agent_orchestrator = None
+
+async def ensure_agent_system_ready():
+    """Ensure the agent system is initialized and ready."""
+    global agent_orchestrator
+    
+    # If already initialized and ready, return it
+    if agent_orchestrator and agent_orchestrator != "preparing" and hasattr(agent_orchestrator, 'specialized_agents'):
+        return agent_orchestrator
+    
+    # If preparing or not initialized, do it now
+    try:
+        logger.info("Performing deferred agent system initialization...")
+        
+        from agent_framework.factory import initialize_complete_agent_system
+        
+        agent_orchestrator = await initialize_complete_agent_system(rag_system=rag_system)
+        
+        # Verify that agents are properly registered
+        if agent_orchestrator and agent_orchestrator.specialized_agents:
+            registered_agents = list(agent_orchestrator.specialized_agents.keys())
+            logger.info(f"✅ Agent system ready with {len(registered_agents)} agents: {registered_agents}")
+        else:
+            logger.error("❌ Agent system initialization failed - no agents registered")
+            
+        return agent_orchestrator
         
     except Exception as e:
         logger.error(f"Error initializing agent system: {str(e)}")
+        import traceback
+        logger.error(f"Stacktrace: {traceback.format_exc()}")
         agent_orchestrator = None
+        return None
 
 
 @app.get("/api/status")
@@ -349,11 +399,25 @@ def get_status():
     """
     Get API status including model preloading status
     """
+    agent_status = "not_prepared"
+    agent_count = 0
+    
+    if is_agent_system_ready():
+        agent_status = "ready"
+        orchestrator = get_global_orchestrator_sync()
+        if orchestrator:
+            agent_count = len(orchestrator.specialized_agents)
+    elif agent_orchestrator == "preparing":
+        agent_status = "preparing"
+    elif agent_orchestrator is not None:
+        agent_status = "prepared"
+        
     status_info = {
         "status": "running",
         "rag_system": "initialized" if rag_system else "not_initialized",
         "document_parser": "initialized" if document_parser else "not_initialized",
-        "agent_system": "prepared" if agent_orchestrator else "not_prepared"
+        "agent_system": agent_status,
+        "agent_count": agent_count
         } 
     return status_info
 
@@ -387,6 +451,68 @@ async def test_agent_system():
             "status": "error",
             "message": f"Erreur système d'agents: {str(e)}",
             "agents_registered": []
+        }
+
+@app.get("/api/agents/debug")
+async def debug_agent_system():
+    """
+    Debug endpoint pour analyser l'état détaillé du système d'agents.
+    """
+    debug_info = {
+        "global_orchestrator": None,
+        "router_orchestrator": None,
+        "system_status": None
+    }
+    
+    try:
+        # Vérifier l'orchestrateur global
+        global_orch = await get_global_orchestrator()
+        if global_orch:
+            debug_info["global_orchestrator"] = {
+                "id": global_orch.agent_id,
+                "name": global_orch.name,
+                "agents_count": len(global_orch.specialized_agents),
+                "agents": global_orch.get_registered_agents(),
+                "status": "ready" if len(global_orch.specialized_agents) > 0 else "empty"
+            }
+            # Debug détaillé
+            global_orch.debug_agent_status()
+        else:
+            debug_info["global_orchestrator"] = {"status": "not_initialized"}
+            
+        # Vérifier l'orchestrateur du routeur
+        try:
+            from routers.agents_router import get_orchestrator
+            router_orch = await get_orchestrator()
+            if router_orch:
+                debug_info["router_orchestrator"] = {
+                    "id": router_orch.agent_id,
+                    "name": router_orch.name,
+                    "agents_count": len(router_orch.specialized_agents),
+                    "agents": router_orch.get_registered_agents(),
+                    "status": "ready" if len(router_orch.specialized_agents) > 0 else "empty",
+                    "is_same_as_global": router_orch is global_orch
+                }
+                # Debug détaillé
+                router_orch.debug_agent_status()
+        except Exception as e:
+            debug_info["router_orchestrator"] = {"status": "error", "error": str(e)}
+            
+        # État du système
+        debug_info["system_status"] = {
+            "agent_system_ready": is_agent_system_ready(),
+            "rag_system": "initialized" if rag_system else "not_initialized",
+            "document_parser": "initialized" if document_parser else "not_initialized"
+        }
+        
+        return debug_info
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du debug du système d'agents: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Erreur debug système d'agents: {str(e)}",
+            "debug_info": debug_info
         }
 
 @app.get("/")

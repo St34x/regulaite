@@ -647,16 +647,21 @@ async def chat(request: ChatRequest, req: Request, background_tasks: BackgroundT
                                 }) + "\n"
                                 return
                             else:
-                                # Regular step data
-                                yield json.dumps({
-                                    "type": "agent_step",
-                                    "step": step_data.get("step"),
-                                    "message": step_data.get("message"),
-                                    "details": step_data.get("details"),
-                                    "progress": step_data.get("progress"),
-                                    "execution_id": step_data.get("execution_id"),
-                                    "timestamp": datetime.now().isoformat()
-                                }) + "\n"
+                                # Check if this is a detailed log event
+                                if step_data.get("type") == "agent_detailed_log":
+                                    # Forward detailed log events directly
+                                    yield json.dumps(step_data) + "\n"
+                                else:
+                                    # Regular step data
+                                    yield json.dumps({
+                                        "type": "agent_step",
+                                        "step": step_data.get("step"),
+                                        "message": step_data.get("message"),
+                                        "details": step_data.get("details"),
+                                        "progress": step_data.get("progress"),
+                                        "execution_id": step_data.get("execution_id"),
+                                        "timestamp": datetime.now().isoformat()
+                                    }) + "\n"
                                 
                         except asyncio.TimeoutError:
                             # Check if agent task is still running

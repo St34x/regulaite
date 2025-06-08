@@ -7,9 +7,11 @@ import logging
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 import json
+import time
 
 from .agent import Agent, AgentResponse, Query, QueryContext
 from .integrations.llm_integration import LLMIntegration
+from .agent_logger import AgentLogger, ActivityType, ActivityStatus, LogLevel
 
 # Backward compatibility alias
 LLMClient = LLMIntegration
@@ -19,7 +21,7 @@ logger = logging.getLogger(__name__)
 class IterationContext:
     """Contexte pour gérer les itérations d'analyse."""
     
-    def __init__(self, max_iterations: int = 3):
+    def __init__(self, max_iterations: int = 2):
         self.iteration_count = 0
         self.max_iterations = max_iterations
         self.previous_queries = []
@@ -38,8 +40,25 @@ class IterationContext:
         
     def should_continue_iteration(self) -> bool:
         """Détermine si on doit continuer les itérations."""
-        return (self.iteration_count < self.max_iterations and 
-                len(self.context_gaps) > 0)
+        # Always allow the first iteration
+        if self.iteration_count == 0:
+            return True
+        
+        # Don't iterate if we've reached max iterations
+        if self.iteration_count >= self.max_iterations:
+            return False
+            
+        # Don't iterate if no significant context gaps
+        if len(self.context_gaps) == 0:
+            return False
+            
+        # Don't iterate if we've seen the same gaps repeatedly (avoid loops)
+        recent_gaps = set(self.context_gaps[-3:]) if len(self.context_gaps) >= 3 else set()
+        if len(recent_gaps) <= 1 and self.iteration_count > 1:
+            return False
+            
+        # Continue only if we have meaningful gaps to address
+        return True
     
     def get_iteration_summary(self) -> Dict[str, Any]:
         """Retourne un résumé des itérations."""
@@ -57,7 +76,7 @@ class OrchestratorAgent(Agent):
     les agents spécialisés pour les analyses GRC avec capacités itératives.
     """
     
-    def __init__(self, llm_client: LLMClient):
+    def __init__(self, llm_client: LLMClient, log_callback=None):
         super().__init__(
             agent_id="orchestrator", 
             name="Orchestrateur Principal GRC Itératif"
@@ -65,6 +84,8 @@ class OrchestratorAgent(Agent):
         
         self.llm_client = llm_client
         self.specialized_agents: Dict[str, Agent] = {}
+        self.agent_logger = None  # Will be initialized per session
+        self.log_callback = log_callback
         
         # Prompts spécialisés pour l'orchestration itérative
         self.system_prompt = """
@@ -106,31 +127,106 @@ Réponds TOUJOURS en français avec un plan d'action structuré.
         self.specialized_agents[agent_id] = agent
         logger.info(f"Agent {agent_id} enregistré dans l'orchestrateur")
 
+    def get_registered_agents(self) -> Dict[str, str]:
+        """Retourne un dictionnaire des agents enregistrés avec leurs noms."""
+        return {
+            agent_id: getattr(agent, 'name', f'Agent {agent_id}')
+            for agent_id, agent in self.specialized_agents.items()
+        }
+
+    def debug_agent_status(self):
+        """Debug method to log current agent status."""
+        logger.info(f"Orchestrator {self.agent_id} has {len(self.specialized_agents)} agents registered:")
+        for agent_id, agent in self.specialized_agents.items():
+            agent_name = getattr(agent, 'name', 'Unknown')
+            agent_type = type(agent).__name__
+            logger.info(f"  - {agent_id}: {agent_name} ({agent_type})")
+        return self.specialized_agents
+
     async def process_query(self, query: Union[str, Query]) -> AgentResponse:
         """
         Traite une requête utilisateur et orchestre les agents appropriés avec iteration.
         """
         if isinstance(query, str):
             query = Query(query_text=query)
-            
+        
+        # Initialize detailed logger for this session
+        session_id = query.context.session_id if query.context else None
+        self.agent_logger = AgentLogger(session_id=session_id, callback=self.log_callback)
+        
+        start_time = time.time()
         logger.info(f"Orchestrateur - Analyse itérative de la requête: {query.query_text}")
+        
+        # Log query analysis start
+        await self.agent_logger.log_query_analysis(
+            agent_id=self.agent_id,
+            agent_name=self.name,
+            query=query.query_text,
+            analysis_result={"status": "starting", "query_length": len(query.query_text)}
+        )
         
         # Initialiser le contexte d'itération
         iteration_context = IterationContext()
         
         # Analyse initiale de la requête
+        analysis_start = time.time()
         analysis_result = await self._analyze_request(query.query_text)
+        analysis_time = (time.time() - analysis_start) * 1000
+        
+        # Log detailed query analysis
+        await self.agent_logger.log_query_analysis(
+            agent_id=self.agent_id,
+            agent_name=self.name,
+            query=query.query_text,
+            analysis_result=analysis_result,
+            execution_time_ms=analysis_time
+        )
         
         # Boucle d'itération pour raffiner l'analyse
         while iteration_context.should_continue_iteration():
+            iteration_num = iteration_context.iteration_count + 1
+            
+            # Log iteration start
+            await self.agent_logger.log_iteration(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                iteration_number=iteration_num,
+                reason_for_iteration="Identified context gaps requiring deeper analysis",
+                context_gaps=iteration_context.context_gaps
+            )
+            
             # Exécuter le plan d'action
+            execution_start = time.time()
             execution_results = await self._execute_plan_with_iteration(
                 analysis_result, query, iteration_context
             )
+            execution_time = (time.time() - execution_start) * 1000
+            
+            # Log agent selection and execution
+            if analysis_result.get("agents_requis"):
+                await self.agent_logger.log_agent_selection(
+                    orchestrator_id=self.agent_id,
+                    selected_agents=analysis_result["agents_requis"],
+                    reasoning=f"Iteration {iteration_num}: Selected agents based on current context gaps",
+                    execution_time_ms=execution_time
+                )
             
             # Analyser les gaps de contexte
+            gap_analysis_start = time.time()
             context_gaps = await self._identify_context_gaps(
                 query.query_text, analysis_result, execution_results, iteration_context
+            )
+            gap_analysis_time = (time.time() - gap_analysis_start) * 1000
+            
+            # Log decision making about context gaps
+            await self.agent_logger.log_decision_making(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                decision_context=f"Analysis of iteration {iteration_num} results",
+                decision_made=f"Identified {len(context_gaps)} context gaps" if context_gaps else "No significant context gaps found",
+                reasoning=f"Analyzed execution results and found areas needing clarification: {context_gaps}" if context_gaps else "Results appear comprehensive",
+                confidence=0.8 if not context_gaps else 0.6,
+                alternatives_considered=["Continue with current results", "Perform additional iteration"]
             )
             
             # Ajouter cette itération au contexte
@@ -140,14 +236,33 @@ Réponds TOUJOURS en français avec un plan d'action structuré.
             
             # Si des gaps sont identifiés, reformuler la requête
             if context_gaps and iteration_context.should_continue_iteration():
+                reformulation_start = time.time()
                 reformulated_query = await self._reformulate_query(
                     query.query_text, context_gaps, iteration_context
                 )
+                reformulation_time = (time.time() - reformulation_start) * 1000
                 
                 if reformulated_query:
                     iteration_context.reformulated_queries.append(reformulated_query)
                     query.query_text = reformulated_query
                     logger.info(f"Requête reformulée (itération {iteration_context.iteration_count}): {reformulated_query}")
+                    
+                    # Log the reformulation
+                    await self.agent_logger.log_activity(
+                        agent_id=self.agent_id,
+                        agent_name=self.name,
+                        activity_type=ActivityType.QUERY_ANALYSIS,
+                        status=ActivityStatus.COMPLETED,
+                        level=LogLevel.INFO,
+                        message=f"Reformulated query for iteration {iteration_num}",
+                        details={
+                            "original_query": query.query_text,
+                            "reformulated_query": reformulated_query,
+                            "context_gaps_addressed": context_gaps,
+                            "iteration_number": iteration_num
+                        },
+                        execution_time_ms=reformulation_time
+                    )
                     
                     # Réanalyser avec la requête reformulée
                     analysis_result = await self._analyze_request(reformulated_query)
@@ -157,9 +272,41 @@ Réponds TOUJOURS en français avec un plan d'action structuré.
                 break
         
         # Synthèse finale avec tout le contexte itératif
+        synthesis_start = time.time()
         final_response = await self._synthesize_iterative_results(
             query.query_text, analysis_result, iteration_context
         )
+        synthesis_time = (time.time() - synthesis_start) * 1000
+        total_processing_time = (time.time() - start_time) * 1000
+        
+        # Log final synthesis
+        synthesis_inputs = {
+            "sources": self._aggregate_all_sources(iteration_context),
+            "agent_results": self._get_all_agents_used(iteration_context),
+            "total_iterations": iteration_context.iteration_count,
+            "context_gaps_resolved": len(iteration_context.context_gaps)
+        }
+        
+        await self.agent_logger.log_activity(
+            agent_id=self.agent_id,
+            agent_name=self.name,
+            activity_type=ActivityType.SYNTHESIS,
+            status=ActivityStatus.COMPLETED,
+            level=LogLevel.INFO,
+            message="Synthesized final response from all processing steps",
+            details={
+                "synthesis_inputs": synthesis_inputs,
+                "final_response_length": len(final_response),
+                "sources_integrated": len(synthesis_inputs.get("sources", [])),
+                "agents_contributing": len(synthesis_inputs.get("agent_results", [])),
+                "iterations_completed": synthesis_inputs.get("total_iterations", 0),
+                "total_processing_time_ms": total_processing_time
+            },
+            execution_time_ms=synthesis_time
+        )
+        
+        # Get session summary for metadata
+        session_summary = self.agent_logger.get_session_summary()
         
         return AgentResponse(
             content=final_response,
@@ -171,7 +318,11 @@ Réponds TOUJOURS en français avec un plan d'action structuré.
                 "iteration_summary": iteration_context.get_iteration_summary(),
                 "agents_involved": self._get_all_agents_used(iteration_context),
                 "total_iterations": iteration_context.iteration_count,
-                "context_gaps_resolved": len(iteration_context.context_gaps)
+                "context_gaps_resolved": len(iteration_context.context_gaps),
+                "detailed_logs": session_summary,
+                "total_processing_time_ms": total_processing_time,
+                "agent_performance": session_summary.get("agent_performance", {}),
+                "activity_timeline": session_summary.get("timeline", [])
             }
         )
 
@@ -179,6 +330,21 @@ Réponds TOUJOURS en français avec un plan d'action structuré.
         """
         Analyse la requête utilisateur pour déterminer le plan d'action.
         """
+        # Log the start of request analysis
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.STARTED,
+                level=LogLevel.INFO,
+                message="Starting detailed query analysis",
+                details={
+                    "query": user_query,
+                    "step": "request_analysis_start"
+                }
+            )
+
         analysis_prompt = f"""
 Analyse cette demande utilisateur et crée un plan d'action:
 
@@ -209,7 +375,26 @@ Réponds au format JSON avec:
 }}
 """
 
+        # Log the LLM prompt being sent
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.QUERY_ANALYSIS,
+                status=ActivityStatus.IN_PROGRESS,
+                level=LogLevel.INFO,
+                message="Sending analysis prompt to LLM",
+                details={
+                    "llm_prompt": analysis_prompt,
+                    "system_prompt": self.system_prompt,
+                    "model": "gpt-4.1",
+                    "temperature": 0.1,
+                    "step": "llm_prompt_send"
+                }
+            )
+
         try:
+            llm_start = time.time()
             response = await self.llm_client.generate_response(
                 messages=[
                     {"role": "system", "content": self.system_prompt},
@@ -218,13 +403,49 @@ Réponds au format JSON avec:
                 model="gpt-4.1",
                 temperature=0.1
             )
+            llm_time = (time.time() - llm_start) * 1000
+            
+            # Log the LLM response received
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.QUERY_ANALYSIS,
+                    status=ActivityStatus.IN_PROGRESS,
+                    level=LogLevel.INFO,
+                    message="Received LLM response for query analysis",
+                    details={
+                        "llm_response": response,
+                        "response_length": len(response),
+                        "step": "llm_response_received"
+                    },
+                    execution_time_ms=llm_time
+                )
             
             # Extraire le JSON de la réponse
             json_start = response.find("{")
             json_end = response.rfind("}") + 1
             json_content = response[json_start:json_end]
             
-            return json.loads(json_content)
+            parsed_result = json.loads(json_content)
+            
+            # Log successful parsing
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.QUERY_ANALYSIS,
+                    status=ActivityStatus.COMPLETED,
+                    level=LogLevel.INFO,
+                    message="Successfully parsed analysis result",
+                    details={
+                        "parsed_result": parsed_result,
+                        "json_extracted": json_content,
+                        "step": "analysis_complete"
+                    }
+                )
+            
+            return parsed_result
             
         except Exception as e:
             logger.error(f"Erreur lors de l'analyse de la requête: {str(e)}")
@@ -258,6 +479,23 @@ Réponds au format JSON avec:
         """
         Exécute le plan d'action en orchestrant les agents appropriés avec contexte itératif.
         """
+        # Log execution plan start
+        if self.agent_logger:
+            await self.agent_logger.log_activity(
+                agent_id=self.agent_id,
+                agent_name=self.name,
+                activity_type=ActivityType.TOOL_EXECUTION,
+                status=ActivityStatus.STARTED,
+                level=LogLevel.INFO,
+                message="Starting execution of orchestrated plan",
+                details={
+                    "analysis_plan": analysis,
+                    "iteration": iteration_context.iteration_count + 1,
+                    "previous_knowledge": iteration_context.knowledge_gained[-5:] if iteration_context.knowledge_gained else [],
+                    "step": "plan_execution_start"
+                }
+            )
+
         results = {
             "agent_results": {},
             "all_sources": [],
@@ -277,11 +515,49 @@ Réponds au format JSON avec:
                 key=lambda x: x.get("etape", 0)
             )
             
+            # Log execution sequence
+            if self.agent_logger:
+                await self.agent_logger.log_activity(
+                    agent_id=self.agent_id,
+                    agent_name=self.name,
+                    activity_type=ActivityType.TOOL_EXECUTION,
+                    status=ActivityStatus.IN_PROGRESS,
+                    level=LogLevel.INFO,
+                    message="Prepared execution sequence",
+                    details={
+                        "execution_sequence": execution_sequence,
+                        "total_steps": len(execution_sequence),
+                        "step": "execution_sequence_prepared"
+                    }
+                )
+            
             for step in execution_sequence:
                 agent_id = step.get("agent")
                 action = step.get("action")
+                step_number = step.get('etape', 0)
                 
-                logger.info(f"Exécution étape {step.get('etape')} (itération {iteration_context.iteration_count + 1}): {action} avec {agent_id}")
+                logger.info(f"Exécution étape {step_number} (itération {iteration_context.iteration_count + 1}): {action} avec {agent_id}")
+                
+                # Log individual step start
+                if self.agent_logger:
+                    await self.agent_logger.log_activity(
+                        agent_id=self.agent_id,
+                        agent_name=self.name,
+                        activity_type=ActivityType.TOOL_EXECUTION,
+                        status=ActivityStatus.IN_PROGRESS,
+                        level=LogLevel.INFO,
+                        message=f"Executing step {step_number}: {action}",
+                        details={
+                            "step_info": step,
+                            "target_agent": agent_id,
+                            "action": action,
+                            "iteration": iteration_context.iteration_count + 1,
+                            "step": f"step_{step_number}_start"
+                        }
+                    )
+                
+                # Debug logging for agent lookup
+                logger.info(f"Looking for agent '{agent_id}'. Available agents: {list(self.specialized_agents.keys())}")
                 
                 if agent_id in self.specialized_agents:
                     try:
@@ -316,8 +592,49 @@ Réponds au format JSON avec:
                             }
                         )
                         
+                        # Log agent execution start
+                        if self.agent_logger:
+                            await self.agent_logger.log_activity(
+                                agent_id=agent_id,
+                                agent_name=f"Specialized Agent: {agent_id}",
+                                activity_type=ActivityType.TOOL_EXECUTION,
+                                status=ActivityStatus.STARTED,
+                                level=LogLevel.INFO,
+                                message=f"Starting execution of {agent_id} agent",
+                                details={
+                                    "enriched_query": enriched_query.query_text,
+                                    "query_parameters": enriched_query.parameters,
+                                    "context_metadata": enriched_query.context.metadata if enriched_query.context else {},
+                                    "step": f"agent_{agent_id}_execution_start"
+                                }
+                            )
+
                         # Exécuter l'agent spécialisé avec contexte itératif
+                        agent_start_time = time.time()
                         agent_response = await self.specialized_agents[agent_id].process_query(enriched_query)
+                        agent_execution_time = (time.time() - agent_start_time) * 1000
+                        
+                        # Log agent execution completion
+                        if self.agent_logger:
+                            await self.agent_logger.log_activity(
+                                agent_id=agent_id,
+                                agent_name=f"Specialized Agent: {agent_id}",
+                                activity_type=ActivityType.TOOL_EXECUTION,
+                                status=ActivityStatus.COMPLETED,
+                                level=LogLevel.INFO,
+                                message=f"Completed execution of {agent_id} agent",
+                                details={
+                                    "agent_response": {
+                                        "content": agent_response.content,
+                                        "content_length": len(agent_response.content),
+                                        "tools_used": agent_response.tools_used,
+                                        "sources_count": len(agent_response.sources),
+                                        "confidence": agent_response.confidence
+                                    },
+                                    "step": f"agent_{agent_id}_execution_complete"
+                                },
+                                execution_time_ms=agent_execution_time
+                            )
                         
                         results["agent_results"][agent_id] = {
                             "response": agent_response.content,
@@ -325,7 +642,8 @@ Réponds au format JSON avec:
                             "sources": agent_response.sources,
                             "confidence": agent_response.confidence,
                             "step_info": step,
-                            "iteration": iteration_context.iteration_count + 1
+                            "iteration": iteration_context.iteration_count + 1,
+                            "execution_time_ms": agent_execution_time
                         }
                         
                         # Agréger les sources avec détails pour visibilité utilisateur
@@ -381,7 +699,7 @@ Réponds au format JSON avec:
         Identifie les gaps de contexte qui nécessitent une itération supplémentaire.
         """
         gap_analysis_prompt = f"""
-Analyse les résultats de cette analyse GRC pour identifier les gaps de contexte qui nécessitent plus d'information.
+Analyse les résultats de cette analyse GRC pour identifier UNIQUEMENT les gaps de contexte CRITIQUES qui nécessitent absolument plus d'information.
 
 REQUÊTE ORIGINALE: "{original_query}"
 
@@ -396,17 +714,25 @@ CONNAISSANCES ACQUISES PRÉCÉDEMMENT:
 GAPS IDENTIFIÉS PRÉCÉDEMMENT:
 {iteration_context.context_gaps}
 
-Identifie les gaps de contexte restants:
-1. Informations manquantes pour répondre complètement
-2. Documents non analysés qui pourraient être pertinents
-3. Aspects de la question non couverts
-4. Contradictions nécessitant clarification
-5. Détails techniques manquants
+CRITÈRES STRICTS pour identifier un gap critique:
+1. Information ESSENTIELLE manquante pour répondre à la question principale
+2. Contradiction MAJEURE nécessitant clarification urgente
+3. Aspect FONDAMENTAL de la question complètement non couvert
+4. Données QUANTITATIVES manquantes quand nécessaires pour l'évaluation
 
-Réponds avec une liste JSON des gaps identifiés:
-["gap1", "gap2", "gap3"]
+NE PAS considérer comme gaps:
+- Détails supplémentaires qui enrichiraient seulement la réponse
+- Informations contextuelles non essentielles
+- Aspects déjà partiellement couverts
+- Questions hypothétiques ou prospectives
+- Répétitions des gaps précédents
 
-Si aucun gap significatif, réponds: []
+Sois TRÈS CONSERVATEUR. Préfère retourner [] si les résultats sont suffisants pour répondre à la question principale.
+
+Réponds avec une liste JSON des gaps CRITIQUES uniquement:
+["gap_critique_1", "gap_critique_2"]
+
+Si aucun gap critique, réponds: []
 """
 
         try:
@@ -659,69 +985,8 @@ La réponse doit être adaptée à un contexte GRC et montrer clairement la vale
 
     def _create_detailed_sources_section(self, sources_by_iteration: Dict[int, List[Dict[str, Any]]]) -> str:
         """Crée une section détaillée des sources pour la visibilité utilisateur."""
-        if not sources_by_iteration:
-            return "\n---\n\n## 📚 SOURCES CONSULTÉES\n\nAucune source spécifique identifiée durant cette analyse."
-        
-        sources_section = "\n---\n\n## 📚 SOURCES CONSULTÉES DURANT L'ANALYSE ITÉRATIVE\n\n"
-        sources_section += "*Traçabilité complète des informations utilisées pour cette analyse*\n\n"
-        
-        total_sources = sum(len(sources) for sources in sources_by_iteration.values())
-        sources_section += f"**Total des sources consultées**: {total_sources}\n\n"
-        
-        for iteration in sorted(sources_by_iteration.keys()):
-            sources = sources_by_iteration[iteration]
-            sources_section += f"### 🔄 Itération {iteration} ({len(sources)} sources)\n\n"
-            
-            # Grouper par agent pour plus de clarté
-            sources_by_agent = {}
-            for source in sources:
-                agent = source.get("agent", "agent_inconnu")
-                if agent not in sources_by_agent:
-                    sources_by_agent[agent] = []
-                sources_by_agent[agent].append(source)
-            
-            for agent, agent_sources in sources_by_agent.items():
-                sources_section += f"**📊 Agent: {agent}**\n"
-                
-                for source in agent_sources:
-                    source_info = source.get("source", {})
-                    
-                    # Extraire les informations de la source
-                    if isinstance(source_info, dict):
-                        source_name = source_info.get("title", source_info.get("name", source_info.get("id", "Document")))
-                        source_type = source_info.get("type", "document")
-                        source_details = source_info.get("details", "")
-                    else:
-                        source_name = str(source_info)
-                        source_type = "document"
-                        source_details = ""
-                    
-                    # Afficher la source avec ses détails
-                    sources_section += f"- **{source_name}** ({source_type})\n"
-                    
-                    if source_details:
-                        sources_section += f"  - *Détails*: {source_details}\n"
-                    
-                    tools_used = source.get("tools_used", [])
-                    if tools_used:
-                        sources_section += f"  - *Outils utilisés*: {', '.join(tools_used)}\n"
-                    
-                    action = source.get("action", "")
-                    if action:
-                        sources_section += f"  - *Action effectuée*: {action}\n"
-                    
-                    timestamp = source.get("timestamp", "")
-                    if timestamp:
-                        sources_section += f"  - *Analysé le*: {timestamp[:19].replace('T', ' ')}\n"
-                    
-                    sources_section += "\n"
-                
-                sources_section += "\n"
-        
-        sources_section += "---\n\n"
-        sources_section += "*Cette section garantit la transparence et la traçabilité de toutes les informations utilisées dans cette analyse itérative.*"
-        
-        return sources_section
+        # Section sources supprimée - les sources sont maintenant affichées dans l'interface utilisateur séparément
+        return ""
 
     def _aggregate_all_sources(self, iteration_context: IterationContext) -> List[Dict[str, Any]]:
         """Agrège toutes les sources de toutes les itérations avec détails complets."""

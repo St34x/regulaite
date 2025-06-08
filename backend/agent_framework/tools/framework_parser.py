@@ -25,6 +25,52 @@ class FrameworkType(Enum):
     PCI_DSS = "pci_dss"
     CUSTOM = "custom"
 
+def safe_framework_type_conversion(framework_str: str) -> FrameworkType:
+    """
+    Convertit de manière sécurisée une chaîne en FrameworkType.
+    Gère les différences de casse et les variations communes.
+    """
+    if isinstance(framework_str, FrameworkType):
+        return framework_str
+    
+    # Normaliser la chaîne (minuscule, espaces supprimés)
+    normalized = framework_str.lower().strip()
+    
+    # Mappings spéciaux pour les variations communes
+    mappings = {
+        "rgpd": FrameworkType.RGPD,
+        "gdpr": FrameworkType.RGPD,
+        "iso27001": FrameworkType.ISO27001,
+        "iso_27001": FrameworkType.ISO27001,
+        "iso-27001": FrameworkType.ISO27001,
+        "nist": FrameworkType.NIST,
+        "dora": FrameworkType.DORA,
+        "sox": FrameworkType.SOX,
+        "pci_dss": FrameworkType.PCI_DSS,
+        "pci-dss": FrameworkType.PCI_DSS,
+        "pcidss": FrameworkType.PCI_DSS,
+        "custom": FrameworkType.CUSTOM
+    }
+    
+    if normalized in mappings:
+        return mappings[normalized]
+    
+    # Essayer la conversion directe avec la valeur enum
+    try:
+        return FrameworkType(normalized)
+    except ValueError:
+        pass
+    
+    # Essayer avec le nom de l'enum (majuscules)
+    try:
+        return FrameworkType[framework_str.upper()]
+    except KeyError:
+        pass
+    
+    # Si rien ne marche, lever une erreur explicite
+    valid_values = [ft.value for ft in FrameworkType] + list(mappings.keys())
+    raise ValueError(f"Framework '{framework_str}' n'est pas reconnu. Valeurs valides: {valid_values}")
+
 class RequirementType(Enum):
     """Types d'exigences dans les frameworks."""
     CONTROL = "control"
@@ -776,7 +822,7 @@ async def framework_parser_tool(
     parser = FrameworkParser()
     
     try:
-        framework = FrameworkType(framework_type)
+        framework = safe_framework_type_conversion(framework_type)
     except ValueError:
         return {
             "success": False,
@@ -809,7 +855,7 @@ async def framework_parser_tool(
         
         elif action == "map" and target_framework:
             try:
-                target_fw = FrameworkType(target_framework)
+                target_fw = safe_framework_type_conversion(target_framework)
                 mappings = await parser.create_framework_mapping(framework, target_fw)
                 return {
                     "success": True,

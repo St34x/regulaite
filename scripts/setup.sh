@@ -618,7 +618,7 @@ if [ "$HAS_MARIADB_BACKUP" = true ] || [ "$HAS_QDRANT_BACKUP" = true ]; then
         sleep 5
         
         # Restore MariaDB backup
-        if docker exec -i regulaite-mariadb mysql -u root -p"$MARIADB_ROOT_PASSWORD" < "$MARIADB_BACKUP"; then
+        if docker exec -i regulaite-mariadb mariadb -u root -p"$MARIADB_ROOT_PASSWORD" < "$MARIADB_BACKUP"; then
             echo -e "${GREEN}✅ MariaDB data restored successfully from backup${NC}"
         else
             echo -e "${RED}❌ Failed to restore MariaDB data. Check backup file integrity.${NC}"
@@ -713,7 +713,35 @@ mkdir -p "$PLUGIN_DIR/backend/database/mariadb"
 mkdir -p "$PLUGIN_DIR/backend/database/qdrant"
 echo -e "${GREEN}✅ Database directories created${NC}"
 
-# Step 9: Final status and information
+# Step 9: Vector Indexing Verification
+echo -e "${BLUE}===============================================${NC}"
+echo -e "${BLUE}🔍 Vector Indexing Verification${NC}"
+echo -e "${BLUE}===============================================${NC}"
+
+echo -e "${YELLOW}Verifying Qdrant vector indexing configuration...${NC}"
+
+# Wait for Qdrant to be fully ready
+echo -e "${YELLOW}⏳ Waiting for Qdrant to be fully initialized...${NC}"
+for i in {1..30}; do
+    if curl -s "http://localhost:6333/healthz" > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Qdrant is ready${NC}"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo -e "${YELLOW}⚠️ Qdrant may still be starting up${NC}"
+    fi
+    sleep 2
+done
+
+# Run indexing verification if script exists
+if [ -f "$PLUGIN_DIR/scripts/verify-indexing.sh" ]; then
+    echo -e "${YELLOW}Running indexing verification...${NC}"
+    bash "$PLUGIN_DIR/scripts/verify-indexing.sh" || echo -e "${YELLOW}⚠️ Indexing verification completed with warnings${NC}"
+else
+    echo -e "${YELLOW}⚠️ Indexing verification script not found${NC}"
+fi
+
+# Step 10: Final status and information
 echo -e "${GREEN}===============================================${NC}"
 echo -e "${BLUE}🎉 RegulAite setup completed!${NC}"
 echo -e "${GREEN}===============================================${NC}"
@@ -763,3 +791,4 @@ echo -e "  View services: docker-compose ps${NC}"
 echo -e "  Stop services: docker-compose down${NC}"
 echo -e "  Restart services: docker-compose restart${NC}"
 echo -e "  Update and restart: ./scripts/setup.sh${NC}"
+echo -e "  Verify indexing: ./scripts/verify-indexing.sh${NC}"

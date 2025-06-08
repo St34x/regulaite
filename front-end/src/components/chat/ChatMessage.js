@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { User, Bot, FileText, ChevronDown, ChevronUp } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Button, Collapse, VStack } from '@chakra-ui/react';
+import remarkGfm from 'remark-gfm';
+import { Box, Flex, Text, Badge, Spinner, useColorModeValue, Icon, Button, Collapse, VStack, Table, Thead, Tbody, Tr, Th, Td } from '@chakra-ui/react';
 import ProcessingStatus from './ProcessingStatus';
 
 /**
@@ -148,7 +149,41 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
     ),
     
     // Custom break component
-    br: () => <Box height="1em" />
+    br: () => <Box height="1em" />,
+    
+    // Custom table components
+    table: ({ children }) => (
+      <Box mb={4} overflowX="auto">
+        <Table variant="simple" size="sm">
+          {children}
+        </Table>
+      </Box>
+    ),
+    thead: ({ children }) => (
+      <Thead>
+        {children}
+      </Thead>
+    ),
+    tbody: ({ children }) => (
+      <Tbody>
+        {children}
+      </Tbody>
+    ),
+    tr: ({ children }) => (
+      <Tr>
+        {children}
+      </Tr>
+    ),
+    th: ({ children }) => (
+      <Th fontSize="xs" fontWeight="bold" color={textColor}>
+        {children}
+      </Th>
+    ),
+    td: ({ children }) => (
+      <Td fontSize="sm" py={2}>
+        {children}
+      </Td>
+    )
   };
 
   return (
@@ -235,7 +270,12 @@ const ChatMessage = ({ message, isLoading = false, agentInfo = null, previousMes
             }
           }}
         >
-          <ReactMarkdown components={markdownComponents}>{cleanMessageContent()}</ReactMarkdown>
+          <ReactMarkdown 
+            components={markdownComponents}
+            remarkPlugins={[remarkGfm]}
+          >
+            {cleanMessageContent()}
+          </ReactMarkdown>
         </Box>
         
         

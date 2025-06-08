@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import AgentLogsViewer from './AgentLogsViewer';
 
 /**
  * Enhanced Streaming Message Component
@@ -127,66 +128,12 @@ const StreamingMessage = ({
 
     return (
       <div className="processing-steps mb-3">
-        {/* Agent Steps */}
+        {/* Use the new AgentLogsViewer for agent steps */}
         {hasAgentSteps && (
-          <div className="agent-steps mb-3">
-            <div className="text-sm text-purple-600 mb-2 font-medium flex items-center">
-              <span className="mr-2">🤖</span>
-              Agent Processing Steps:
-            </div>
-            <div className="space-y-2">
-              {message.metadata.agentSteps.map((step, index) => (
-                <motion.div
-                  key={step.step || index}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.3, delay: index * 0.1 }}
-                  className={`flex items-center text-sm p-2 rounded-md border-l-3 ${
-                    step.status === 'completed' ? 'text-green-700 bg-green-50 border-green-400' :
-                    step.status === 'in_progress' ? 'text-purple-700 bg-purple-50 border-purple-400' :
-                    step.status === 'failed' ? 'text-red-700 bg-red-50 border-red-400' :
-                    'text-gray-700 bg-gray-50 border-gray-300'
-                  }`}
-                >
-                  <div className={`w-3 h-3 rounded-full mr-3 flex-shrink-0 ${
-                    step.status === 'completed' ? 'bg-green-500' :
-                    step.status === 'in_progress' ? 'bg-purple-500 animate-pulse' :
-                    step.status === 'failed' ? 'bg-red-500' :
-                    'bg-gray-300'
-                  }`} />
-                  
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium">{step.message || step.step}</div>
-                    {step.details && (
-                      <div className="text-xs opacity-75 mt-1">
-                        {step.details}
-                      </div>
-                    )}
-                    {step.progress !== undefined && (
-                      <div className="mt-2">
-                        <div className="flex justify-between text-xs mb-1">
-                          <span>Progress</span>
-                          <span>{Math.round(step.progress)}%</span>
-                        </div>
-                        <div className="w-full bg-gray-200 rounded-full h-1.5">
-                          <div 
-                            className="bg-purple-500 h-1.5 rounded-full transition-all duration-300"
-                            style={{ width: `${step.progress || 0}%` }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  
-                  {step.status === 'in_progress' && (
-                    <div className="ml-2 flex-shrink-0">
-                      <div className="animate-spin w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full" />
-                    </div>
-                  )}
-                </motion.div>
-              ))}
-            </div>
-          </div>
+          <AgentLogsViewer 
+            agentSteps={message.metadata.agentSteps} 
+            isStreaming={isStreaming}
+          />
         )}
         
         {/* Regular Processing Steps */}

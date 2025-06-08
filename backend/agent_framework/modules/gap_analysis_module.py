@@ -16,7 +16,7 @@ from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
     EntityType, MetricType, RelationType
 )
-from ..tools.framework_parser import FrameworkParser, FrameworkType, ComplianceGap
+from ..tools.framework_parser import FrameworkParser, FrameworkType, ComplianceGap, safe_framework_type_conversion
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ class GapAnalysisModule(Agent):
     Module expert en analyse de gaps avec IA stratégique avancée et capacités itératives.
     """
     
-    def __init__(self, llm_client: LLMIntegration = None):
+    def __init__(self, llm_client = None, rag_system=None):
         super().__init__(
             agent_id="gap_analysis",
             name="Expert Analyse de Gaps Itérative"
@@ -154,7 +154,7 @@ class GapAnalysisModule(Agent):
         self.llm_client = llm_client or get_llm_client()
         
         # Initialiser les outils
-        self.document_finder = DocumentFinder()
+        self.document_finder = DocumentFinder(rag_system=rag_system)
         self.entity_extractor = EntityExtractor()
         self.cross_reference_tool = CrossReferenceTool()
         self.temporal_analyzer = TemporalAnalyzer()
@@ -419,7 +419,16 @@ Détermine avec ton expertise en audit et analyse de gaps:
    - process: Processus particulier
    - system: Système spécifique
 
-Retourne une analyse JSON avec ta compréhension experte.
+IMPÉRATIF: Retourne UNIQUEMENT un objet JSON valide, sans texte explicatif.
+
+Format JSON requis:
+{{
+  "type": "type_analyse",
+  "domains": ["domaine1", "domaine2"],
+  "frameworks": ["framework1"],
+  "urgency": "niveau",
+  "scope": "périmètre"
+}}
 """
 
         response = await self.llm_client.generate_response(
@@ -432,21 +441,68 @@ Retourne une analyse JSON avec ta compréhension experte.
         )
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            return json.loads(json_content)
+            # Enhanced JSON extraction with better error handling
+            if response and response.strip():
+                # Log the raw response for debugging
+                logger.debug(f"LLM raw response for gap intent analysis: {response[:200]}...")
+                
+                # Try to extract JSON from response with multiple strategies
+                json_content = None
+                
+                # Strategy 1: Direct JSON parsing if response looks like pure JSON
+                if response.strip().startswith('{') and response.strip().endswith('}'):
+                    json_content = response.strip()
+                else:
+                    # Strategy 2: Find JSON within the response
+                    json_start = response.find("{")
+                    json_end = response.rfind("}") + 1
+                    if json_start >= 0 and json_end > json_start:
+                        json_content = response[json_start:json_end]
+                
+                if json_content:
+                    parsed_result = json.loads(json_content)
+                    # Validate the structure with comprehensive checks
+                    if isinstance(parsed_result, dict):
+                        # Ensure required fields exist with fallbacks
+                        if "type" not in parsed_result:
+                            parsed_result["type"] = "general_analysis"
+                        if "domains" not in parsed_result:
+                            parsed_result["domains"] = ["compliance"]
+                        if "frameworks" not in parsed_result:
+                            parsed_result["frameworks"] = ["iso27001"]
+                        if "urgency" not in parsed_result:
+                            parsed_result["urgency"] = "medium"
+                        if "scope" not in parsed_result:
+                            parsed_result["scope"] = "organization"
+                        
+                        logger.info(f"Successfully parsed gap intent: {parsed_result['type']}")
+                        return parsed_result
+                    else:
+                        raise ValueError("Parsed JSON is not a dictionary")
+                else:
+                    raise ValueError("No valid JSON structure found in response")
+            else:
+                raise ValueError("Empty or whitespace-only LLM response")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error in gap intent analysis: {str(e)}")
+            logger.debug(f"Problematic JSON content: {json_content[:200] if 'json_content' in locals() else 'N/A'}")
         except Exception as e:
             logger.error(f"Erreur analyse intention gaps: {str(e)}")
-            logger.warning("Utilisation de paramètres d'analyse par défaut")
-            return {
-                "type": "general_analysis",
-                "domains": ["compliance"],
-                "frameworks": ["iso27001"],
-                "urgency": "medium",
-                "scope": "organization",
-                "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés"
-            }
+            
+        # Fallback with enhanced logging
+        logger.warning("Utilisation de paramètres d'analyse par défaut")
+        logger.info("Using default gap analysis parameters due to LLM intent analysis failure")
+        logger.debug(f"Original query that failed analysis: {query_text}")
+        
+        return {
+            "type": "general_analysis",
+            "domains": ["compliance"],
+            "frameworks": ["iso27001"],
+            "urgency": "medium",
+            "scope": "organization",
+            "error_note": "Analyse d'intention LLM échouée - paramètres par défaut utilisés"
+        }
 
     async def _identify_framework_gaps_with_llm(
         self,
@@ -713,7 +769,7 @@ Retourne une liste JSON de recommandations stratégiques.
         
         scope = intent.get("scope", "organization")
         framework_names = intent.get("frameworks", ["iso27001"])
-        frameworks = [FrameworkType(f) for f in framework_names]
+        frameworks = [safe_framework_type_conversion(f) for f in framework_names]
         
         org_context = query.context if query.context else {
             "sector": "technology",
@@ -1005,7 +1061,7 @@ Retourne une analyse JSON structurée avec métriques et insights.
         
         framework_name = intent.get("frameworks", ["iso27001"])[0]
         try:
-            framework = FrameworkType(framework_name)
+            framework = safe_framework_type_conversion(framework_name)
         except:
             framework = FrameworkType.ISO27001
         
@@ -1036,7 +1092,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS {framework_name}: {len(entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert {framework_name} senior, analyse:
 
@@ -1092,7 +1148,7 @@ Fournis une analyse {framework_name} complète et actionnable.
             content=response,
             tools_used=["document_finder", "entity_extractor", "framework_parser"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "framework": framework_name,
                 "documents_analyzed": len(relevant_docs),
@@ -1131,7 +1187,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 GAPS/CONTRÔLES IDENTIFIÉS: {len(gap_entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en transformation et remédiation, conçois:
 
@@ -1193,7 +1249,7 @@ Fournis un plan de remédiation complet et opérationnel.
             content=response,
             tools_used=["document_finder", "entity_extractor"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "gap_entities": len(gap_entities),
@@ -1224,10 +1280,19 @@ Fournis un plan de remédiation complet et opérationnel.
                 gap_entities.extend(entities.get("finding", []))
         
         # Analyse temporelle pour comprendre l'évolution
+        from datetime import datetime, timedelta
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=180)  # 6 months
+        
+        # Create dummy entities from documents for trend analysis
+        doc_entities = [{"id": f"doc_{i}", "name": doc.get("title", f"Document {i}")} 
+                       for i, doc in enumerate(relevant_docs[:3])]
+        
         trends = await self.temporal_analyzer.analyze_trends(
-            [doc.get("content", "") for doc in relevant_docs[:3]],
-            MetricType.RISK_LEVEL,
-            time_window_months=6
+            entities=doc_entities,
+            metric_types=[MetricType.RISK_LEVEL],
+            time_range=(start_time, end_time),
+            include_forecasts=False
         )
         
         # Priorisation sophistiquée par LLM
@@ -1236,10 +1301,10 @@ Effectue une priorisation stratégique des gaps pour: "{query.query_text}"
 
 DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 GAPS/RISQUES IDENTIFIÉS: {len(gap_entities)}
-TENDANCES HISTORIQUES: {len(trends.data_points) if trends else 0} points
+TENDANCES HISTORIQUES: {len(trends.trend_analyses) if trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en priorisation stratégique, analyse:
 
@@ -1296,11 +1361,11 @@ Fournis une priorisation stratégique claire et justifiée.
             content=response,
             tools_used=["document_finder", "entity_extractor", "temporal_analyzer"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "gap_entities": len(gap_entities),
-                "trend_data_points": len(trends.data_points) if trends else 0,
+                "trend_data_points": len(trends.trend_analyses) if trends else 0,
                 "analysis_type": "strategic_prioritization"
             }
         )
@@ -1328,10 +1393,19 @@ Fournis une priorisation stratégique claire et justifiée.
                 maturity_entities.extend(entities.get("requirement", []))
         
         # Analyse temporelle pour l'évolution de maturité
+        from datetime import datetime, timedelta
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=365)  # 12 months
+        
+        # Create dummy entities from documents for trend analysis
+        doc_entities = [{"id": f"doc_{i}", "name": doc.get("title", f"Document {i}")} 
+                       for i, doc in enumerate(relevant_docs[:3])]
+        
         maturity_trends = await self.temporal_analyzer.analyze_trends(
-            [doc.get("content", "") for doc in relevant_docs[:3]],
-            MetricType.CONTROL_EFFECTIVENESS,
-            time_window_months=12
+            entities=doc_entities,
+            metric_types=[MetricType.CONTROL_EFFECTIVENESS],
+            time_range=(start_time, end_time),
+            include_forecasts=False
         )
         
         # Analyse de maturité sophistiquée par LLM
@@ -1340,10 +1414,10 @@ Effectue une analyse de maturité organisationnelle pour: "{query.query_text}"
 
 DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS MATURITÉ: {len(maturity_entities)}
-TENDANCES MATURITÉ: {len(maturity_trends.data_points) if maturity_trends else 0} points
+TENDANCES MATURITÉ: {len(maturity_trends.trend_analyses) if maturity_trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en évaluation de maturité organisationnelle, analyse:
 
@@ -1407,11 +1481,11 @@ Fournis une évaluation de maturité complète avec recommandations d'évolution
             content=response,
             tools_used=["document_finder", "entity_extractor", "temporal_analyzer"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "maturity_entities": len(maturity_entities),
-                "trend_data_points": len(maturity_trends.data_points) if maturity_trends else 0,
+                "trend_data_points": len(maturity_trends.trend_analyses) if maturity_trends else 0,
                 "analysis_type": "maturity_gap_analysis"
             }
         )
@@ -1441,14 +1515,23 @@ Fournis une évaluation de maturité complète avec recommandations d'évolution
         # Analyse croisée pour identifier les relations
         cross_refs = await self.cross_reference_tool.analyze_relationships(
             [doc.get("content", "") for doc in relevant_docs[:5]],
-            relation_types=[RelationType.CONTROLS_RISK, RelationType.COMPLIANCE_GAP, RelationType.IMPACTS]
+            relation_types=[RelationType.CONTROLS, RelationType.IMPLEMENTS, RelationType.AFFECTS]
         )
         
         # Analyse temporelle pour comprendre l'évolution
+        from datetime import datetime, timedelta
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=180)  # 6 months
+        
+        # Create dummy entities from documents for trend analysis
+        doc_entities = [{"id": f"doc_{i}", "name": doc.get("title", f"Document {i}")} 
+                       for i, doc in enumerate(relevant_docs[:3])]
+        
         trends = await self.temporal_analyzer.analyze_trends(
-            [doc.get("content", "") for doc in relevant_docs[:3]],
-            MetricType.COMPLIANCE_SCORE,
-            time_window_months=6
+            entities=doc_entities,
+            metric_types=[MetricType.COMPLIANCE_SCORE],
+            time_range=(start_time, end_time),
+            include_forecasts=False
         )
         
         # Analyse générale sophistiquée par LLM
@@ -1458,10 +1541,10 @@ Effectue une analyse de gaps holistique pour: "{query.query_text}"
 DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS IDENTIFIÉES: {len(all_entities)}
 RELATIONS CROISÉES: {len(cross_refs.relationships)}
-TENDANCES HISTORIQUES: {len(trends.data_points) if trends else 0} points
+TENDANCES HISTORIQUES: {len(trends.trend_analyses) if trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context or {}, indent=2)[:1000]}
+{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert senior en analyse organisationnelle, effectue:
 
@@ -1532,12 +1615,12 @@ Fournis une analyse complète avec vision stratégique et recommandations action
             content=response,
             tools_used=["document_finder", "entity_extractor", "cross_reference_tool", "temporal_analyzer"],
             context_used=True,
-            sources=[doc.get("title", "Document") for doc in relevant_docs[:5]],
+            sources=self.format_documents_as_sources(relevant_docs[:5]),
             metadata={
                 "documents_analyzed": len(relevant_docs),
                 "entities_found": len(all_entities),
                 "relationships_found": len(cross_refs.relationships),
-                "trend_data_points": len(trends.data_points) if trends else 0,
+                "trend_data_points": len(trends.trend_analyses) if trends else 0,
                 "analysis_type": "general_gap_analysis"
             }
         )
@@ -2291,6 +2374,6 @@ Retourne un JSON structuré avec métriques financières détaillées.
 
 
 # Factory function
-def get_gap_analysis_module(llm_client: LLMIntegration = None):
+def get_gap_analysis_module(llm_client = None):
     """Factory function pour obtenir une instance du module d'analyse de gaps."""
     return GapAnalysisModule(llm_client=llm_client) 

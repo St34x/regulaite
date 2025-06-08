@@ -159,16 +159,56 @@ async def get_orchestrator() -> OrchestratorAgent:
     global _orchestrator_instance
     
     if _orchestrator_instance is None:
-        # Initialiser le système complet
+        # Initialiser le système complet avec callback de log
         try:
             # Récupérer le système RAG depuis le main
             from main import rag_system
+            
+            # Callback de logging pour debug
+            async def debug_log_callback(log_data):
+                # Handle different log data structures
+                if isinstance(log_data, dict):
+                    # Check if it's the detailed log structure from AgentLogger
+                    if 'log_entry' in log_data and isinstance(log_data['log_entry'], dict):
+                        log_entry = log_data['log_entry']
+                        agent_name = log_entry.get('agent_name', 'Unknown')
+                        message = log_entry.get('message', 'No message')
+                        activity_type = log_entry.get('activity_type', 'unknown')
+                        status = log_entry.get('status', 'unknown')
+                        logger.info(f"AGENT LOG: {agent_name} - [{activity_type}] {status}: {message}")
+                    else:
+                        # Handle simple log data structure
+                        agent_name = log_data.get('agent_name', 'Unknown')
+                        message = log_data.get('message', 'No message')
+                        logger.info(f"AGENT LOG: {agent_name} - {message}")
+                else:
+                    logger.warning(f"AGENT LOG: Unexpected log data format: {log_data}")
+            
             _orchestrator_instance = await initialize_complete_agent_system(
-                rag_system=rag_system
+                rag_system=rag_system,
+                log_callback=debug_log_callback
             )
-            logger.info("Orchestrateur initialisé avec succès")
+            
+            # Vérifier que les agents sont bien enregistrés
+            registered_agents = list(_orchestrator_instance.specialized_agents.keys())
+            logger.info(f"Orchestrateur initialisé avec succès. Agents enregistrés: {registered_agents}")
+            
+            # Si aucun agent n'est enregistré, c'est un problème
+            if not registered_agents:
+                logger.error("Aucun agent spécialisé n'a été enregistré!")
+                # Essayer une initialisation de fallback
+                from ..agent_framework.factory import create_specialized_agents
+                specialized_agents = await create_specialized_agents(
+                    orchestrator=_orchestrator_instance,
+                    rag_system=rag_system,
+                    log_callback=debug_log_callback
+                )
+                logger.info(f"Agents de fallback créés: {list(specialized_agents.keys())}")
+                
         except Exception as e:
             logger.error(f"Erreur lors de l'initialisation de l'orchestrateur: {str(e)}")
+            import traceback
+            logger.error(f"Stacktrace: {traceback.format_exc()}")
             raise HTTPException(
                 status_code=500, 
                 detail=f"Impossible d'initialiser l'orchestrateur: {str(e)}"

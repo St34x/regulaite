@@ -4,11 +4,18 @@ import {
   Text, 
   Button, 
   HStack,
-  useColorModeValue 
+  useColorModeValue,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td
 } from '@chakra-ui/react';
 import { RefreshCw, Square } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 /**
  * ResponseSection - Displays the AI response with streaming support
@@ -247,7 +254,41 @@ const ResponseSection = ({
     ),
     
     // Custom break component
-    br: () => <Box height="1em" />
+    br: () => <Box height="1em" />,
+    
+    // Custom table components
+    table: ({ children }) => (
+      <Box mb={4} overflowX="auto">
+        <Table variant="simple" size="sm">
+          {children}
+        </Table>
+      </Box>
+    ),
+    thead: ({ children }) => (
+      <Thead>
+        {children}
+      </Thead>
+    ),
+    tbody: ({ children }) => (
+      <Tbody>
+        {children}
+      </Tbody>
+    ),
+    tr: ({ children }) => (
+      <Tr>
+        {children}
+      </Tr>
+    ),
+    th: ({ children }) => (
+      <Th fontSize="xs" fontWeight="bold" color={textColor}>
+        {children}
+      </Th>
+    ),
+    td: ({ children }) => (
+      <Td fontSize="sm" py={2}>
+        {children}
+      </Td>
+    )
   };
 
   // Check for errors
@@ -312,7 +353,10 @@ const ResponseSection = ({
             fontSize="sm"
             lineHeight="1.6"
           >
-            <ReactMarkdown components={markdownComponents}>
+            <ReactMarkdown 
+              components={markdownComponents}
+              remarkPlugins={[remarkGfm]}
+            >
               {cleanMessageContent()}
             </ReactMarkdown>
             

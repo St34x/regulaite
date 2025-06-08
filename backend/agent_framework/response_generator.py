@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class SourceInfo(BaseModel):
     """Information about a source used in a response."""
-    title: str
+    title: Optional[str] = Field(None, description="Document title if available")
     url: Optional[str] = None
     snippet: Optional[str] = None
     relevance_score: Optional[float] = None
@@ -108,15 +108,36 @@ class ResponseGenerator:
         
         # Add sources if available
         if response.sources:
-            formatted_response.sources = [
-                SourceInfo(**source) if isinstance(source, dict) else SourceInfo(title=str(source))
-                for source in response.sources
-            ]
+            formatted_response.sources = []
+            for source in response.sources:
+                try:
+                    if isinstance(source, dict):
+                        # Ensure title is present for dict sources
+                        if 'title' not in source or not source['title']:
+                            source['title'] = "Unknown Source"
+                        formatted_response.sources.append(SourceInfo(**source))
+                    else:
+                        formatted_response.sources.append(SourceInfo(title=str(source) if source else "Unknown Source"))
+                except Exception as e:
+                    logger.warning(f"Error creating SourceInfo from {source}: {e}")
+                    # Create a minimal valid SourceInfo
+                    formatted_response.sources.append(SourceInfo(title="Source Error"))
+                    
         elif "sources" in response.metadata:
-            formatted_response.sources = [
-                SourceInfo(**source) if isinstance(source, dict) else SourceInfo(title=str(source))
-                for source in response.metadata["sources"]
-            ]
+            formatted_response.sources = []
+            for source in response.metadata["sources"]:
+                try:
+                    if isinstance(source, dict):
+                        # Ensure title is present for dict sources
+                        if 'title' not in source or not source['title']:
+                            source['title'] = "Unknown Source"
+                        formatted_response.sources.append(SourceInfo(**source))
+                    else:
+                        formatted_response.sources.append(SourceInfo(title=str(source) if source else "Unknown Source"))
+                except Exception as e:
+                    logger.warning(f"Error creating SourceInfo from {source}: {e}")
+                    # Create a minimal valid SourceInfo
+                    formatted_response.sources.append(SourceInfo(title="Source Error"))
             
         # Log the response generation
         logger.info(f"Generated {format} response for query: {query.query_text if hasattr(query, 'query_text') else query}")

@@ -296,6 +296,40 @@ class CrossReferenceTool:
         
         return relationships
 
+    async def analyze_relationships(
+        self,
+        content_list: List[str],
+        relation_types: List[RelationType] = None
+    ) -> CrossReferenceResult:
+        """
+        Analyse les relations entre entités à partir d'une liste de contenus.
+        
+        Args:
+            content_list: Liste des contenus textuels à analyser
+            relation_types: Types de relations à rechercher
+            
+        Returns:
+            Résultats de l'analyse des relations
+        """
+        if relation_types is None:
+            relation_types = list(RelationType)
+            
+        # Créer des documents temporaires à partir des contenus
+        documents = []
+        for i, content in enumerate(content_list):
+            documents.append({
+                "id": f"doc_{i}",
+                "content": content,
+                "type": "text"
+            })
+        
+        # Utiliser la méthode d'analyse de références croisées existante
+        return await self.analyze_cross_references(
+            documents=documents,
+            focus_types=relation_types,
+            include_external=False
+        )
+
     async def _extract_entities_from_documents(
         self,
         documents: List[Dict[str, Any]]
@@ -534,7 +568,7 @@ Identifie toutes les relations et retourne un JSON:
             coverage["coverage_by_type"][entity_type] = {
                 "total": len(entity_list),
                 "connected": len(connected),
-                "coverage_percentage": len(connected) / len(entity_list) * 100 if entity_list else 0
+                "coverage_percentage": (len(connected) / max(len(entity_list), 1)) * 100 if entity_list else 0
             }
             
             # Identifier les entités orphelines
@@ -622,7 +656,7 @@ Identifie toutes les relations et retourne un JSON:
                 "medium": len([g for g in gaps if g.get("severity") == "medium"]),
                 "low": len([g for g in gaps if g.get("severity") == "low"])
             },
-            "overall_coverage": coverage.get("total_relationships", 0) / coverage.get("total_entities", 1) * 100
+            "overall_coverage": (coverage.get("total_relationships", 0) / max(coverage.get("total_entities", 1), 1)) * 100
         }
 
     # Méthodes helper supplémentaires

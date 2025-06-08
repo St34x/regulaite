@@ -261,6 +261,25 @@ class StreamingService {
         });
         break;
 
+      case 'agent_detailed_log':
+        // Handle detailed agent logging
+        onProcessing({
+          state: `[${eventData.log_entry.agent_name}] ${eventData.log_entry.message}`,
+          step: eventData.log_entry.activity_type,
+          details: eventData.log_entry.details,
+          progress: eventData.log_entry.execution_time_ms ? 100 : undefined,
+          executionId: eventData.log_entry.entry_id,
+          timestamp: eventData.log_entry.timestamp,
+          isDetailedLog: true,
+          logLevel: eventData.log_entry.level,
+          agentId: eventData.log_entry.agent_id,
+          agentName: eventData.log_entry.agent_name,
+          activityType: eventData.log_entry.activity_type,
+          status: eventData.log_entry.status,
+          metadata: eventData.log_entry.metadata
+        });
+        break;
+
       case 'token':
         if (eventData.content) {
           onToken({
