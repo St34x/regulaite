@@ -27,6 +27,7 @@ async def create_rag_agent(agent_id: str = "rag_agent",
                      query_parser: Optional[QueryParser] = None,
                      model: str = "gpt-4",
                      max_sources: int = 5,
+                     use_query_expansion: bool = False,
                      **kwargs) -> RAGAgent:
     """
     Create and initialize a RAG agent with all necessary components.
@@ -38,6 +39,7 @@ async def create_rag_agent(agent_id: str = "rag_agent",
         query_parser: Query parser (if None, a new one will be created)
         model: LLM model to use
         max_sources: Maximum number of sources to retrieve
+        use_query_expansion: Whether to enable query expansion for better retrieval
         **kwargs: Additional arguments for the agent
         
     Returns:
@@ -50,8 +52,11 @@ async def create_rag_agent(agent_id: str = "rag_agent",
         tool_registry = ToolRegistry()
         
     # Get integrations first
-    rag_integration = get_rag_integration()
+    rag_integration = get_rag_integration(use_query_expansion=use_query_expansion)
     llm_integration = get_llm_integration(model=model)
+    
+    if use_query_expansion:
+        logger.info("RAG agent created with query expansion enabled")
         
     if query_parser is None:
         query_parser = QueryParser(llm_client=llm_integration)

@@ -44,7 +44,7 @@ class HyPERagSystem:
         embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         openai_api_key: Optional[str] = None,
         llm_model: str = "gpt-4o-mini",
-        chunk_size: int = 1000,
+        chunk_size: int = 2048,
         chunk_overlap: int = 200,
         hypothetical_questions_per_chunk: int = 5,
         vector_weight: float = 0.75,

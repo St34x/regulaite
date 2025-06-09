@@ -1710,7 +1710,7 @@ async def get_user_parser_settings(user_id: str):
                 "extract_tables": True,
                 "extract_metadata": True,
                 "extract_images": False,
-                "chunk_size": 1000,
+                "chunk_size": 2048,
                 "chunk_overlap": 200,
                 "chunking_strategy": "fixed"
             }

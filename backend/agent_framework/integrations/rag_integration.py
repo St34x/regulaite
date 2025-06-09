@@ -3,7 +3,7 @@ RAG Integration for the RegulAIte Agent Framework.
 
 This module provides integration with the existing RAG system.
 """
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Set
 import logging
 import json
 import sys
@@ -21,16 +21,29 @@ class RAGIntegration:
     existing RAG system.
     """
     
-    def __init__(self, query_engine=None, rag_system=None):
+    def __init__(self, query_engine=None, rag_system=None, use_query_expansion=False):
         """
         Initialize the RAG integration.
         
         Args:
             query_engine: An existing QueryEngine instance to use
             rag_system: An existing RAG system instance to use
+            use_query_expansion: Whether to enable query expansion for better retrieval
         """
         self.query_engine = query_engine
         self.rag_system = rag_system
+        self.use_query_expansion = use_query_expansion
+        
+        # Initialize query expansion if enabled
+        self.query_expander = None
+        if self.use_query_expansion:
+            try:
+                from ..tools.query_expansion import get_query_expander
+                self.query_expander = get_query_expander()
+                logger.info("Query expansion initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize query expansion: {str(e)}")
+                self.use_query_expansion = False
         
         if self.query_engine is None and self.rag_system is None:
             logger.warning("RAG integration initialized without query engine or RAG system")
@@ -55,53 +68,133 @@ class RAGIntegration:
         try:
             logger.info(f"Retrieving documents for query: {query}")
             
-            # First try using the query engine if available
-            if self.query_engine is not None:
-                # Call the query engine with the appropriate parameters
-                if hasattr(self.query_engine, 'retrieve'):
-                    # If the query engine has a retrieve method, use it
-                    retrieval_result = await self.query_engine.retrieve(
-                        query, 
-                        top_k=top_k, 
-                        search_filter=search_filter
-                    )
-                    
-                    # Process the results into a standard format
-                    return self._process_retrieval_result(retrieval_result)
-                elif hasattr(self.query_engine, 'query'):
-                    # If the query engine only has a query method, use it
-                    # and extract the context used for the response
-                    query_result = await self.query_engine.query(
-                        query,
-                        top_k=top_k,
-                        search_filter=search_filter
-                    )
-                    
-                    # Process the query result to extract context
-                    return self._process_query_result(query_result)
-                else:
-                    logger.warning("RAG query engine does not have retrieve or query methods, trying RAG system")
+            # Apply query expansion if enabled
+            queries_to_search = [query]
+            expansion_info = None
             
-            # If query engine is not available or doesn't work, try using RAG system directly
-            if self.rag_system is not None:
-                if hasattr(self.rag_system, 'retrieve'):
-                    # Use RAG system retrieve method
-                    retrieval_result = self.rag_system.retrieve(query, top_k=top_k)
-                    return self._process_retrieval_result(retrieval_result)
-                elif hasattr(self.rag_system, 'search'):
-                    # Use RAG system search method
-                    search_result = self.rag_system.search(query, limit=top_k)
-                    return self._process_retrieval_result(search_result)
+            if self.use_query_expansion and self.query_expander:
+                try:
+                    expansion_result = await self.query_expander.expand_query(
+                        query, 
+                        strategy="balanced",
+                        max_expansions=5
+                    )
+                    
+                    if expansion_result.expanded_terms:
+                        # Create expanded query variations
+                        expanded_query = f"{query} {' '.join(expansion_result.expanded_terms[:3])}"
+                        queries_to_search.append(expanded_query)
+                        
+                        expansion_info = {
+                            "original_query": query,
+                            "expanded_terms": expansion_result.expanded_terms,
+                            "confidence_score": expansion_result.confidence_score,
+                            "framework_terms": expansion_result.framework_terms
+                        }
+                        
+                        logger.info(
+                            f"Query expanded with {len(expansion_result.expanded_terms)} terms, "
+                            f"confidence: {expansion_result.confidence_score:.2f}"
+                        )
+                    else:
+                        logger.info("No expansion terms found for query")
+                        
+                except Exception as e:
+                    logger.warning(f"Query expansion failed, using original query: {str(e)}")
+            
+            # Perform retrieval with all query variations
+            all_results = []
+            seen_doc_ids = set()
+            
+            for search_query in queries_to_search:
+                logger.debug(f"Searching with query: {search_query}")
+                
+                # First try using the query engine if available
+                if self.query_engine is not None:
+                    # Call the query engine with the appropriate parameters
+                    if hasattr(self.query_engine, 'retrieve'):
+                        # If the query engine has a retrieve method, use it
+                        retrieval_result = await self.query_engine.retrieve(
+                            search_query, 
+                            top_k=top_k, 
+                            search_filter=search_filter
+                        )
+                        
+                        # Process and deduplicate results
+                        processed_result = self._process_retrieval_result(retrieval_result)
+                        self._merge_results(all_results, processed_result, seen_doc_ids)
+                        
+                    elif hasattr(self.query_engine, 'query'):
+                        # If the query engine only has a query method, use it
+                        # and extract the context used for the response
+                        query_result = await self.query_engine.query(
+                            search_query,
+                            top_k=top_k,
+                            search_filter=search_filter
+                        )
+                        
+                        # Process and deduplicate results
+                        processed_result = self._process_query_result(query_result)
+                        self._merge_results(all_results, processed_result, seen_doc_ids)
+                        
+                    else:
+                        logger.warning("RAG query engine does not have retrieve or query methods, trying RAG system")
+                
+                # If query engine is not available or doesn't work, try using RAG system directly
+                if self.rag_system is not None and not all_results:
+                    if hasattr(self.rag_system, 'retrieve'):
+                        # Use RAG system retrieve method
+                        retrieval_result = self.rag_system.retrieve(search_query, top_k=top_k)
+                        processed_result = self._process_retrieval_result(retrieval_result)
+                        self._merge_results(all_results, processed_result, seen_doc_ids)
+                        
+                    elif hasattr(self.rag_system, 'search'):
+                        # Use RAG system search method
+                        search_result = self.rag_system.search(search_query, limit=top_k)
+                        processed_result = self._process_retrieval_result(search_result)
+                        self._merge_results(all_results, processed_result, seen_doc_ids)
+            
+            # Prepare final result
+            if not all_results:
+                if self.rag_system is None and self.query_engine is None:
+                    logger.error("No RAG system available for retrieval")
                 else:
                     logger.error("RAG system does not have retrieve or search methods")
-                    return {"results": [], "sources": []}
-            else:
-                logger.error("No RAG system available for retrieval")
                 return {"results": [], "sources": []}
+            
+            # Sort results by relevance score and limit to top_k
+            all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+            final_results = all_results[:top_k]
+            
+            # Add expansion information to the result
+            result = {
+                "results": [r.get('text', str(r)) for r in final_results],
+                "sources": final_results
+            }
+            
+            if expansion_info:
+                result["query_expansion"] = expansion_info
+                
+            return result
                 
         except Exception as e:
             logger.error(f"Error retrieving documents: {str(e)}")
             return {"results": [], "sources": []}
+    
+    def _merge_results(self, all_results: List[Dict], new_results: Dict, seen_doc_ids: Set[str]):
+        """Merge new retrieval results with existing results, avoiding duplicates."""
+        if not new_results or not new_results.get("sources"):
+            return
+            
+        for source in new_results["sources"]:
+            # Create a unique identifier for deduplication
+            doc_id = source.get('doc_id', source.get('document_id', ''))
+            text_preview = str(source.get('text', ''))[:100]
+            unique_id = f"{doc_id}_{hash(text_preview)}"
+            
+            if unique_id not in seen_doc_ids:
+                all_results.append(source)
+                seen_doc_ids.add(unique_id)
             
     async def query(self, query: str, **kwargs) -> str:
         """
@@ -401,20 +494,25 @@ class RAGIntegration:
 # Singleton instance
 _rag_integration = None
 
-def initialize_rag_integration(rag_system=None, rag_query_engine=None):
+def initialize_rag_integration(rag_system=None, rag_query_engine=None, use_query_expansion=False):
     """
     Initialize the global RAG integration with explicit systems.
     
     Args:
         rag_system: The RAG system instance from main
         rag_query_engine: The RAG query engine instance from main
+        use_query_expansion: Whether to enable query expansion
     """
     global _rag_integration
     
-    logger.info("Initializing global RAG integration with explicit systems")
+    logger.info(f"Initializing global RAG integration with explicit systems (query_expansion={use_query_expansion})")
     
     # Create integration with the provided systems
-    _rag_integration = RAGIntegration(query_engine=rag_query_engine, rag_system=rag_system)
+    _rag_integration = RAGIntegration(
+        query_engine=rag_query_engine, 
+        rag_system=rag_system,
+        use_query_expansion=use_query_expansion
+    )
     
     # If we have a rag_system but no query_engine, add the rag_system
     if rag_system is not None and rag_query_engine is None:
@@ -423,13 +521,14 @@ def initialize_rag_integration(rag_system=None, rag_query_engine=None):
     
     return _rag_integration
 
-def get_rag_integration(rag_system=None, rag_query_engine=None):
+def get_rag_integration(rag_system=None, rag_query_engine=None, use_query_expansion=False):
     """
     Get the RAG integration instance.
     
     Args:
         rag_system: Optional RAG system to use if creating new instance
         rag_query_engine: Optional RAG query engine to use if creating new instance
+        use_query_expansion: Whether to enable query expansion
     
     Returns:
         The RAG integration instance
@@ -439,9 +538,9 @@ def get_rag_integration(rag_system=None, rag_query_engine=None):
     if _rag_integration is None:
         if rag_system is not None or rag_query_engine is not None:
             # Initialize with provided systems
-            _rag_integration = initialize_rag_integration(rag_system, rag_query_engine)
+            _rag_integration = initialize_rag_integration(rag_system, rag_query_engine, use_query_expansion)
         else:
             # Initialize with auto-discovery
-            _rag_integration = RAGIntegration()
+            _rag_integration = RAGIntegration(use_query_expansion=use_query_expansion)
         
     return _rag_integration 

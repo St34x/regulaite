@@ -15,6 +15,130 @@ from ..integrations.llm_integration import get_llm_client
 
 logger = logging.getLogger(__name__)
 
+def extract_json_from_llm_response(response: str) -> Dict[str, Any]:
+    """
+    Extrait de manière robuste un JSON d'une réponse LLM qui peut contenir du texte supplémentaire.
+    
+    Args:
+        response: Réponse complète du LLM
+        
+    Returns:
+        Dictionnaire JSON parsé ou dictionnaire vide en cas d'erreur
+    """
+    if not response or not response.strip():
+        logger.warning("Empty LLM response received")
+        return {}
+    
+    # Clean up the response
+    cleaned_response = response.strip()
+    
+    # Strategy 1: Try to find JSON within code blocks
+    json_code_block_patterns = [
+        r'```json\s*(\{.*?\})\s*```',
+        r'```\s*(\{.*?\})\s*```',
+    ]
+    
+    for pattern in json_code_block_patterns:
+        matches = re.findall(pattern, cleaned_response, re.DOTALL | re.IGNORECASE)
+        if matches:
+            try:
+                return json.loads(matches[0])
+            except json.JSONDecodeError:
+                continue
+    
+    # Strategy 2: Find JSON by counting braces (most robust for nested objects)
+    json_start = cleaned_response.find('{')
+    if json_start == -1:
+        logger.warning("No opening brace found in LLM response")
+        return {}
+    
+    # Count braces to find the complete JSON object
+    brace_count = 0
+    json_end = json_start
+    in_string = False
+    escape_next = False
+    
+    for i, char in enumerate(cleaned_response[json_start:], json_start):
+        if escape_next:
+            escape_next = False
+            continue
+            
+        if char == '\\':
+            escape_next = True
+            continue
+            
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+            
+        if not in_string:
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+    
+    if brace_count != 0:
+        logger.warning("Unbalanced braces in JSON, trying simpler extraction")
+        # Fallback to original method
+        json_end = cleaned_response.rfind('}') + 1
+    
+    json_content = cleaned_response[json_start:json_end]
+    
+    # Strategy 3: Try multiple parsing approaches
+    parsing_strategies = [
+        # Try exact extraction
+        lambda: json.loads(json_content),
+        # Try with trailing content removed
+        lambda: json.loads(json_content.rstrip()),
+        # Try finding last valid JSON
+        lambda: json.loads(json_content[:json_content.rfind('}') + 1]),
+    ]
+    
+    for strategy in parsing_strategies:
+        try:
+            parsed_json = strategy()
+            if isinstance(parsed_json, dict):
+                logger.debug(f"Successfully parsed JSON using strategy: {strategy.__name__}")
+                return parsed_json
+        except (json.JSONDecodeError, ValueError, AttributeError) as e:
+            logger.debug(f"JSON parsing strategy failed: {str(e)}")
+            continue
+    
+    # Strategy 4: If all else fails, try to extract individual key-value pairs
+    logger.warning("All JSON parsing strategies failed, attempting key-value extraction")
+    try:
+        # Look for key patterns in the response
+        patterns = {
+            'requirements': r'"requirements"\s*:\s*\[(.*?)\]',
+            'mappings': r'"mappings"\s*:\s*\[(.*?)\]',
+            'gaps': r'"gaps"\s*:\s*\[(.*?)\]',
+            'analysis': r'"analysis"\s*:\s*\{(.*?)\}',
+        }
+        
+        result = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, cleaned_response, re.DOTALL)
+            if match:
+                try:
+                    result[key] = json.loads(f'[{match.group(1)}]' if key.endswith('s') and key != 'analysis' else f'{{{match.group(1)}}}')
+                except:
+                    continue
+        
+        if result:
+            logger.info("Partial JSON extraction successful")
+            return result
+            
+    except Exception as e:
+        logger.error(f"Key-value extraction failed: {str(e)}")
+    
+    # Final fallback
+    logger.error("All JSON extraction methods failed")
+    logger.debug(f"Problematic response (first 500 chars): {cleaned_response[:500]}")
+    return {}
+
 class FrameworkType(Enum):
     """Types de frameworks supportés."""
     ISO27001 = "iso27001"
@@ -426,7 +550,24 @@ Utilise ta connaissance experte du framework pour:
 - Détecter les interdépendances
 - Évaluer la criticité business
 
-Retourne un JSON avec la liste complète des exigences.
+IMPORTANT: Retourne UNIQUEMENT un JSON valide, sans texte explicatif avant ou après.
+
+Format JSON requis:
+{{
+    "requirements": [
+        {{
+            "id": "string",
+            "section": "string", 
+            "title": "string",
+            "description": "string",
+            "type": "control|principle|process|documentation|assessment",
+            "mandatory": true|false,
+            "guidance": "string",
+            "evidence_required": ["string"],
+            "risk_areas": ["string"]
+        }}
+    ]
+}}
 """
 
         response = await self.llm_client.generate_response(
@@ -439,13 +580,15 @@ Retourne un JSON avec la liste complète des exigences.
         )
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            data = json.loads(json_content)
-            return data.get("requirements", [])
+            data = extract_json_from_llm_response(response)
+            requirements = data.get("requirements", [])
+            if not requirements and "exigences" in data:
+                requirements = data.get("exigences", [])
+            logger.info(f"Successfully extracted {len(requirements)} requirements from LLM response")
+            return requirements
         except Exception as e:
             logger.error(f"Erreur extraction exigences: {str(e)}")
+            logger.debug(f"LLM response causing error: {response[:300] if response else 'None'}")
             return []
 
     async def _analyze_requirement_with_llm(
@@ -496,7 +639,29 @@ Analyse avec ton expertise senior:
    - Variations d'interprétation
    - Exemples concrets d'implémentation
 
-Retourne une analyse JSON structurée et détaillée.
+IMPORTANT: Retourne UNIQUEMENT un JSON valide, sans texte explicatif avant ou après.
+
+Format JSON requis:
+{{
+    "business_impact": {{
+        "summary": "string",
+        "criticality": "low|medium|high|critical",
+        "affected_processes": ["string"]
+    }},
+    "implementation_complexity": {{
+        "level": "low|medium|high|very_high",
+        "technical_difficulty": "string",
+        "estimated_timeline": "string"
+    }},
+    "interdependencies": {{
+        "related_requirements": ["string"],
+        "prerequisites": ["string"]
+    }},
+    "practical_guidance": {{
+        "best_practices": ["string"],
+        "common_pitfalls": ["string"]
+    }}
+}}
 """
 
         response = await self.llm_client.generate_response(
@@ -509,12 +674,13 @@ Retourne une analyse JSON structurée et détaillée.
         )
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            ai_analysis = json.loads(json_content)
+            ai_analysis = extract_json_from_llm_response(response)
+            if not ai_analysis:
+                logger.warning("No analysis data extracted, using default structure")
+                ai_analysis = {"error": "No valid JSON found in LLM response"}
         except Exception as e:
             logger.error(f"Erreur analyse exigence: {str(e)}")
+            logger.debug(f"LLM response causing error: {response[:300] if response else 'None'}")
             ai_analysis = {"error": str(e)}
         
         # Créer l'objet FrameworkRequirement enrichi
@@ -577,7 +743,21 @@ Utilise ta connaissance experte des frameworks pour identifier:
 - Les spécificités réglementaires
 - Les évolutions entre versions
 
-Retourne un JSON avec tous les mappings identifiés.
+IMPORTANT: Retourne UNIQUEMENT un JSON valide, sans texte explicatif avant ou après.
+
+Format JSON requis:
+{{
+    "mappings": [
+        {{
+            "source_id": "string",
+            "target_id": "string", 
+            "mapping_type": "full|partial|conceptual|none",
+            "confidence": 0.0-1.0,
+            "rationale": "string",
+            "implementation_notes": "string"
+        }}
+    ]
+}}
 """
 
         response = await self.llm_client.generate_response(
@@ -590,13 +770,14 @@ Retourne un JSON avec tous les mappings identifiés.
         )
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            data = json.loads(json_content)
+            data = extract_json_from_llm_response(response)
             
             mappings = []
-            for mapping_data in data.get("mappings", []):
+            mapping_list = data.get("mappings", [])
+            if not mapping_list and "maps" in data:
+                mapping_list = data.get("maps", [])
+            
+            for mapping_data in mapping_list:
                 mapping = FrameworkMapping(
                     source_framework=source_framework,
                     target_framework=target_framework,
@@ -609,10 +790,12 @@ Retourne un JSON avec tous les mappings identifiés.
                 )
                 mappings.append(mapping)
             
+            logger.info(f"Successfully extracted {len(mappings)} mappings from LLM response")
             return mappings
             
         except Exception as e:
             logger.error(f"Erreur mapping cluster: {str(e)}")
+            logger.debug(f"LLM response causing error: {response[:300] if response else 'None'}")
             return []
 
     async def _identify_requirement_gap_with_llm(
@@ -651,7 +834,19 @@ Détermine:
 8. Risques de non-remédiation
 
 Si pas de gap significatif, retourne "no_gap".
-Sinon, retourne une analyse JSON détaillée.
+
+IMPORTANT: Si gap identifié, retourne UNIQUEMENT un JSON valide, sans texte explicatif avant ou après.
+
+Format JSON requis:
+{{
+    "gap_type": "complet|partiel|documentaire|operationnel|technique",
+    "severity": "critical|high|medium|low",
+    "description": "string",
+    "current_state": "string",
+    "target_state": "string", 
+    "estimated_effort": "low|medium|high|very_high",
+    "business_justification": "string"
+}}
 """
 
         response = await self.llm_client.generate_response(
@@ -667,10 +862,11 @@ Sinon, retourne une analyse JSON détaillée.
             return None
         
         try:
-            json_start = response.find("{")
-            json_end = response.rfind("}") + 1
-            json_content = response[json_start:json_end]
-            data = json.loads(json_content)
+            data = extract_json_from_llm_response(response)
+            
+            if not data:
+                logger.warning(f"No gap analysis data extracted for requirement {requirement.id}")
+                return None
             
             return ComplianceGap(
                 requirement_id=requirement.id,
@@ -687,6 +883,7 @@ Sinon, retourne une analyse JSON détaillée.
             
         except Exception as e:
             logger.error(f"Erreur analyse gap: {str(e)}")
+            logger.debug(f"LLM response causing error: {response[:300] if response else 'None'}")
             return None
 
     # Méthodes utilitaires

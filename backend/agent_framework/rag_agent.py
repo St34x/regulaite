@@ -256,6 +256,16 @@ class RAGAgent(Agent):
                             "Combining retrieved information with AI reasoning", progress=85)
         
         try:
+            # Log query expansion usage if available
+            if hasattr(self.retrieval_system, 'use_query_expansion') and self.retrieval_system.use_query_expansion:
+                if hasattr(self.retrieval_system, 'query_expander') and self.retrieval_system.query_expander:
+                    expansion_stats = self.retrieval_system.query_expander.get_expansion_statistics()
+                    self.logger.info(
+                        f"Query expansion stats: {expansion_stats['successful_expansions']}"
+                        f"/{expansion_stats['total_expansions']} successful, "
+                        f"avg ratio: {expansion_stats['average_expansion_ratio']:.2f}"
+                    )
+            
             # Import LLM integration
             from .integrations.llm_integration import get_llm_integration
             

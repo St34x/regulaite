@@ -48,7 +48,7 @@ class DocumentParser:
           unstructured_api_url: Optional[str] = None,
           unstructured_api_key: Optional[str] = None,
           embedding_dim: int = 384,  # Added embedding_dim
-          chunk_size: int = 1000,
+          chunk_size: int = 2048,
           chunk_overlap: int = 200,
           chunking_strategy: ChunkingStrategy = "token",
           extract_tables: bool = True,

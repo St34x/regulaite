@@ -6,11 +6,53 @@ from enum import Enum
 from pydantic import BaseModel, Field, model_validator
 import logging
 import uuid
+import json
 from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def make_json_serializable(obj):
+    """
+    Recursively converts an object into a JSON-serializable format.
+    This utility function handles Pydantic models, complex objects, and nested structures.
+    """
+    if obj is None:
+        return None
+    
+    try:
+        # Test if already serializable
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        pass
+    
+    # Handle different types
+    if hasattr(obj, 'model_dump'):
+        # Pydantic models - recursively process the dumped data
+        return make_json_serializable(obj.model_dump())
+    elif hasattr(obj, 'dict'):
+        # Other models with dict method
+        return make_json_serializable(obj.dict())
+    elif isinstance(obj, dict):
+        # Dictionary - recursively process values
+        result = {}
+        for key, value in obj.items():
+            result[str(key)] = make_json_serializable(value)
+        return result
+    elif isinstance(obj, (list, tuple)):
+        # List/tuple - recursively process items
+        return [make_json_serializable(item) for item in obj]
+    elif isinstance(obj, (str, int, float, bool)):
+        # Primitive types
+        return obj
+    elif isinstance(obj, datetime):
+        # DateTime objects
+        return obj.isoformat()
+    else:
+        # Convert to string as fallback
+        return str(obj)
 
 class IntentType(str, Enum):
     """Types of user query intents."""

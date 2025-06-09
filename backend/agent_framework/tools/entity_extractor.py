@@ -12,6 +12,7 @@ import json
 from datetime import datetime
 
 from ..integrations.llm_integration import get_llm_client
+from .framework_parser import extract_json_from_llm_response
 from ..tool_registry import tool
 
 logger = logging.getLogger(__name__)
@@ -292,32 +293,8 @@ Format JSON requis:
                 temperature=0.1
             )
             
-            # Enhanced JSON extraction with better error handling
-            if not response or not response.strip():
-                logger.warning("Empty response from LLM for control extraction")
-                return []
-            
-            # Log the raw response for debugging
-            logger.debug(f"LLM response for control extraction: {response[:200]}...")
-            
-            # Try to extract JSON with multiple strategies
-            json_content = None
-            
-            # Strategy 1: Direct JSON parsing if response looks like pure JSON
-            if response.strip().startswith('{') and response.strip().endswith('}'):
-                json_content = response.strip()
-            else:
-                # Strategy 2: Find JSON within the response
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_content = response[json_start:json_end]
-            
-            if not json_content:
-                logger.warning("No valid JSON structure found in LLM response for control extraction")
-                return []
-            
-            data = json.loads(json_content)
+            # Use robust JSON extraction
+            data = extract_json_from_llm_response(response)
             
             if not isinstance(data, dict):
                 logger.warning("LLM response is not a dictionary for control extraction")
@@ -416,32 +393,8 @@ Format JSON requis:
                 temperature=0.1
             )
             
-            # Enhanced JSON extraction with better error handling
-            if not response or not response.strip():
-                logger.warning("Empty response from LLM for risk extraction")
-                return []
-            
-            # Log the raw response for debugging
-            logger.debug(f"LLM response for risk extraction: {response[:200]}...")
-            
-            # Try to extract JSON with multiple strategies
-            json_content = None
-            
-            # Strategy 1: Direct JSON parsing if response looks like pure JSON
-            if response.strip().startswith('{') and response.strip().endswith('}'):
-                json_content = response.strip()
-            else:
-                # Strategy 2: Find JSON within the response
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_content = response[json_start:json_end]
-            
-            if not json_content:
-                logger.warning("No valid JSON structure found in LLM response for risk extraction")
-                return []
-            
-            data = json.loads(json_content)
+            # Use robust JSON extraction
+            data = extract_json_from_llm_response(response)
             
             if not isinstance(data, dict):
                 logger.warning("LLM response is not a dictionary for risk extraction")

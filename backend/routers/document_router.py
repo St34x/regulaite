@@ -597,7 +597,7 @@ async def get_document_config():
 
         # Convert types as needed
         result = DocumentConfig(
-            chunk_size=int(settings.get('chunk_size', 1000)),
+            chunk_size=int(settings.get('chunk_size', 2048)),
             chunk_overlap=int(settings.get('chunk_overlap', 200)),
             default_language=settings.get('default_language', 'fr'),
             auto_detect_language=settings.get('auto_detect_language', 'true').lower() == 'true',

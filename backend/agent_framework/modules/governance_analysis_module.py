@@ -10,7 +10,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
+from ..agent import Agent, AgentResponse, Query, QueryContext, make_json_serializable, IterationMode
 from ..integrations.llm_integration import LLMClient, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -1133,7 +1133,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS GOUVERNANCE: {len(governance_entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert Chief Governance Officer, analyse:
 
@@ -1322,7 +1322,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 TENDANCES IDENTIFIÉES: {len(trends.data_points) if trends else 0}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant que Chairman/CEO advisor avec 25+ ans d'expérience, fournis:
 
@@ -1420,7 +1420,7 @@ ENTITÉS GOUVERNANCE: {len(governance_entities)}
 RELATIONS IDENTIFIÉES: {len(cross_refs.relationships)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert Chief Governance Officer, analyse:
 

@@ -298,26 +298,51 @@ Aucun document n'a été trouvé correspondant aux critères de recherche.
 
 """
         
+        # Count full documents vs chunks
+        full_docs_count = sum(1 for r in results if r.get('has_full_content', False))
+        if full_docs_count > 0:
+            response += f"*Note: {full_docs_count} document(s) complet(s) récupéré(s) pour cette recherche.*\n\n"
+        
         for i, result in enumerate(results[:10], 1):  # Limiter à 10 résultats dans la réponse
             title = result.get('title', 'Document sans titre')
             doc_type = result.get('enriched_metadata', {}).get('type', 'Non classifié')
             framework = result.get('enriched_metadata', {}).get('framework', 'N/A')
             score = result.get('score', 0.0)
             doc_id = result.get('doc_id', '')
+            has_full_content = result.get('has_full_content', False)
             
             response += f"""### {i}. {title}
 
 - **Type :** {doc_type}
 - **Framework :** {framework}
 - **Score de pertinence :** {score:.2f}
-- **ID :** {doc_id}
-
-"""
+- **ID :** {doc_id}"""
             
-            # Ajouter un extrait si disponible
-            content_excerpt = result.get('content', '')[:200]
-            if content_excerpt:
-                response += f"**Extrait :** {content_excerpt}...\n\n"
+            # Indicate if full document content is available
+            if has_full_content:
+                content_size = result.get('content_size', 0)
+                chunk_count = result.get('chunk_count', 0)
+                response += f"""
+- **Contenu complet disponible :** Oui ({content_size:,} caractères, {chunk_count} sections)"""
+            
+            response += "\n\n"
+            
+            # Show content based on availability
+            if has_full_content:
+                # Show a longer excerpt from full content since we have it
+                full_content = result.get('full_content', '')
+                if full_content:
+                    # Show first 500 characters of full document
+                    content_preview = full_content[:500]
+                    response += f"**Aperçu du document complet :** {content_preview}...\n\n"
+                    
+                    # Add a note about full content availability
+                    response += "*[Document complet récupéré et disponible pour analyse approfondie]*\n\n"
+            else:
+                # Show regular chunk excerpt
+                content_excerpt = result.get('content', '')[:200]
+                if content_excerpt:
+                    response += f"**Extrait :** {content_excerpt}...\n\n"
         
         # Ajouter un résumé des critères utilisés
         response += f"""---
@@ -341,11 +366,13 @@ Aucun document n'a été trouvé correspondant aux critères de recherche.
         """
         return [
             "Recherche intelligente de documents",
+            "Récupération automatique de documents complets pour les résultats très pertinents",
             "Classification automatique de documents", 
             "Recherche sémantique via RAG",
             "Filtrage par type de document",
             "Filtrage par framework (ISO27001, RGPD, DORA, etc.)",
             "Analyse des relations entre documents",
             "Recherche par mots-clés et métadonnées",
-            "Scoring de pertinence"
+            "Scoring de pertinence",
+            "Reconstruction de documents à partir de chunks stockés"
         ] 

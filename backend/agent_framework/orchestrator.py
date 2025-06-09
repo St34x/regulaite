@@ -18,6 +18,40 @@ LLMClient = LLMIntegration
 
 logger = logging.getLogger(__name__)
 
+def _make_json_serializable(obj):
+    """
+    Recursively converts an object into a JSON-serializable format.
+    """
+    if obj is None:
+        return None
+    
+    try:
+        # Test if already serializable
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        pass
+    
+    # Handle different types
+    if hasattr(obj, 'model_dump'):
+        # Pydantic models
+        return obj.model_dump()
+    elif isinstance(obj, dict):
+        # Dictionary - recursively process values
+        result = {}
+        for key, value in obj.items():
+            result[key] = _make_json_serializable(value)
+        return result
+    elif isinstance(obj, (list, tuple)):
+        # List/tuple - recursively process items
+        return [_make_json_serializable(item) for item in obj]
+    elif isinstance(obj, (str, int, float, bool)):
+        # Primitive types
+        return obj
+    else:
+        # Convert to string as fallback
+        return str(obj)
+
 class IterationContext:
     """Contexte pour gérer les itérations d'analyse."""
     
@@ -564,7 +598,7 @@ Réponds au format JSON avec:
                         # Préparer le contexte enrichi pour l'agent spécialisé
                         context = QueryContext(
                             session_id=original_query.context.session_id,
-                            metadata={
+                            metadata=_make_json_serializable({
                                 "orchestrator_plan": analysis,
                                 "step_info": step,
                                 "previous_results": results["agent_results"],
@@ -575,7 +609,7 @@ Réponds au format JSON avec:
                                     "identified_gaps": iteration_context.context_gaps,
                                     "knowledge_progression": iteration_context.knowledge_gained
                                 }
-                            }
+                            })
                         )
                         
                         # Créer une requête enrichie pour l'agent avec contexte itératif
@@ -601,12 +635,12 @@ Réponds au format JSON avec:
                                 status=ActivityStatus.STARTED,
                                 level=LogLevel.INFO,
                                 message=f"Starting execution of {agent_id} agent",
-                                details={
+                                details=_make_json_serializable({
                                     "enriched_query": enriched_query.query_text,
                                     "query_parameters": enriched_query.parameters,
                                     "context_metadata": enriched_query.context.metadata if enriched_query.context else {},
                                     "step": f"agent_{agent_id}_execution_start"
-                                }
+                                })
                             )
 
                         # Exécuter l'agent spécialisé avec contexte itératif
@@ -706,7 +740,7 @@ REQUÊTE ORIGINALE: "{original_query}"
 ITÉRATION ACTUELLE: {iteration_context.iteration_count + 1}
 
 RÉSULTATS OBTENUS:
-{json.dumps(execution_results.get("agent_results", {}), indent=2, ensure_ascii=False)}
+{json.dumps(_make_json_serializable(execution_results.get("agent_results", {})), indent=2, ensure_ascii=False)}
 
 CONNAISSANCES ACQUISES PRÉCÉDEMMENT:
 {iteration_context.knowledge_gained}
@@ -890,7 +924,7 @@ Tu dois synthétiser les résultats d'une analyse GRC multi-agents avec {iterati
 DEMANDE ORIGINALE: "{original_query}"
 
 PROGRESSION ITÉRATIVE:
-{json.dumps(iteration_context.get_iteration_summary(), indent=2, ensure_ascii=False)}
+{json.dumps(_make_json_serializable(iteration_context.get_iteration_summary()), indent=2, ensure_ascii=False)}
 
 CONNAISSANCES ACQUISES:
 {chr(10).join(f"- {k}" for k in iteration_context.knowledge_gained)}
@@ -899,7 +933,7 @@ SOURCES CONSULTÉES PAR ITÉRATION:
 {self._format_sources_for_synthesis(sources_by_iteration)}
 
 TOUS LES RÉSULTATS:
-{json.dumps(iteration_context.previous_results, indent=2, ensure_ascii=False)}
+{json.dumps(_make_json_serializable(iteration_context.previous_results), indent=2, ensure_ascii=False)}
 
 Crée une synthèse complète et structurée en français qui:
 1. Répond directement à la demande utilisateur

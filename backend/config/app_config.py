@@ -62,7 +62,7 @@ class DocumentParserConfig(BaseModel):
     extract_tables: bool = Field(default=True)
     extract_metadata: bool = Field(default=True)
     extract_images: bool = Field(default=False)
-    chunk_size: int = Field(default=1000)
+    chunk_size: int = Field(default=2048)
     chunk_overlap: int = Field(default=200)
 
 class AppConfig(BaseModel):
@@ -128,7 +128,7 @@ def load_config() -> AppConfig:
             'extract_tables': os.getenv('EXTRACT_TABLES', 'true').lower() == 'true',
             'extract_metadata': os.getenv('EXTRACT_METADATA', 'true').lower() == 'true',
             'extract_images': os.getenv('EXTRACT_IMAGES', 'false').lower() == 'true',
-            'chunk_size': int(os.getenv('CHUNK_SIZE', '1000')),
+            'chunk_size': int(os.getenv('CHUNK_SIZE', '2048')),
             'chunk_overlap': int(os.getenv('CHUNK_OVERLAP', '200')),
         }
     }

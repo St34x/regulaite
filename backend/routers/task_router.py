@@ -447,7 +447,7 @@ class ParserSettings(BaseModel):
     extract_tables: bool = True
     extract_metadata: bool = True
     extract_images: bool = False
-    chunk_size: int = 1000
+    chunk_size: int = 2048
     chunk_overlap: int = 200
 
 class ParserConfigResponse(BaseModel):
@@ -473,7 +473,7 @@ async def get_parser_settings():
             extract_tables=True,
             extract_metadata=True,
             extract_images=False,
-            chunk_size=1000,
+            chunk_size=2048,
             chunk_overlap=200
         ),
         unstructured_cloud=ParserSettings(
@@ -482,7 +482,7 @@ async def get_parser_settings():
             extract_tables=True,
             extract_metadata=True,
             extract_images=True,
-            chunk_size=1000,
+            chunk_size=2048,
             chunk_overlap=200
         ),
         doctly=ParserSettings(
@@ -491,7 +491,7 @@ async def get_parser_settings():
             extract_tables=True,
             extract_metadata=True,
             extract_images=False,
-            chunk_size=1000,
+            chunk_size=2048,
             chunk_overlap=200
         ),
         llamaparse=ParserSettings(
@@ -500,7 +500,7 @@ async def get_parser_settings():
             extract_tables=True,
             extract_metadata=True,
             extract_images=False,
-            chunk_size=1000,
+            chunk_size=2048,
             chunk_overlap=200
         ),
         default_parser=os.getenv("DEFAULT_PARSER_TYPE", ParserType.UNSTRUCTURED.value)

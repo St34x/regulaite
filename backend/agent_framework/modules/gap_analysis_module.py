@@ -10,7 +10,7 @@ from enum import Enum
 from datetime import datetime, timedelta
 import json
 
-from ..agent import Agent, AgentResponse, Query, QueryContext, IterationMode
+from ..agent import Agent, AgentResponse, Query, QueryContext, make_json_serializable, IterationMode
 from ..integrations.llm_integration import LLMClient, get_llm_client
 from ..tools import (
     DocumentFinder, EntityExtractor, CrossReferenceTool, TemporalAnalyzer,
@@ -1092,7 +1092,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 ENTITÉS {framework_name}: {len(entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert {framework_name} senior, analyse:
 
@@ -1187,7 +1187,7 @@ DOCUMENTS ANALYSÉS: {len(relevant_docs)}
 GAPS/CONTRÔLES IDENTIFIÉS: {len(gap_entities)}
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en transformation et remédiation, conçois:
 
@@ -1304,7 +1304,7 @@ GAPS/RISQUES IDENTIFIÉS: {len(gap_entities)}
 TENDANCES HISTORIQUES: {len(trends.trend_analyses) if trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en priorisation stratégique, analyse:
 
@@ -1417,7 +1417,7 @@ ENTITÉS MATURITÉ: {len(maturity_entities)}
 TENDANCES MATURITÉ: {len(maturity_trends.trend_analyses) if maturity_trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert en évaluation de maturité organisationnelle, analyse:
 
@@ -1544,7 +1544,7 @@ RELATIONS CROISÉES: {len(cross_refs.relationships)}
 TENDANCES HISTORIQUES: {len(trends.trend_analyses) if trends else 0} points
 
 CONTEXTE ORGANISATIONNEL:
-{json.dumps(query.context.model_dump() if query.context else {}, indent=2)[:1000]}
+{json.dumps(make_json_serializable(query.context) if query.context else {}, indent=2)[:1000]}
 
 En tant qu'expert senior en analyse organisationnelle, effectue:
 

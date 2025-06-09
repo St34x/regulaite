@@ -80,15 +80,28 @@ class DocumentFinder:
     Outil de recherche intelligente et classification de documents GRC.
     """
     
-    def __init__(self, rag_system=None):
+    def __init__(self, rag_system=None, use_query_expansion=False):
         """
         Initialise le Document Finder.
         
         Args:
             rag_system: Système RAG pour la recherche sémantique
+            use_query_expansion: Whether to enable query expansion for enhanced search
         """
         self.rag_system = rag_system
         self.llm_client = get_llm_client()
+        self.use_query_expansion = use_query_expansion
+        
+        # Initialize query expansion if enabled
+        self.query_expander = None
+        if self.use_query_expansion:
+            try:
+                from .query_expansion import get_query_expander
+                self.query_expander = get_query_expander()
+                logger.info("DocumentFinder: Query expansion initialized")
+            except Exception as e:
+                logger.error(f"DocumentFinder: Failed to initialize query expansion: {str(e)}")
+                self.use_query_expansion = False
         
         # Cache des métadonnées de documents
         self.document_cache: Dict[str, DocumentMetadata] = {}
@@ -154,21 +167,58 @@ class DocumentFinder:
             
         logger.info(f"Recherche de documents: {query}")
         
-        # 1. Analyse intelligente de la requête
+        # 1. Query expansion if enabled
+        expanded_queries = [query]
+        expansion_info = None
+        
+        if self.use_query_expansion and self.query_expander:
+            try:
+                expansion_result = await self.query_expander.expand_query(
+                    query,
+                    strategy="balanced",
+                    max_expansions=5,
+                    include_frameworks=True
+                )
+                
+                if expansion_result.expanded_terms:
+                    # Create enhanced query with expansion terms
+                    enhanced_query = f"{query} {' '.join(expansion_result.expanded_terms[:3])}"
+                    expanded_queries.append(enhanced_query)
+                    
+                    expansion_info = {
+                        "expanded_terms": expansion_result.expanded_terms,
+                        "framework_terms": expansion_result.framework_terms,
+                        "confidence_score": expansion_result.confidence_score
+                    }
+                    
+                    logger.info(
+                        f"DocumentFinder: Query expanded with {len(expansion_result.expanded_terms)} terms, "
+                        f"confidence: {expansion_result.confidence_score:.2f}"
+                    )
+                    
+            except Exception as e:
+                logger.warning(f"DocumentFinder: Query expansion failed: {str(e)}")
+        
+        # 2. Analyse intelligente de la requête
         analyzed_query = await self._analyze_search_query(query)
         
-        # 2. Enrichir les critères avec l'analyse de la requête
+        # 3. Enrichir les critères avec l'analyse de la requête
         enriched_criteria = self._enrich_criteria(criteria, analyzed_query)
         
-        # 3. Recherche sémantique via RAG si disponible
+        # 4. Recherche sémantique via RAG si disponible  
         semantic_results = []
         if self.rag_system and enriched_criteria.semantic_search:
-            semantic_results = await self._semantic_search(query, limit)
+            for search_query in expanded_queries:
+                query_results = await self._semantic_search(search_query, limit)
+                semantic_results.extend(query_results)
+            
+            # Remove duplicates from semantic results
+            semantic_results = self._deduplicate_results(semantic_results)
         
-        # 4. Recherche par métadonnées et mots-clés
+        # 5. Recherche par métadonnées et mots-clés
         metadata_results = await self._metadata_search(enriched_criteria, limit)
         
-        # 5. Fusion et classement des résultats
+        # 6. Fusion et classement des résultats
         combined_results = await self._merge_and_rank_results(
             semantic_results, 
             metadata_results, 
@@ -176,10 +226,47 @@ class DocumentFinder:
             limit
         )
         
-        # 6. Enrichir avec classification automatique
+        # Add expansion information to results
+        if expansion_info and combined_results:
+            for result in combined_results:
+                if 'metadata' not in result:
+                    result['metadata'] = {}
+                result['metadata']['query_expansion'] = expansion_info
+        
+        # 7. Determine if full documents should be retrieved based on relevance and query intent
+        should_retrieve_full_docs = await self._should_retrieve_full_documents(query, analyzed_query, combined_results)
+        
+        # 8. Enrichir avec classification automatique et récupération de documents complets
         enriched_results = []
         for result in combined_results[:limit]:
             enriched_result = await self._enrich_result_metadata(result)
+            
+            # Retrieve full document content if this result is highly relevant
+            if should_retrieve_full_docs:
+                doc_id = result.get('doc_id', result.get('entity', ''))
+                score = result.get('score', result.get('final_score', 0))
+                
+                # Retrieve full document for high-scoring results
+                if doc_id and score > 0.7:  # High relevance threshold
+                    logger.info(f"Retrieving full document content for highly relevant document: {doc_id} (score: {score:.3f})")
+                    full_doc = await self.retrieve_full_document_content(doc_id)
+                    if full_doc:
+                        # Merge the full document content with the chunk result
+                        enriched_result.update({
+                            'full_content': full_doc['full_content'],
+                            'content_size': full_doc['content_size'],
+                            'chunk_count': full_doc['chunk_count'],
+                            'has_full_content': True,
+                            'retrieval_type': 'full_document_with_chunk'
+                        })
+                        logger.info(f"Added full content ({full_doc['content_size']} chars) to result for {doc_id}")
+                    else:
+                        enriched_result['has_full_content'] = False
+                else:
+                    enriched_result['has_full_content'] = False
+            else:
+                enriched_result['has_full_content'] = False
+            
             enriched_results.append(enriched_result)
             
         return enriched_results
@@ -378,6 +465,24 @@ Extrais les éléments suivants au format JSON:
         results.sort(key=lambda x: x["score"], reverse=True)
         
         return results[:limit]
+
+    def _deduplicate_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate results based on document ID and content."""
+        seen = set()
+        deduplicated = []
+        
+        for result in results:
+            # Create unique identifier
+            doc_id = result.get("doc_id", result.get("entity", ""))
+            content_hash = hash(str(result.get("content", result.get("text", "")))[:200])
+            unique_id = f"{doc_id}_{content_hash}"
+            
+            if unique_id not in seen:
+                seen.add(unique_id)
+                deduplicated.append(result)
+        
+        logger.debug(f"Deduplicated {len(results)} -> {len(deduplicated)} semantic results")
+        return deduplicated
 
     def _calculate_metadata_score(
         self, 
@@ -659,6 +764,241 @@ Réponds au format JSON avec les IDs des documents liés.
             return {rel: [] for rel in ["references", "implements", "supports", 
                                       "conflicts", "supersedes", "complements"]}
 
+    async def retrieve_full_document_content(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve the full content of a document by fetching all its chunks.
+        
+        Args:
+            doc_id: Document ID to retrieve full content for
+            
+        Returns:
+            Dictionary with full document content and metadata, or None if not found
+        """
+        try:
+            if not self.rag_system or not hasattr(self.rag_system, 'qdrant_client'):
+                logger.warning("RAG system or Qdrant client not available for full document retrieval")
+                return None
+            
+            logger.info(f"Retrieving full content for document: {doc_id}")
+            
+            # Search for all chunks of this document in Qdrant
+            import qdrant_client.models as qdrant_models
+            
+            # Get all chunks for this document
+            chunks_response = self.rag_system.qdrant_client.scroll(
+                collection_name=self.rag_system.collection_name,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="doc_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        ),
+                        # Only get regular chunks, not questions
+                        qdrant_models.FieldCondition(
+                            key="is_question",
+                            match=qdrant_models.MatchValue(value=False)
+                        )
+                    ]
+                ),
+                limit=10000,  # Large limit to get all chunks
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if not chunks_response or not chunks_response[0]:
+                logger.warning(f"No chunks found for document: {doc_id}")
+                return None
+            
+            chunks = chunks_response[0]
+            logger.info(f"Found {len(chunks)} chunks for document {doc_id}")
+            
+            # Sort chunks by their index to maintain order
+            sorted_chunks = sorted(chunks, key=lambda x: x.payload.get('chunk_index', 0))
+            
+            # Reconstruct full document content
+            full_text_parts = []
+            metadata = {}
+            total_size = 0
+            
+            for chunk in sorted_chunks:
+                payload = chunk.payload
+                
+                # Extract text content
+                chunk_text = payload.get('text', '')
+                if chunk_text:
+                    full_text_parts.append(chunk_text)
+                    total_size += len(chunk_text)
+                
+                # Collect metadata from the first chunk (should be consistent across chunks)
+                if not metadata:
+                    metadata.update(payload.get('metadata', {}))
+            
+            # Get document metadata from metadata collection
+            doc_metadata = await self._get_document_metadata(doc_id)
+            if doc_metadata:
+                metadata.update(doc_metadata)
+            
+            # Reconstruct full document
+            full_content = "\n\n".join(full_text_parts)
+            
+            result = {
+                'doc_id': doc_id,
+                'title': metadata.get('title', metadata.get('filename', f'Document {doc_id[:8]}')),
+                'filename': metadata.get('filename', metadata.get('original_filename', '')),
+                'full_content': full_content,
+                'content': full_content,  # For compatibility
+                'text': full_content,     # For compatibility
+                'chunk_count': len(sorted_chunks),
+                'content_size': total_size,
+                'metadata': metadata,
+                'file_type': metadata.get('file_type', ''),
+                'author': metadata.get('author', ''),
+                'created_at': metadata.get('created_at', ''),
+                'language': metadata.get('language', 'en'),
+                'category': metadata.get('category', 'Uncategorized'),
+                'retrieval_type': 'full_document'
+            }
+            
+            logger.info(f"Successfully retrieved full document: {doc_id} ({total_size} characters from {len(sorted_chunks)} chunks)")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error retrieving full document content for {doc_id}: {str(e)}")
+            return None
+    
+    async def _get_document_metadata(self, doc_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get document metadata from the metadata collection.
+        
+        Args:
+            doc_id: Document ID
+            
+        Returns:
+            Document metadata dictionary or None if not found
+        """
+        try:
+            if not hasattr(self.rag_system, 'metadata_collection_name'):
+                return None
+            
+            import qdrant_client.models as qdrant_models
+            
+            metadata_response = self.rag_system.qdrant_client.scroll(
+                collection_name=self.rag_system.metadata_collection_name,
+                scroll_filter=qdrant_models.Filter(
+                    must=[
+                        qdrant_models.FieldCondition(
+                            key="doc_id",
+                            match=qdrant_models.MatchValue(value=doc_id)
+                        )
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if metadata_response and metadata_response[0]:
+                return metadata_response[0][0].payload
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error getting metadata for document {doc_id}: {str(e)}")
+            return None
+
+    async def _should_retrieve_full_documents(
+        self, 
+        query: str, 
+        analyzed_query: Dict[str, Any], 
+        results: List[Dict[str, Any]]
+    ) -> bool:
+        """
+        Determine if full documents should be retrieved based on query characteristics and results.
+        
+        Args:
+            query: Original search query
+            analyzed_query: Analyzed query with intent and characteristics
+            results: Search results
+            
+        Returns:
+            True if full documents should be retrieved for highly relevant results
+        """
+        try:
+            # Don't retrieve full docs if no results
+            if not results:
+                return False
+            
+            # Query intent analysis
+            intent = analyzed_query.get('intent', 'search')
+            scope = analyzed_query.get('scope', 'general')
+            
+            # Check for high-intent indicators
+            high_intent_indicators = [
+                'compliance_check', 'gap_analysis', 'comprehensive'
+            ]
+            
+            # Check for specific document requests
+            specific_doc_keywords = [
+                'document complet', 'texte intégral', 'full document', 'entire document',
+                'document entier', 'contenu complet', 'version complète', 'politique complète',
+                'procédure complète', 'audit complet', 'rapport complet'
+            ]
+            
+            query_lower = query.lower()
+            
+            # Retrieve full docs if:
+            # 1. Explicit request for full/complete documents
+            if any(keyword in query_lower for keyword in specific_doc_keywords):
+                logger.info("Full document retrieval triggered by explicit request")
+                return True
+            
+            # 2. High-intent analysis tasks
+            if intent in high_intent_indicators or scope == 'comprehensive':
+                logger.info(f"Full document retrieval triggered by intent: {intent}, scope: {scope}")
+                return True
+            
+            # 3. Few but highly relevant results (suggests specific document need)
+            if len(results) <= 3:
+                high_score_results = [r for r in results if r.get('score', r.get('final_score', 0)) > 0.8]
+                if high_score_results:
+                    logger.info(f"Full document retrieval triggered by {len(high_score_results)} high-scoring results with limited total results")
+                    return True
+            
+            # 4. Multiple results from same document with high scores (user likely needs the full document)
+            doc_scores = {}
+            for result in results:
+                doc_id = result.get('doc_id', result.get('entity', ''))
+                score = result.get('score', result.get('final_score', 0))
+                if doc_id:
+                    if doc_id not in doc_scores:
+                        doc_scores[doc_id] = []
+                    doc_scores[doc_id].append(score)
+            
+            for doc_id, scores in doc_scores.items():
+                if len(scores) >= 2 and max(scores) > 0.75:  # Multiple chunks from same doc with high score
+                    logger.info(f"Full document retrieval triggered by multiple high-scoring chunks from document: {doc_id}")
+                    return True
+            
+            # 5. Query contains framework-specific terms (often need full context)
+            framework_keywords = [
+                'iso27001', 'iso 27001', 'rgpd', 'gdpr', 'dora', 'sox', 'pci', 'nist',
+                'conformité', 'compliance', 'audit', 'contrôle', 'mesure de sécurité'
+            ]
+            
+            if any(keyword in query_lower for keyword in framework_keywords):
+                avg_score = sum(r.get('score', r.get('final_score', 0)) for r in results) / len(results)
+                if avg_score > 0.6:  # Good average relevance with framework context
+                    logger.info("Full document retrieval triggered by framework context with good relevance")
+                    return True
+            
+            # Default: don't retrieve full documents
+            logger.debug("Full document retrieval not triggered - returning chunks only")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error determining if full documents should be retrieved: {str(e)}")
+            return False
+
 
 # Fonction outil pour l'utilisation par les agents
 async def document_finder_tool(
@@ -733,11 +1073,14 @@ async def document_finder_tool(
 # Fonction d'initialisation du Document Finder global
 _global_document_finder = None
 
-def get_document_finder(rag_system=None):
+def get_document_finder(rag_system=None, use_query_expansion=False):
     """Récupère l'instance globale du Document Finder."""
     global _global_document_finder
     
     if _global_document_finder is None:
-        _global_document_finder = DocumentFinder(rag_system=rag_system)
+        _global_document_finder = DocumentFinder(
+            rag_system=rag_system,
+            use_query_expansion=use_query_expansion
+        )
     
     return _global_document_finder 

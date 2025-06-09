@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @tool(
     id="query_reformulation",
     name="Query Reformulation",
-    description="Reformulate a query to improve retrieval results",
+    description="Reformulate a query to improve retrieval results using GRC-specific expansion",
     tags=["search", "retrieval", "query"],
     requires_context=False
 )
@@ -25,19 +25,52 @@ async def query_reformulation(query: str, strategy: str = "expand") -> Dict[str,
     
     Args:
         query: The original query
-        strategy: The reformulation strategy (expand, specify, simplify)
+        strategy: The reformulation strategy (expand, specify, simplify, grc_expand)
         
     Returns:
         Dictionary with reformulated queries
     """
     logger.info(f"Reformulating query: {query} using strategy: {strategy}")
     
-    # Simple implementations of reformulation strategies
     reformulations = []
+    expansion_info = None
     
-    if strategy == "expand":
+    if strategy == "grc_expand":
+        # Use GRC-specific query expansion
+        try:
+            from .query_expansion import get_query_expander
+            query_expander = get_query_expander()
+            
+            expansion_result = await query_expander.expand_query(
+                query,
+                strategy="comprehensive",
+                max_expansions=8,
+                include_frameworks=True
+            )
+            
+            if expansion_result.expanded_terms:
+                # Create reformulated queries with expanded terms
+                reformulations = [
+                    query,
+                    f"{query} {' '.join(expansion_result.expanded_terms[:3])}",
+                    f"{query} {' '.join(expansion_result.expanded_terms[3:6])}",
+                    " ".join(expansion_result.expanded_terms[:5])
+                ]
+                
+                expansion_info = {
+                    "expanded_terms": expansion_result.expanded_terms,
+                    "framework_terms": expansion_result.framework_terms,
+                    "confidence_score": expansion_result.confidence_score
+                }
+            else:
+                reformulations = [query]
+                
+        except Exception as e:
+            logger.error(f"GRC expansion failed: {str(e)}")
+            reformulations = [query]
+            
+    elif strategy == "expand":
         # Add synonyms or related terms
-        # This is a simple implementation - would be more sophisticated in practice
         reformulations = [
             query,
             f"information about {query}",
@@ -67,11 +100,16 @@ async def query_reformulation(query: str, strategy: str = "expand") -> Dict[str,
         # Default strategy
         reformulations = [query]
     
-    return {
+    result = {
         "original_query": query,
         "strategy": strategy,
         "reformulations": reformulations
     }
+    
+    if expansion_info:
+        result["expansion_info"] = expansion_info
+    
+    return result
 
 @tool(
     id="filter_search",
